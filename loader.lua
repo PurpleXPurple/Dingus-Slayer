@@ -131,10 +131,11 @@ local MANIFEST = {
     { name = "detect",     slot = "Detect",   requires = { "utils", "lists", "config" } },
     { name = "scanners",   slot = "Scan",     requires = { "utils", "lists" } },
     { name = "spoofers",   slot = "Spoof",    requires = { "utils", "config" } },
-    { name = "attack",     slot = "Atk",      requires = { "utils", "detect", "lists", "spoofers", "config" } },
+    { name = "fly",        slot = "FlyMod",   requires = { "utils", "config" } },
+    { name = "attack",     slot = "Atk",      requires = { "utils", "detect", "lists", "spoofers", "config", "fly" } },
     { name = "optimizers", slot = "Opt",      requires = { "utils", "config" } },
     { name = "gui",        slot = "Gui",      requires = { "utils", "config" } },
-    { name = "main",       slot = nil,        requires = { "utils", "detect", "attack", "gui", "optimizers", "scanners", "spoofers", "lists", "config" } },
+    { name = "main",       slot = nil,        requires = { "utils", "detect", "attack", "gui", "optimizers", "scanners", "spoofers", "lists", "config", "fly" } },
 }
 
 --============================================================
