@@ -1,6 +1,5 @@
 --[[
-    Dingus-Slayer · main.lua
-    One loop for everything. Auto-quest reads BossHunts, picks available, walks to boss.
+    Dingus-Slayer · main.lua v21
 ]]--
 
 local M = {}
@@ -9,6 +8,7 @@ function M.boot(Ctx)
     local U = Ctx.Util
     local Cfg = Ctx.Cfg
     local St = Ctx.St
+    local Lists = Ctx.Lists
 
     --============================================================
     -- STATE
@@ -21,7 +21,6 @@ function M.boot(Ctx)
     St.gsp = true
     St.crw = true
     St.stunPun = true
-    St.hvr = false  -- NO HOVER by default now
 
     St.cbtS = "IDLE"
     St.inp = 0
@@ -37,6 +36,7 @@ function M.boot(Ctx)
     St.lHp = 0
     St.lHpT = 0
     St.lCkC = 0
+    St.lMove = 0
 
     St.kll = 0
     St.bKll = 0
@@ -70,6 +70,35 @@ function M.boot(Ctx)
     St.cPrch = false
     St.questTarget = nil
     St.playerLevel = 0
+    St.huntCount = 0
+
+    --============================================================
+    -- SCRUB LEFTOVER BODY MOVERS
+    --============================================================
+    local function scrubMovers()
+        local r = U.hrp()
+        if not r then return end
+        local n = 0
+        for _, c in ipairs(r:GetChildren()) do
+            if c:IsA("BodyPosition") or c:IsA("BodyVelocity")
+                or c:IsA("BodyGyro") or c:IsA("BodyForce")
+                or c:IsA("LinearVelocity") or c:IsA("AlignOrientation") then
+                c:Destroy()
+                n = n + 1
+            end
+        end
+        if n > 0 then print("[Dingus] scrubbed " .. n .. " body movers") end
+        local h = U.hum()
+        if h then
+            h.PlatformStand = false
+            h.WalkSpeed = 16
+        end
+    end
+    scrubMovers()
+    U.Lp.CharacterAdded:Connect(function()
+        task.wait(1)
+        scrubMovers()
+    end)
 
     --============================================================
     -- SUBSYSTEM INIT
@@ -90,24 +119,21 @@ function M.boot(Ctx)
     end
 
     --============================================================
-    -- AUTO-QUEST
+    -- QUEST SYSTEM
     --============================================================
-    local Quest = {
-        lastCheck = 0,
-        currentTarget = nil,
-    }
+    local Quest = { lastCheck = 0, hunts = {} }
     Ctx.Quest = Quest
 
     function Quest.readLevel()
-        -- Try multiple sources for player level
         local hf = workspace:FindFirstChild("Humanoids")
         local me = hf and hf:FindFirstChild(U.Lp.Name)
         if me then
             local prog = me:FindFirstChild("Progression")
             local lvl = prog and prog:FindFirstChild("Level")
-            if lvl and lvl:IsA("NumberValue") then return lvl.Value end
+            if lvl and (lvl:IsA("NumberValue") or lvl:IsA("IntValue")) then
+                return lvl.Value
+            end
         end
-        -- Fallback: try Player_Service
         local rs = game:GetService("ReplicatedStorage")
         local ps = rs:FindFirstChild("Player_Service")
         local data = ps and ps:FindFirstChild("Data")
@@ -126,34 +152,30 @@ function M.boot(Ctx)
         local rs = game:GetService("ReplicatedStorage")
         local hunts = rs:FindFirstChild("BossHunts")
         if not hunts then return {} end
-        local list = {}
+        local out = {}
         for _, cfg in ipairs(hunts:GetChildren()) do
             if cfg:IsA("Configuration") then
-                local name = cfg.Name
                 local side = cfg:FindFirstChild("Side")
                 local quest = cfg:FindFirstChild("Quest")
-                table.insert(list, {
-                    id = name,
+                table.insert(out, {
+                    id = cfg.Name,
                     side = side and tostring(side.Value) or "?",
                     quest = quest and tostring(quest.Value) or "?",
                 })
             end
         end
-        return list
+        table.sort(out, function(a, b)
+            return (tonumber(a.id) or 0) > (tonumber(b.id) or 0)
+        end)
+        return out
     end
 
     function Quest.pickQuest(level, hunts)
-        -- Prefer higher ID hunts (later = higher level in this game)
-        table.sort(hunts, function(a, b)
-            local ia = tonumber(a.id) or 0
-            local ib = tonumber(b.id) or 0
-            return ia > ib
-        end)
         for i = 1, #hunts do
             local h = hunts[i]
             local id = tonumber(h.id) or 0
-            -- Only pick quests we're roughly qualified for
-            if id <= math.max(1, math.floor(level / 20)) then
+            local threshold = math.max(1, math.floor(level / 20))
+            if id <= threshold then
                 return h
             end
         end
@@ -167,22 +189,25 @@ function M.boot(Ctx)
 
         St.playerLevel = Quest.readLevel()
         local hunts = Quest.findBossHunts()
+        St.huntCount = #hunts
+        Quest.hunts = hunts
+
         if #hunts == 0 then
-            print("[Dingus][Quest] no BossHunts configs found")
+            print("[Dingus][Quest] no BossHunts")
             return
         end
+
         local pick = Quest.pickQuest(St.playerLevel, hunts)
         if pick then
-            print(string.format("[Dingus][Quest] available: #%s %s (side=%s)",
-                pick.id, pick.quest, pick.side))
-            -- Extract target name from "Eliminate X"
             local target = pick.quest:match("Eliminate%s+(.+)") or pick.quest
             St.questTarget = target
+            print(string.format("[Dingus][Quest] #%s → %s (side=%s)",
+                pick.id, target, pick.side))
         end
     end
 
     --============================================================
-    -- CROW (simplified)
+    -- CROW
     --============================================================
     local Crow = { last = 0, accepts = 0 }
     Ctx.Crow = Crow
@@ -201,7 +226,9 @@ function M.boot(Ctx)
         if not c then return end
         local equipped = false
         for _, x in ipairs(c:GetChildren()) do
-            if x:IsA("Tool") and Ctx.Lists.isCrow(x.Name) then equipped = true; break end
+            if x:IsA("Tool") and Lists.isCrow(x.Name) then
+                equipped = true; break
+            end
         end
         if not equipped and tool:IsA("Tool") then
             local h = U.hum()
@@ -218,7 +245,6 @@ function M.boot(Ctx)
             model = Ctx.Scan.findCrowModel()
         end
         St.cPrch = (model ~= nil)
-
         if not St.cPrch then return end
 
         local menu = Ctx.Scan.findCrowMenu()
@@ -231,7 +257,7 @@ function M.boot(Ctx)
             pcall(function() menu:Activate() end)
             Crow.accepts = Crow.accepts + 1
             St.cQs = Crow.accepts
-            print("[Dingus][Crow] quest accepted #" .. Crow.accepts)
+            print("[Dingus][Crow] accepted #" .. Crow.accepts)
             task.wait(0.8)
         end
     end
@@ -242,76 +268,57 @@ function M.boot(Ctx)
     task.spawn(function()
         task.wait(0.3)
         St.inp = U.detectInput()
-        print("[Dingus] input method " .. St.inp)
+        print("[Dingus] input " .. St.inp)
 
         task.wait(0.2)
         local b = Ctx.Detect.scanBosses()
-        print("[Dingus] " .. #b .. " bosses in workspace")
+        print("[Dingus] " .. #b .. " bosses")
+        for i = 1, math.min(#b, 8) do
+            print(string.format("  · %s @%.0f", b[i].ch.Name, b[i].d))
+        end
 
         task.wait(0.1)
         St.playerLevel = Quest.readLevel()
-        print("[Dingus] player level " .. St.playerLevel)
+        print("[Dingus] level " .. St.playerLevel)
 
-        -- Quest scan
         local hunts = Quest.findBossHunts()
+        St.huntCount = #hunts
         print("[Dingus] " .. #hunts .. " quest configs")
+        for i = 1, math.min(#hunts, 10) do
+            print(string.format("  #%s: %s", hunts[i].id, hunts[i].quest))
+        end
 
         task.wait(0.1)
         pcall(function() Ctx.Opt.stripLighting() end)
 
         St.boot = true
-        print("[Dingus] ready · press RightShift for UI")
-
-        pcall(function()
-            U.notify("Dingus-Slayer", "loaded", 5)
-        end)
+        print("[Dingus] ready · RightShift to toggle UI")
+        pcall(function() U.notify("Dingus-Slayer", "loaded", 5) end)
     end)
 
     --============================================================
-    -- MAIN LOOP (single)
+    -- MAIN LOOP
     --============================================================
     task.spawn(function()
-        local tickCount = 0
-        local lastFpsUpdate = 0
-
+        local t = 0
         while St.run do
             if St.boot then
-                tickCount = tickCount + 1
-
-                -- Every tick (20Hz): combat
+                t = t + 1
                 pcall(Ctx.Atk.combatTick)
 
-                -- Every 10 ticks (2Hz): threats
-                if tickCount % 10 == 0 then
-                    pcall(Ctx.Detect.updateThreats)
-                end
+                if t % 10 == 0 then pcall(Ctx.Detect.updateThreats) end
+                if t % 5 == 0 then pcall(Ctx.Spoof.tick) end
+                if t % 40 == 0 then pcall(crowCycle) end
+                if t % 60 == 0 then pcall(Quest.doCycle) end
+                if t % 200 == 0 then pcall(Ctx.Opt.gc) end
 
-                -- Every 5 ticks (4Hz): spoofers
-                if tickCount % 5 == 0 then
-                    pcall(Ctx.Spoof.tick)
-                end
-
-                -- Every 40 ticks (0.5Hz): crow + quest
-                if tickCount % 40 == 0 then
-                    pcall(crowCycle)
-                end
-
-                if tickCount % 60 == 0 then
-                    pcall(Quest.doCycle)
-                end
-
-                -- Every 200 ticks: GC
-                if tickCount % 200 == 0 then
-                    pcall(Ctx.Opt.gc)
-                end
-
-                tickCount = tickCount % 10000
+                t = t % 10000
             end
             task.wait(0.05)
         end
     end)
 
-    -- FPS tracker (independent, cheap)
+    -- FPS
     game:GetService("RunService").RenderStepped:Connect(function(dt)
         if dt > 0 and dt < 1 then
             table.insert(St.fs, dt)
@@ -331,10 +338,11 @@ function M.boot(Ctx)
         St.mxH = 0
         St.uGs = false
         if St.hvB then pcall(function() St.hvB:Destroy() end); St.hvB = nil end
-        print("[Dingus] respawned")
+        scrubMovers()
+        print("[Dingus] respawn")
     end)
 
-    -- UI toggle key
+    -- UI toggle
     game:GetService("UserInputService").InputBegan:Connect(function(input, gp)
         if gp then return end
         if input.KeyCode == Enum.KeyCode.RightShift then
@@ -344,7 +352,6 @@ function M.boot(Ctx)
         end
     end)
 
-    -- Unload
     Ctx.Unload = function()
         St.run = false
         if St.hvB then pcall(function() St.hvB:Destroy() end) end
