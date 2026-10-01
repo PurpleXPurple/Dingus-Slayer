@@ -1,9 +1,3 @@
---[[
-    Dingus-Slayer · gui.lua v25
-    Dual-frame architecture: full window + minimized pill.
-    TweenService transitions. Draggable pill persists position.
-]]--
-
 local G = {}
 
 function G.init(Ctx)
@@ -25,15 +19,9 @@ function G.init(Ctx)
     gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     gui.Parent = parent
 
-    --============================================================
-    -- WINDOW CONSTANTS
-    --============================================================
     local WIN_W, WIN_H = 520, 500
     local PILL_W, PILL_H = 150, 34
 
-    --============================================================
-    -- COLOR PALETTE
-    --============================================================
     local CLR = {
         bg        = Color3.fromRGB(14, 14, 18),
         bgHeader  = Color3.fromRGB(30, 18, 16),
@@ -48,11 +36,10 @@ function G.init(Ctx)
         blue      = Color3.fromRGB(60, 130, 200),
         text      = Color3.fromRGB(230, 230, 240),
         textDim   = Color3.fromRGB(160, 170, 190),
-        textMuted = Color3.fromRGB(120, 130, 150),
     }
 
     --============================================================
-    -- FULL WINDOW FRAME
+    -- WINDOW
     --============================================================
     local win = Instance.new("Frame")
     win.Name = "Window"
@@ -64,17 +51,13 @@ function G.init(Ctx)
     win.Draggable = true
     win.Parent = gui
     Instance.new("UICorner", win).CornerRadius = UDim.new(0, 10)
-
     local winStroke = Instance.new("UIStroke", win)
     winStroke.Color = CLR.border
     winStroke.Thickness = 1
     winStroke.Transparency = 0.3
 
-    --============================================================
-    -- TITLE BAR
-    --============================================================
+    -- Title bar
     local titleBar = Instance.new("Frame")
-    titleBar.Name = "TitleBar"
     titleBar.Size = UDim2.new(1, 0, 0, 34)
     titleBar.BackgroundColor3 = CLR.bgHeader
     titleBar.BorderSizePixel = 0
@@ -107,9 +90,7 @@ function G.init(Ctx)
     titleLbl.TextSize = 13
     titleLbl.Parent = titleBar
 
-    --============================================================
-    -- WINDOW CONTROLS (minimize, close)
-    --============================================================
+    -- Control buttons
     local function mkCtrlBtn(txt, xOff, bgColor, hoverColor)
         local b = Instance.new("TextButton")
         b.Size = UDim2.new(0, 22, 0, 22)
@@ -134,11 +115,8 @@ function G.init(Ctx)
     local closeBtn = mkCtrlBtn("×", -30, CLR.red, Color3.fromRGB(240, 90, 100))
     local minBtn = mkCtrlBtn("–", -56, Color3.fromRGB(60, 60, 75), Color3.fromRGB(90, 90, 110))
 
-    --============================================================
-    -- TAB BAR
-    --============================================================
+    -- Tab bar
     local tabBar = Instance.new("Frame")
-    tabBar.Name = "TabBar"
     tabBar.Size = UDim2.new(1, -16, 0, 30)
     tabBar.Position = UDim2.new(0, 8, 0, 42)
     tabBar.BackgroundTransparency = 1
@@ -147,11 +125,8 @@ function G.init(Ctx)
     tLay.FillDirection = Enum.FillDirection.Horizontal
     tLay.Padding = UDim.new(0, 4)
 
-    --============================================================
-    -- CONTENT AREA
-    --============================================================
+    -- Content
     local content = Instance.new("Frame")
-    content.Name = "Content"
     content.Size = UDim2.new(1, -16, 1, -140)
     content.Position = UDim2.new(0, 8, 0, 80)
     content.BackgroundColor3 = CLR.bgPanel
@@ -159,11 +134,8 @@ function G.init(Ctx)
     content.Parent = win
     Instance.new("UICorner", content).CornerRadius = UDim.new(0, 8)
 
-    --============================================================
-    -- STATUS BAR
-    --============================================================
+    -- Status bar
     local statusBar = Instance.new("TextLabel")
-    statusBar.Name = "Status"
     statusBar.Size = UDim2.new(1, -16, 0, 44)
     statusBar.Position = UDim2.new(0, 8, 1, -52)
     statusBar.BackgroundColor3 = CLR.bgPanel
@@ -179,7 +151,7 @@ function G.init(Ctx)
     Instance.new("UICorner", statusBar).CornerRadius = UDim.new(0, 8)
 
     --============================================================
-    -- MINIMIZED PILL (separate frame)
+    -- MINIMIZED PILL
     --============================================================
     local pill = Instance.new("Frame")
     pill.Name = "MinimizedPill"
@@ -216,7 +188,6 @@ function G.init(Ctx)
     pillLbl.TextSize = 12
     pillLbl.Parent = pill
 
-    -- Pill hover glow
     local pillBtn = Instance.new("TextButton")
     pillBtn.Size = UDim2.new(1, 0, 1, 0)
     pillBtn.BackgroundTransparency = 1
@@ -224,15 +195,13 @@ function G.init(Ctx)
     pillBtn.Parent = pill
     pillBtn.MouseEnter:Connect(function()
         Tween:Create(pillStroke, TweenInfo.new(0.15), { Color = Color3.fromRGB(240, 120, 100) }):Play()
-        Tween:Create(pillDot, TweenInfo.new(0.15), { BackgroundColor3 = Color3.fromRGB(255, 120, 100) }):Play()
     end)
     pillBtn.MouseLeave:Connect(function()
         Tween:Create(pillStroke, TweenInfo.new(0.15), { Color = CLR.border }):Play()
-        Tween:Create(pillDot, TweenInfo.new(0.15), { BackgroundColor3 = CLR.accent }):Play()
     end)
 
     --============================================================
-    -- MINIMIZE / RESTORE LOGIC
+    -- MINIMIZE / RESTORE
     --============================================================
     local TWEEN_IN = TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
     local TWEEN_OUT = TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.In)
@@ -243,11 +212,8 @@ function G.init(Ctx)
     local function minimize()
         if minimized then return end
         minimized = true
-
-        -- Save current window position
         winPos = win.Position
 
-        -- Animate window out
         local tOut = Tween:Create(win, TWEEN_OUT, {
             Position = UDim2.new(winPos.X.Scale, winPos.X.Offset, winPos.Y.Scale, winPos.Y.Offset + 40),
             BackgroundTransparency = 1,
@@ -259,7 +225,6 @@ function G.init(Ctx)
             win.BackgroundTransparency = 0
         end)
 
-        -- Fade in pill after window starts moving
         task.wait(0.15)
         pill.Visible = true
         pill.BackgroundTransparency = 1
@@ -276,7 +241,6 @@ function G.init(Ctx)
         if not minimized then return end
         minimized = false
 
-        -- Fade out pill
         Tween:Create(pill, TweenInfo.new(0.15), { BackgroundTransparency = 1 }):Play()
         Tween:Create(pillStroke, TweenInfo.new(0.15), { Transparency = 1 }):Play()
         Tween:Create(pillDot, TweenInfo.new(0.15), { BackgroundTransparency = 1 }):Play()
@@ -285,7 +249,6 @@ function G.init(Ctx)
         task.wait(0.12)
         pill.Visible = false
 
-        -- Show window with slide-in
         win.Visible = true
         win.Position = UDim2.new(winPos.X.Scale, winPos.X.Offset, winPos.Y.Scale, winPos.Y.Offset + 40)
         win.BackgroundTransparency = 1
@@ -325,11 +288,8 @@ function G.init(Ctx)
         return p
     end
 
-    local activeTabButton = nil
-
     local function mkTab(name, order)
         local b = Instance.new("TextButton")
-        b.Name = "Tab_" .. name
         b.Size = UDim2.new(0, 86, 1, 0)
         b.BackgroundColor3 = CLR.bgPanel
         b.BorderSizePixel = 0
@@ -357,7 +317,6 @@ function G.init(Ctx)
                     end
                 end
             end
-            activeTabButton = b
         end)
         return b
     end
@@ -426,25 +385,23 @@ function G.init(Ctx)
         b.Parent = page
         Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
 
-        local baseColor = color or CLR.blue
+        local base = color or CLR.blue
         b.MouseEnter:Connect(function()
             Tween:Create(b, TweenInfo.new(0.15), {
                 BackgroundColor3 = Color3.new(
-                    math.min(baseColor.R + 0.1, 1),
-                    math.min(baseColor.G + 0.1, 1),
-                    math.min(baseColor.B + 0.1, 1)
+                    math.min(base.R + 0.1, 1),
+                    math.min(base.G + 0.1, 1),
+                    math.min(base.B + 0.1, 1)
                 ),
             }):Play()
         end)
         b.MouseLeave:Connect(function()
-            Tween:Create(b, TweenInfo.new(0.15), { BackgroundColor3 = baseColor }):Play()
+            Tween:Create(b, TweenInfo.new(0.15), { BackgroundColor3 = base }):Play()
         end)
 
         b.MouseButton1Click:Connect(function()
             local ok, err = pcall(cb)
-            if not ok then
-                print("[Dingus][btn] " .. label .. ": " .. tostring(err))
-            end
+            if not ok then print("[Dingus][btn] " .. label .. ": " .. tostring(err)) end
         end)
         return b
     end
@@ -504,14 +461,10 @@ function G.init(Ctx)
 
         local drag = false
         hit.InputBegan:Connect(function(i)
-            if i.UserInputType == Enum.UserInputType.MouseButton1 then
-                drag = true
-            end
+            if i.UserInputType == Enum.UserInputType.MouseButton1 then drag = true end
         end)
         hit.InputEnded:Connect(function(i)
-            if i.UserInputType == Enum.UserInputType.MouseButton1 then
-                drag = false
-            end
+            if i.UserInputType == Enum.UserInputType.MouseButton1 then drag = false end
         end)
 
         UIS.InputChanged:Connect(function(i)
@@ -553,22 +506,24 @@ function G.init(Ctx)
     --============================================================
     local pMain = mkPage("Main")
     local mainInfo = mkInfo(pMain, "Main", 150)
-    mkButton(pMain, "Main", "Toggle Combat", function()
-        St.cbt = not St.cbt
-        print("[Dingus] combat " .. (St.cbt and "ON" or "OFF"))
+    mkButton(pMain, "Main", "Start Combat", function()
+        St.cbt = true
+        print("[Dingus] combat on")
     end, CLR.accent)
-    mkButton(pMain, "Main", "Toggle Horse Flight", function()
-        if Ctx.Fly and Ctx.Fly.toggle then Ctx.Fly.toggle() end
-    end, Color3.fromRGB(130, 80, 180))
-    mkButton(pMain, "Main", "Force Boss Scan", function()
+    mkButton(pMain, "Main", "Stop Combat", function()
+        St.cbt = false
+        if Ctx.Atk and Ctx.Atk.stopHover then Ctx.Atk.stopHover() end
+        print("[Dingus] combat off")
+    end, CLR.red)
+    mkButton(pMain, "Main", "Scan for Bosses", function()
         St.lScn = 0
         local l = Ctx.Detect.scanBosses()
-        print("[Dingus] scan: " .. #l .. " bosses")
+        print("[Dingus] found " .. #l .. " bosses")
     end, CLR.blue)
     mkButton(pMain, "Main", "Run Quest Cycle", function()
         if Ctx.Quest and Ctx.Quest.doCycle then Ctx.Quest.doCycle() end
     end, Color3.fromRGB(180, 120, 60))
-    mkButton(pMain, "Main", "Clear Body Movers", function()
+    mkButton(pMain, "Main", "Reset Movers", function()
         local r = U.hrp()
         if r then
             for _, c in ipairs(r:GetChildren()) do
@@ -578,12 +533,17 @@ function G.init(Ctx)
                     c:Destroy()
                 end
             end
-            print("[Dingus] cleared movers")
+            if Ctx.Atk and Ctx.Atk.stopHover then Ctx.Atk.stopHover() end
+            print("[Dingus] movers reset")
         end
     end, Color3.fromRGB(150, 80, 80))
 
     local pCombat = mkPage("Combat")
     local combatInfo = mkInfo(pCombat, "Combat", 130)
+    mkToggle(pCombat, "Combat", "Hover Behind Boss", "hover", function(v)
+        Cfg.HoverEnabled = v
+        if not v and Ctx.Atk and Ctx.Atk.stopHover then Ctx.Atk.stopHover() end
+    end)
     mkToggle(pCombat, "Combat", "Auto Skill Rotation", "skl")
     mkToggle(pCombat, "Combat", "Auto Equip Weapon", "eqp")
     mkToggle(pCombat, "Combat", "Auto Retreat", "rtr")
@@ -592,27 +552,18 @@ function G.init(Ctx)
     mkSlider(pCombat, "Combat", "Attack Range", 6, 20,
         function() return Cfg.AtkRange end,
         function(v) Cfg.AtkRange = v end)
-    mkSlider(pCombat, "Combat", "Attack Interval", 0.30, 0.90,
-        function() return St.aiI end,
-        function(v) St.aiI = v end, "%.2f")
+    mkSlider(pCombat, "Combat", "Hover Distance", 4, 15,
+        function() return Cfg.HoverDistance end,
+        function(v) Cfg.HoverDistance = v end)
+    mkSlider(pCombat, "Combat", "Hover Height", 0, 8,
+        function() return Cfg.HoverHeight end,
+        function(v) Cfg.HoverHeight = v end)
     mkSlider(pCombat, "Combat", "Run Speed", 16, 48,
         function() return Cfg.RunSpeed end,
         function(v) Cfg.RunSpeed = v end)
     mkSlider(pCombat, "Combat", "Retreat HP %", 10, 90,
         function() return Cfg.RetreatHP * 100 end,
         function(v) Cfg.RetreatHP = v / 100 end)
-
-    local pFly = mkPage("Fly")
-    local flyInfo = mkInfo(pFly, "Fly", 120)
-    mkButton(pFly, "Fly", "Start Horse Flight", function()
-        if Ctx.Fly then Ctx.Fly.start() end
-    end, Color3.fromRGB(130, 80, 180))
-    mkButton(pFly, "Fly", "Stop Flight", function()
-        if Ctx.Fly then Ctx.Fly.stop() end
-    end, CLR.red)
-    mkSlider(pFly, "Fly", "Flight Speed", 8, 40,
-        function() return St.FlySpeed or 22 end,
-        function(v) St.FlySpeed = v end)
 
     local pCrow = mkPage("Crow")
     local crowInfo = mkInfo(pCrow, "Crow", 130)
@@ -625,14 +576,14 @@ function G.init(Ctx)
             print("[Dingus] crow equipped")
         end
     end, CLR.green)
-    mkButton(pCrow, "Crow", "Summon Click", function()
+    mkButton(pCrow, "Crow", "Summon Crow", function()
         U.m1()
     end, CLR.blue)
-    mkButton(pCrow, "Crow", "Try Accept Menu", function()
+    mkButton(pCrow, "Crow", "Accept Quest", function()
         local m = Ctx.Scan.findCrowMenu()
         if m then
             pcall(function() m:Activate() end)
-            print("[Dingus] menu activated")
+            print("[Dingus] quest accepted")
         end
     end, Color3.fromRGB(180, 120, 60))
 
@@ -647,11 +598,11 @@ function G.init(Ctx)
         local ok, result = Cfg.load()
         print("[Dingus][Config] " .. tostring(result))
     end, CLR.green)
-    mkButton(pConfig, "Config", "Reset Defaults", function()
+    mkButton(pConfig, "Config", "Reset to Defaults", function()
         Cfg.reset()
         print("[Dingus][Config] reset")
     end, Color3.fromRGB(180, 130, 80))
-    mkButton(pConfig, "Config", "Delete File", function()
+    mkButton(pConfig, "Config", "Delete Config File", function()
         print("[Dingus][Config] delete: " .. tostring(Cfg.delete()))
     end, CLR.red)
     mkButton(pConfig, "Config", "Print Values", function()
@@ -659,76 +610,61 @@ function G.init(Ctx)
     end, Color3.fromRGB(110, 110, 150))
 
     --============================================================
-    -- TAB BUTTONS
+    -- TABS
     --============================================================
     local tbMain = mkTab("Main", 1)
     mkTab("Combat", 2)
-    mkTab("Fly", 3)
-    mkTab("Crow", 4)
-    mkTab("Config", 5)
+    mkTab("Crow", 3)
+    mkTab("Config", 4)
 
     pMain.Visible = true
     tbMain.BackgroundColor3 = CLR.accent
     tbMain.TextColor3 = CLR.text
 
     --============================================================
-    -- REFRESH LOOP
+    -- REFRESH
     --============================================================
     local cache = {}
     task.spawn(function()
         while St.run do
             if St.boot and not minimized then
                 local h = U.hum()
-                local hp = h
-                    and string.format("%d/%d", math.floor(h.Health), math.floor(h.MaxHealth))
-                    or "?"
-                local hitRate = St.aAt > 0
-                    and math.floor(St.aHi / St.aAt * 100)
-                    or 0
+                local hp = h and string.format("%d/%d", math.floor(h.Health), math.floor(h.MaxHealth)) or "?"
+                local hitRate = St.aAt > 0 and math.floor(St.aHi / St.aAt * 100) or 0
 
                 local s1 = string.format(
                     "  state: %s · hp: %s\n" ..
                     "  target: %s @%.0f\n" ..
                     "  atk: %d/%d (%d%%)\n" ..
-                    "  kills: %d · retreats: %d · fly: %s\n" ..
+                    "  kills: %d · retreats: %d · hover: %s\n" ..
                     "  quest: %s · lv %d",
                     St.cbtS, hp,
                     St.tgt and St.tgt.ch.Name or "none", St.tgt and St.tgt.d or 0,
                     St.aHi, St.aAt, hitRate,
-                    St.bKll, St.rtrC, St.FlyActive and "ON" or "OFF",
+                    St.bKll, St.rtrC, St.hoverActive and "ON" or "OFF",
                     tostring(St.questTarget or "—"), St.playerLevel or 0)
                 if cache.main ~= s1 then cache.main = s1; mainInfo.Text = s1 end
 
                 local s2 = string.format(
-                    "  atk range: %.1f · interval: %.2f\n" ..
-                    "  runspeed: %.0f · retreat hp: %.0f%%\n" ..
+                    "  atk range: %.1f · hover dist: %.1f\n" ..
+                    "  hover height: %.1f · runspeed: %.0f\n" ..
                     "  skill: %s · equip: %s\n" ..
                     "  retreat: %s · stun: %s · spoof: %s",
-                    Cfg.AtkRange, St.aiI,
-                    Cfg.RunSpeed, Cfg.RetreatHP * 100,
+                    Cfg.AtkRange, Cfg.HoverDistance,
+                    Cfg.HoverHeight, Cfg.RunSpeed,
                     tostring(St.skl), tostring(St.eqp),
                     tostring(St.rtr), tostring(St.stunPun), tostring(St.gsp))
                 if cache.combat ~= s2 then cache.combat = s2; combatInfo.Text = s2 end
 
                 local s3 = string.format(
-                    "  active: %s · mounted: %s\n" ..
-                    "  speed: %.0f studs/s\n" ..
-                    "  noclip: %s",
-                    tostring(St.FlyActive),
-                    tostring(St.FlyMounted),
-                    St.FlySpeed or 22,
-                    Ctx.Fly and Ctx.Fly.active and "ON" or "OFF")
-                if cache.fly ~= s3 then cache.fly = s3; flyInfo.Text = s3 end
-
-                local s4 = string.format(
                     "  crow tool: %s\n" ..
                     "  perched: %s · accepted: %d\n" ..
                     "  auto: %s",
                     St.crT and St.crT.Name or "not found",
                     tostring(St.cPrch), St.cQs, tostring(St.crw))
-                if cache.crow ~= s4 then cache.crow = s4; crowInfo.Text = s4 end
+                if cache.crow ~= s3 then cache.crow = s3; crowInfo.Text = s3 end
 
-                local s5 = string.format(
+                local s4 = string.format(
                     "  file: %s\n" ..
                     "  exists: %s (%d bytes)\n" ..
                     "  exec: %s · fps: %.0f",
@@ -736,25 +672,15 @@ function G.init(Ctx)
                     tostring(Cfg.exists()), Cfg.fileSize(),
                     tostring(identifyexecutor and identifyexecutor() or "?"),
                     St.fps or 60)
-                if cache.config ~= s5 then cache.config = s5; configInfo.Text = s5 end
+                if cache.config ~= s4 then cache.config = s4; configInfo.Text = s4 end
 
                 local bar = string.format(
-                    "  fps %.0f  ·  %s  ·  fly %s  ·  hp %s",
+                    "  fps %.0f  ·  %s  ·  hover %s  ·  hp %s",
                     St.fps or 60, St.cbtS,
-                    St.FlyActive and "ON" or "OFF", hp)
+                    St.hoverActive and "ON" or "OFF", hp)
                 if cache.bar ~= bar then cache.bar = bar; statusBar.Text = bar end
             end
             task.wait(0.4)
-        end
-    end)
-
-    --============================================================
-    -- HOTKEY (RightShift toggles minimize)
-    --============================================================
-    UIS.InputBegan:Connect(function(input, gp)
-        if gp then return end
-        if input.KeyCode == Enum.KeyCode.RightShift then
-            if minimized then restore() else minimize() end
         end
     end)
 
