@@ -25,6 +25,7 @@ function A.init(Ctx)
     St.stuckWarnings = 0
     St.lastComboTime = 0
     St.comboIndex = 0
+    St.swapPending = false
 
     local SK_KEYS = { "Z", "X", "C", "V", "B" }
     local SK_CDS  = { 1.2, 2.0, 2.8, 3.6, 6.0 }
@@ -85,28 +86,39 @@ function A.init(Ctx)
         return out
     end
 
+    -- H2: async weapon swap, no scheduler stall
     local function equipWeapon()
+        if St.swapPending then return end
         local now = U.clock()
         if now - St.lEqp < 1.5 then return end
         St.lEqp = now
+
         local h = U.hum(); if not h then return end
         local current = equippedTool()
         if current and L.isWeapon(current.Name) then
             St.eq = current.Name
             return
         end
+
+        local target = nil
         for _, t in ipairs(inventoryTools()) do
-            if L.isWeapon(t.Name) then
+            if L.isWeapon(t.Name) then target = t; break end
+        end
+        if not target then return end
+
+        St.swapPending = true
+        task.spawn(function()
+            pcall(function()
                 if current then
                     pcall(function() h:UnequipTools() end)
                     task.wait(0.08)
                 end
-                pcall(function() h:EquipTool(t) end)
-                St.eq = t.Name
-                print("[Dingus] equipped " .. t.Name)
-                return
-            end
-        end
+                pcall(function() h:EquipTool(target) end)
+                St.eq = target.Name
+                print("[Dingus] equipped " .. target.Name)
+            end)
+            St.swapPending = false
+        end)
     end
 
     local function fireSkill(idx)
@@ -125,16 +137,7 @@ function A.init(Ctx)
     end
 
     local function m1() U.m1() end
-
-    local function m2()
-        if mouse2click then
-            pcall(mouse2click)
-        elseif VIM then
-            pcall(function() VIM:SendMouseButtonEvent(0, 0, 1, true, game, 0) end)
-            task.wait(0.03)
-            pcall(function() VIM:SendMouseButtonEvent(0, 0, 1, false, game, 0) end)
-        end
-    end
+    local function m2() U.m2() end
 
     local function strike(t)
         St.aAt = (St.aAt or 0) + 1
@@ -257,6 +260,8 @@ function A.init(Ctx)
     end)
 
     local retreatRunning = false
+
+    -- H1: bounded retreat with early exits
     local function startRetreat(from)
         if retreatRunning then return end
         retreatRunning = true
@@ -264,22 +269,51 @@ function A.init(Ctx)
         St.cbtS = "RETREAT"
         if Ctx.Fly and Ctx.Fly.stop then Ctx.Fly.stop() end
         if Ctx.Spoof and Ctx.Spoof.surfaceUp then pcall(Ctx.Spoof.surfaceUp) end
+
         task.spawn(function()
             U.tap("Q"); task.wait(0.25)
             local r = U.hrp(); local h = U.hum()
-            if not r or not h then retreatRunning = false; St.cbtS = "IDLE"; return end
+            if not r or not h then
+                retreatRunning = false; St.cbtS = "IDLE"; return
+            end
             local away = r.Position - from
             local flat = Vector3.new(away.X, 0, away.Z)
             if flat.Magnitude < 0.5 then flat = Vector3.new(1, 0, 0) end
             h.WalkSpeed = Cfg.RunSpeed
-            local deadline = U.clock() + Cfg.RetreatDelay
+
+            local startT = U.clock()
+            local deadline = startT + Cfg.RetreatDelay
+            local hardCap = startT + 2.5
+            local lastHp = h.Health
+            local lastDamageT = startT
+            local clearSince = nil
+
             while U.clock() < deadline do
                 local hh = U.hum()
                 if not hh then break end
                 if hh.Health / hh.MaxHealth > Cfg.RetreatClearHP then break end
+
+                if hh.Health < lastHp then
+                    lastHp = hh.Health
+                    lastDamageT = U.clock()
+                end
+                if U.clock() - lastDamageT > 1.2 and U.clock() > startT + 0.6 then
+                    break
+                end
+
+                if St.zn == 0 then
+                    if not clearSince then clearSince = U.clock() end
+                    if U.clock() - clearSince > 0.4 then break end
+                else
+                    clearSince = nil
+                end
+
+                if U.clock() > hardCap then break end
+
                 h:Move(flat.Unit)
                 task.wait(0.05)
             end
+
             retreatRunning = false
             St.tgt = nil
             if D.invalidate then D.invalidate() end
@@ -358,12 +392,10 @@ function A.init(Ctx)
 
         if dist > Cfg.AtkRange + 4 then
             St.cbtS = "FLY"
-            if Ctx.Fly and not Ctx.Fly.active then
+            if Ctx.Fly and not Ctx.Fly.active and Ctx.Fly.start then
                 Ctx.Fly.start()
             end
-            if Ctx.Fly and Ctx.Fly.active then
-                return
-            end
+            if Ctx.Fly and Ctx.Fly.active then return end
             faceTarget(r, tPos.Position)
             if St.skl and now - St.lSkl > 2.0 then
                 St.lSkl = now
