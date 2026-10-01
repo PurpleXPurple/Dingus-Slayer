@@ -1,10 +1,7 @@
 --[[
-    Dingus-Slayer · attack.lua
-    Ground combat with distance-based behavior:
-      > 30 studs: run toward target, use ranged skills
-      8-30 studs: use ranged skills, walk toward
-      < 8 studs: melee + skills
-    Boss blocking/stunned + 8-15 studs: approach at slow speed
+    Dingus-Slayer · attack.lua v21
+    Movement fix: throttled MoveTo + directional Move every tick.
+    Range-based behavior. No hover.
 ]]--
 
 local A = {}
@@ -14,16 +11,18 @@ function A.init(Ctx)
     local Cfg = Ctx.Cfg
     local St = Ctx.St
     local D = Ctx.Detect
+    local Lists = Ctx.Lists
 
     St.rHt = {}
     St.aiI = Cfg.AtkInterval
     St.skCd = { 0, 0, 0, 0, 0 }
+    St.lMove = 0
 
     local function getEquipped()
         local c = U.Lp.Character
         if not c then return nil end
         for _, t in ipairs(c:GetChildren()) do
-            if t:IsA("Tool") and not Ctx.Lists.isCrow(t.Name) then return t end
+            if t:IsA("Tool") and not Lists.isCrow(t.Name) then return t end
         end
     end
 
@@ -52,13 +51,13 @@ function A.init(Ctx)
         if not h then return end
         local tools = getAllTools()
         local eq = getEquipped()
-        if eq and Ctx.Lists.isWeapon(eq.Name) then
+        if eq and Lists.isWeapon(eq.Name) then
             St.eq = eq.Name
             return
         end
         for i = 1, #tools do
             local t = tools[i]
-            if t ~= eq and Ctx.Lists.isWeapon(t.Name) then
+            if t ~= eq and Lists.isWeapon(t.Name) then
                 if eq then
                     pcall(function() h:UnequipTools() end)
                     task.wait(0.1)
@@ -122,10 +121,32 @@ function A.init(Ctx)
         end)
     end
 
-    local function faceTarget(r, x2)
+    local function face(r, x2)
         pcall(function()
             r.CFrame = CFrame.new(r.Position, Vector3.new(x2.Position.X, r.Position.Y, x2.Position.Z))
         end)
+    end
+
+    -- Movement: MoveTo throttled + Move every tick
+    local function moveTo(h, r, targetPos)
+        local now = U.clock()
+        local myPos = r.Position
+        local dir = targetPos - myPos
+        dir = Vector3.new(dir.X, 0, dir.Z)
+
+        if dir.Magnitude < 0.5 then return end
+
+        local dirUnit = dir.Unit
+
+        -- Persistent push every tick
+        pcall(function() h:Move(dirUnit) end)
+        pcall(function() h.WalkToPoint = targetPos end)
+
+        -- Throttled MoveTo for pathfinding
+        if now - (St.lMove or 0) > 0.25 then
+            St.lMove = now
+            pcall(function() h:MoveTo(targetPos) end)
+        end
     end
 
     function A.combatTick()
@@ -134,6 +155,7 @@ function A.init(Ctx)
         local h = U.hum()
         local r = U.hrp()
         if not h or not r then St.cbtS = "NO_CHAR"; return end
+        if h.Health <= 0 then St.cbtS = "DEAD"; return end
 
         local now = U.clock()
         local hpFrac = h.Health / h.MaxHealth
@@ -141,14 +163,12 @@ function A.init(Ctx)
         A.equipWeapon()
         U.groundState()
 
-        -- HP drop tracking
         if h.Health < (St.lHp or 0) and now - (St.lHpT or 0) > 0.05 then
             St.lDmg = now
         end
         St.lHp = h.Health
         St.lHpT = now
 
-        -- Breath regen
         if now - (St.lBrt or 0) > 2.5 then
             St.lBrt = now
             U.tap("L")
@@ -170,6 +190,7 @@ function A.init(Ctx)
                     task.wait(0.3)
                     local hh = U.hum()
                     if hh then
+                        h.WalkSpeed = Cfg.RunSpeed
                         pcall(hh.MoveTo, hh, r.Position + flat.Unit * 60)
                     end
                     local dl = U.clock() + 4
@@ -191,7 +212,7 @@ function A.init(Ctx)
             if St.tgt then
                 St.kll = St.kll + 1
                 St.bKll = St.bKll + 1
-                print(string.format("[Dingus] killed %s (%d total)", St.tgt.ch.Name, St.bKll))
+                print(string.format("[Dingus] killed %s (%d)", St.tgt.ch.Name, St.bKll))
                 St.tgt = nil
                 St.lScn = 0
             end
@@ -207,17 +228,17 @@ function A.init(Ctx)
         if not x2 then St.tgt = nil; return end
 
         local dist = U.xzDist(r.Position, x2.Position)
+        t.d = dist
 
-        -- Determine behavior
         local eBlk = D.isEnemyBlocking(t)
         local eSt = D.isEnemyStunned(t)
 
-        -- RANGE 1: far (> 30) — run toward, use ranged skills
+        -- FAR: > 30 studs
         if dist > 30 then
             St.cbtS = "APPROACH_FAR"
-            h.WalkSpeed = 32
-            pcall(h.MoveTo, h, x2.Position)
-            faceTarget(r, x2)
+            h.WalkSpeed = Cfg.RunSpeed
+            moveTo(h, r, x2.Position)
+            face(r, x2)
             if St.skl and now - (St.lSkl or 0) > 2.0 then
                 St.lSkl = now
                 A.fireRotation()
@@ -225,25 +246,23 @@ function A.init(Ctx)
             return
         end
 
-        -- RANGE 2: mid (8-30) — ranged skills + walk
+        -- MID: 8-30 studs
         if dist > 8 then
-            -- If blocking or stunned, walk slowly
             if eBlk or eSt then
-                St.cbtS = "CLOSE_IN_SLOW"
-                h.WalkSpeed = 5
-                pcall(h.MoveTo, h, x2.Position)
-                faceTarget(r, x2)
+                St.cbtS = "CLOSE_SLOW"
+                h.WalkSpeed = Cfg.CloseInSpeed
+                moveTo(h, r, x2.Position)
+                face(r, x2)
                 if St.skl and now - (St.lSkl or 0) > 1.0 then
                     St.lSkl = now
                     A.fireRotation()
                 end
                 return
             end
-
             St.cbtS = "APPROACH"
-            h.WalkSpeed = 32
-            pcall(h.MoveTo, h, x2.Position)
-            faceTarget(r, x2)
+            h.WalkSpeed = Cfg.RunSpeed
+            moveTo(h, r, x2.Position)
+            face(r, x2)
             if St.skl and now - (St.lSkl or 0) > 1.6 then
                 St.lSkl = now
                 A.fireRotation()
@@ -251,10 +270,10 @@ function A.init(Ctx)
             return
         end
 
-        -- RANGE 3: close (< 8) — melee + skills
+        -- CLOSE: < 8 studs
         St.cbtS = eBlk and "BREAK_BLOCK" or (eSt and "PUNISH" or "ATTACK")
         h.WalkSpeed = 16
-        faceTarget(r, x2)
+        face(r, x2)
 
         local interval = eSt and Cfg.StunAtkInt or adaptiveInterval()
         if now - St.lAtk >= interval then
