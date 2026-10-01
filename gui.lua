@@ -1,8 +1,3 @@
---[[
-    Dingus-Slayer · gui.lua v21
-    4 tabs, per-tab scrolling, all controls visible.
-]]--
-
 local G = {}
 
 function G.init(Ctx)
@@ -21,6 +16,7 @@ function G.init(Ctx)
     gui.Parent = parent
 
     local win = Instance.new("Frame")
+    win.Name = "Window"
     win.Size = UDim2.new(0, 520, 0, 500)
     win.Position = UDim2.new(0.5, -260, 0.5, -250)
     win.BackgroundColor3 = Color3.fromRGB(16, 16, 20)
@@ -35,6 +31,7 @@ function G.init(Ctx)
 
     -- Title
     local title = Instance.new("TextLabel")
+    title.Name = "Title"
     title.Size = UDim2.new(1, 0, 0, 30)
     title.BackgroundColor3 = Color3.fromRGB(35, 20, 18)
     title.BorderSizePixel = 0
@@ -46,7 +43,9 @@ function G.init(Ctx)
     title.Parent = win
     Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
 
+    -- Close button (X) — position shifted left to make room for resize
     local closeBtn = Instance.new("TextButton")
+    closeBtn.Name = "Close"
     closeBtn.Size = UDim2.new(0, 24, 0, 24)
     closeBtn.Position = UDim2.new(1, -30, 0, 3)
     closeBtn.BackgroundColor3 = Color3.fromRGB(140, 40, 50)
@@ -58,8 +57,23 @@ function G.init(Ctx)
     closeBtn.Parent = win
     Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 5)
 
-    -- Tab bar
+    -- Resize-to-name button next to X
+    local resizeBtn = Instance.new("TextButton")
+    resizeBtn.Name = "Resize"
+    resizeBtn.Size = UDim2.new(0, 24, 0, 24)
+    resizeBtn.Position = UDim2.new(1, -58, 0, 3)
+    resizeBtn.BackgroundColor3 = Color3.fromRGB(60, 90, 60)
+    resizeBtn.BorderSizePixel = 0
+    resizeBtn.Text = "–"
+    resizeBtn.TextColor3 = Color3.new(1, 1, 1)
+    resizeBtn.Font = Enum.Font.GothamBold
+    resizeBtn.TextSize = 15
+    resizeBtn.Parent = win
+    Instance.new("UICorner", resizeBtn).CornerRadius = UDim.new(0, 5)
+
+    -- Rest of the window
     local tabBar = Instance.new("Frame")
+    tabBar.Name = "TabBar"
     tabBar.Size = UDim2.new(1, -16, 0, 28)
     tabBar.Position = UDim2.new(0, 8, 0, 36)
     tabBar.BackgroundTransparency = 1
@@ -68,8 +82,8 @@ function G.init(Ctx)
     tLay.FillDirection = Enum.FillDirection.Horizontal
     tLay.Padding = UDim.new(0, 4)
 
-    -- Content
     local content = Instance.new("Frame")
+    content.Name = "Content"
     content.Size = UDim2.new(1, -16, 1, -124)
     content.Position = UDim2.new(0, 8, 0, 70)
     content.BackgroundColor3 = Color3.fromRGB(10, 10, 14)
@@ -77,8 +91,8 @@ function G.init(Ctx)
     content.Parent = win
     Instance.new("UICorner", content).CornerRadius = UDim.new(0, 6)
 
-    -- Bottom status bar (shared across tabs)
     local bottomBar = Instance.new("TextLabel")
+    bottomBar.Name = "Status"
     bottomBar.Size = UDim2.new(1, -16, 0, 42)
     bottomBar.Position = UDim2.new(0, 8, 1, -50)
     bottomBar.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
@@ -93,6 +107,40 @@ function G.init(Ctx)
     bottomBar.Parent = win
     Instance.new("UICorner", bottomBar).CornerRadius = UDim.new(0, 6)
 
+    --============================================================
+    -- MINIMIZE TO NAME
+    --============================================================
+    local fullSize = win.Size
+    local minimized = false
+
+    resizeBtn.MouseButton1Click:Connect(function()
+        minimized = not minimized
+        if minimized then
+            fullSize = win.Size
+            win.Size = UDim2.new(0, 130, 0, 30)
+            title.Text = "  Dingus"
+            for _, c in ipairs(win:GetChildren()) do
+                if c ~= title and c ~= closeBtn and c ~= resizeBtn then
+                    c.Visible = false
+                end
+            end
+            -- Keep title full width, buttons layered on top
+            title.Size = UDim2.new(1, 0, 0, 30)
+            resizeBtn.Position = UDim2.new(1, -58, 0, 3)
+            closeBtn.Position = UDim2.new(1, -30, 0, 3)
+        else
+            win.Size = fullSize
+            title.Text = "  Dingus-Slayer"
+            title.Size = UDim2.new(1, 0, 0, 30)
+            for _, c in ipairs(win:GetChildren()) do
+                c.Visible = true
+            end
+        end
+    end)
+
+    --============================================================
+    -- TAB SYSTEM
+    --============================================================
     local pages = {}
     local function mkPage(name)
         local p = Instance.new("ScrollingFrame")
@@ -139,11 +187,10 @@ function G.init(Ctx)
         return b
     end
 
-    -- Control builders
-    local orderCounter = {}
+    local counter = {}
     local function nextOrder(pageName)
-        orderCounter[pageName] = (orderCounter[pageName] or 0) + 1
-        return orderCounter[pageName]
+        counter[pageName] = (counter[pageName] or 0) + 1
+        return counter[pageName]
     end
 
     local function mkToggle(page, pageName, label, key)
@@ -213,7 +260,7 @@ function G.init(Ctx)
         lbl.Size = UDim2.new(1, -20, 0, 16)
         lbl.Position = UDim2.new(0, 10, 0, 4)
         lbl.BackgroundTransparency = 1
-        lbl.Text = label .. ": " .. string.format("%.2f", getter())
+        lbl.Text = label .. ": " .. string.format("%.1f", getter())
         lbl.TextColor3 = Color3.fromRGB(225, 225, 235)
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Font = Enum.Font.Gotham
@@ -254,7 +301,7 @@ function G.init(Ctx)
                     local p = math.clamp((mx - bx) / bw, 0, 1)
                     local v = minV + (maxV - minV) * p
                     setter(v)
-                    lbl.Text = label .. ": " .. string.format("%.2f", v)
+                    lbl.Text = label .. ": " .. string.format("%.1f", v)
                     fill.Size = UDim2.new(p, 0, 1, 0)
                 end
             end
@@ -263,7 +310,7 @@ function G.init(Ctx)
 
     local function mkInfo(page, pageName, height)
         local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, 0, 0, height or 80)
+        lbl.Size = UDim2.new(1, 0, 0, height or 100)
         lbl.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
         lbl.BorderSizePixel = 0
         lbl.Text = "  —"
@@ -280,7 +327,7 @@ function G.init(Ctx)
     end
 
     --============================================================
-    -- TAB: MAIN
+    -- MAIN TAB
     --============================================================
     local pMain = mkPage("Main")
     local mainInfo = mkInfo(pMain, "Main", 140)
@@ -288,13 +335,15 @@ function G.init(Ctx)
         St.cbt = not St.cbt
         print("[Dingus] combat " .. (St.cbt and "ON" or "OFF"))
     end, Color3.fromRGB(200, 90, 70))
+    mkButton(pMain, "Main", "Toggle Horse Flight", function()
+        if Ctx.Fly and Ctx.Fly.toggle then
+            Ctx.Fly.toggle()
+        end
+    end, Color3.fromRGB(90, 60, 140))
     mkButton(pMain, "Main", "Force Boss Scan", function()
         St.lScn = 0
         local l = Ctx.Detect.scanBosses()
         print("[Dingus] scan: " .. #l .. " bosses")
-        for i = 1, math.min(#l, 5) do
-            print(string.format("  %s @%.0f", l[i].ch.Name, l[i].d))
-        end
     end, Color3.fromRGB(60, 130, 200))
     mkButton(pMain, "Main", "Run Quest Cycle", function()
         if Ctx.Quest and Ctx.Quest.doCycle then Ctx.Quest.doCycle() end
@@ -314,7 +363,7 @@ function G.init(Ctx)
     end, Color3.fromRGB(120, 60, 60))
 
     --============================================================
-    -- TAB: COMBAT
+    -- COMBAT TAB
     --============================================================
     local pCombat = mkPage("Combat")
     local combatInfo = mkInfo(pCombat, "Combat", 120)
@@ -329,18 +378,30 @@ function G.init(Ctx)
     mkSlider(pCombat, "Combat", "Attack Interval", 0.30, 0.90,
         function() return St.aiI end,
         function(v) St.aiI = v end)
-    mkSlider(pCombat, "Combat", "Run Speed", 16, 64,
+    mkSlider(pCombat, "Combat", "Run Speed", 16, 48,
         function() return Cfg.RunSpeed end,
         function(v) Cfg.RunSpeed = v end)
-    mkSlider(pCombat, "Combat", "Close-In Speed", 4, 16,
-        function() return Cfg.CloseInSpeed end,
-        function(v) Cfg.CloseInSpeed = v end)
     mkSlider(pCombat, "Combat", "Retreat HP %", 10, 90,
         function() return Cfg.RetreatHP * 100 end,
         function(v) Cfg.RetreatHP = v / 100 end)
 
     --============================================================
-    -- TAB: CROW
+    -- FLY TAB
+    --============================================================
+    local pFly = mkPage("Fly")
+    local flyInfo = mkInfo(pFly, "Fly", 120)
+    mkButton(pFly, "Fly", "Start Horse Flight", function()
+        if Ctx.Fly then Ctx.Fly.start() end
+    end, Color3.fromRGB(90, 60, 140))
+    mkButton(pFly, "Fly", "Stop Flight", function()
+        if Ctx.Fly then Ctx.Fly.stop() end
+    end, Color3.fromRGB(120, 60, 60))
+    mkSlider(pFly, "Fly", "Flight Speed", 8, 40,
+        function() return St.FlySpeed or 22 end,
+        function(v) St.FlySpeed = v end)
+
+    --============================================================
+    -- CROW TAB
     --============================================================
     local pCrow = mkPage("Crow")
     local crowInfo = mkInfo(pCrow, "Crow", 140)
@@ -350,86 +411,50 @@ function G.init(Ctx)
         local h = U.hum()
         if t and h and t:IsA("Tool") then
             pcall(function() h:EquipTool(t) end)
-            print("[Dingus] crow equipped: " .. t.Name)
-        else
-            print("[Dingus] no crow tool")
+            print("[Dingus] crow equipped")
         end
     end, Color3.fromRGB(60, 130, 60))
-    mkButton(pCrow, "Crow", "Summon Click", function()
-        U.m1()
-        print("[Dingus] clicked")
-    end, Color3.fromRGB(60, 90, 140))
+    mkButton(pCrow, "Crow", "Summon Click", function() U.m1() end, Color3.fromRGB(60, 90, 140))
     mkButton(pCrow, "Crow", "Try Accept Menu", function()
         local m = Ctx.Scan.findCrowMenu()
-        if m then
-            pcall(function() m:Activate() end)
-            print("[Dingus] menu: " .. m:GetFullName())
-        else
-            print("[Dingus] no menu found")
-        end
+        if m then pcall(function() m:Activate() end); print("[Dingus] menu activated") end
     end, Color3.fromRGB(140, 90, 60))
-    mkButton(pCrow, "Crow", "Dump Crow Paths", function()
-        local hits = Ctx.Scan.deepScan({ "crow", "kasugai" })
-        print("[Dingus] " .. #hits .. " crow hits")
-        for i = 1, math.min(#hits, 30) do
-            print("  " .. hits[i].cls .. " :: " .. hits[i].path)
-        end
-    end, Color3.fromRGB(100, 100, 60))
-    mkButton(pCrow, "Crow", "Dump Quest Paths", function()
-        local hits = Ctx.Scan.deepScan({ "quest", "boss hunt", "boss_hunt" })
-        print("[Dingus] " .. #hits .. " quest hits")
-        for i = 1, math.min(#hits, 30) do
-            print("  " .. hits[i].cls .. " :: " .. hits[i].path)
-        end
-    end, Color3.fromRGB(100, 100, 60))
 
     --============================================================
-    -- TAB: CONFIG
+    -- CONFIG TAB
     --============================================================
     local pConfig = mkPage("Config")
-    local configInfo = mkInfo(pConfig, "Config", 180)
+    local configInfo = mkInfo(pConfig, "Config", 160)
     mkButton(pConfig, "Config", "Save Config", function()
-        local lines = {
-            "AtkRange=" .. Cfg.AtkRange,
-            "AtkInterval=" .. St.aiI,
-            "RunSpeed=" .. Cfg.RunSpeed,
-            "CloseInSpeed=" .. Cfg.CloseInSpeed,
-            "RetreatHP=" .. Cfg.RetreatHP,
-            "AutoSkill=" .. tostring(St.skl),
-            "AutoEquip=" .. tostring(St.eqp),
-            "AutoRetreat=" .. tostring(St.rtr),
-            "AutoCrow=" .. tostring(St.crw),
-        }
-        if U.save then U.save("dingus_config.txt", table.concat(lines, "\n")) end
-        print("[Dingus] config saved")
+        local ok, result = Cfg.save()
+        print("[Dingus][Config] save " .. (ok and "ok" or ("fail: " .. tostring(result))))
     end, Color3.fromRGB(60, 130, 200))
-    mkButton(pConfig, "Config", "Run Diagnostic", function()
-        local r = U.report and U.report() or "no report"
-        print("[Dingus]\n" .. r)
-        local s = Ctx.Detect.scanBosses and #Ctx.Detect.scanBosses() or 0
-        print("[Dingus] bosses: " .. s)
-        if Ctx.Quest and Ctx.Quest.findBossHunts then
-            local hunts = Ctx.Quest.findBossHunts()
-            print("[Dingus] quest configs: " .. #hunts)
-            for i = 1, math.min(#hunts, 10) do
-                print("  #" .. hunts[i].id .. " " .. hunts[i].quest)
-            end
-        end
-    end, Color3.fromRGB(100, 100, 140))
-    mkButton(pConfig, "Config", "Unload Script", function()
-        if Ctx.Unload then Ctx.Unload() end
+    mkButton(pConfig, "Config", "Load Config", function()
+        if not Cfg.exists() then print("[Dingus][Config] no file"); return end
+        local ok, result = Cfg.load()
+        print("[Dingus][Config] load " .. (ok and tostring(result) or ("fail: " .. tostring(result))))
+    end, Color3.fromRGB(60, 130, 100))
+    mkButton(pConfig, "Config", "Reset to Defaults", function()
+        Cfg.reset(); print("[Dingus][Config] reset")
+    end, Color3.fromRGB(140, 100, 60))
+    mkButton(pConfig, "Config", "Delete Config File", function()
+        print("[Dingus][Config] delete: " .. tostring(Cfg.delete()))
     end, Color3.fromRGB(140, 60, 60))
+    mkButton(pConfig, "Config", "Print Values", function()
+        print(Cfg.pretty())
+    end, Color3.fromRGB(100, 100, 140))
 
     --============================================================
     -- TAB BUTTONS
     --============================================================
-    local tabMain = mkTab("Main", 1)
+    local tbMain = mkTab("Main", 1)
     mkTab("Combat", 2)
-    mkTab("Crow", 3)
-    mkTab("Config", 4)
+    mkTab("Fly", 3)
+    mkTab("Crow", 4)
+    mkTab("Config", 5)
 
     pMain.Visible = true
-    tabMain.BackgroundColor3 = Color3.fromRGB(200, 90, 70)
+    tbMain.BackgroundColor3 = Color3.fromRGB(200, 90, 70)
 
     --============================================================
     -- REFRESH LOOP
@@ -441,54 +466,51 @@ function G.init(Ctx)
                 local h = U.hum()
                 local hp = h and string.format("%d/%d", math.floor(h.Health), math.floor(h.MaxHealth)) or "?"
                 local hitRate = St.aAt > 0 and math.floor(St.aHi / St.aAt * 100) or 0
-                local ws = h and h.WalkSpeed or 0
 
                 local s1 = string.format(
-                    "  state: %s · hp: %s\n  target: %s\n  target distance: %.0f\n  atk: %d/%d (%d%%)\n  kills: %d · retreats: %d · quest: %s\n  walkspeed: %.0f · input: %d",
+                    "  state: %s · hp: %s\n  target: %s @%.0f\n  atk: %d/%d (%d%%)\n  kills: %d · retreats: %d\n  fly: %s · mounted: %s\n  quest: %s · level: %d",
                     St.cbtS, hp,
-                    St.tgt and St.tgt.ch.Name or "none",
-                    St.tgt and St.tgt.d or 0,
+                    St.tgt and St.tgt.ch.Name or "none", St.tgt and St.tgt.d or 0,
                     St.aHi, St.aAt, hitRate,
-                    St.bKll, St.rtrC, tostring(St.questTarget or "—"),
-                    ws, St.inp)
+                    St.bKll, St.rtrC,
+                    tostring(St.FlyActive), tostring(St.FlyMounted),
+                    tostring(St.questTarget or "—"), St.playerLevel or 0)
                 if cache.main ~= s1 then cache.main = s1; mainInfo.Text = s1 end
 
                 local s2 = string.format(
-                    "  attack range: %.1f · interval: %.2f\n  runspeed: %.0f · close-in: %.0f\n  hp threshold: %.0f%%\n  skill rotation: %s · equip: %s\n  retreat: %s · stun: %s · guard: %s",
+                    "  atk range: %.1f · interval: %.2f\n  runspeed: %.0f · retreat hp: %.0f%%\n  auto skill: %s · equip: %s\n  retreat: %s · stun: %s · guard: %s",
                     Cfg.AtkRange, St.aiI,
-                    Cfg.RunSpeed, Cfg.CloseInSpeed,
-                    Cfg.RetreatHP * 100,
+                    Cfg.RunSpeed, Cfg.RetreatHP * 100,
                     tostring(St.skl), tostring(St.eqp),
                     tostring(St.rtr), tostring(St.stunPun), tostring(St.gsp))
                 if cache.combat ~= s2 then cache.combat = s2; combatInfo.Text = s2 end
 
+                local flyMode = Ctx.Fly and Ctx.Fly.mounted and "MOUNTED" or "GROUND"
                 local s3 = string.format(
-                    "  crow tool: %s\n  perched: %s · quests accepted: %d\n  auto: %s\n  quest target: %s\n  level: %d",
-                    St.crT and St.crT.Name or "not found",
-                    tostring(St.cPrch), St.cQs,
-                    tostring(St.crw),
-                    tostring(St.questTarget or "—"),
-                    St.playerLevel or 0)
-                if cache.crow ~= s3 then cache.crow = s3; crowInfo.Text = s3 end
+                    "  active: %s\n  mode: %s\n  speed: %.0f studs/s\n  pulse: %s\n  noclip: %s\n\n  Controls:\n  W/A/S/D direction · Space up · LCtrl down\n  Toggle via Main tab or Fly tab buttons",
+                    tostring(St.FlyActive), flyMode, St.FlySpeed or 22,
+                    "stuttered (0.55-0.9s gap, 0.12-0.2s burst)",
+                    Ctx.Fly and Ctx.Fly.active and "ON" or "OFF")
+                if cache.fly ~= s3 then cache.fly = s3; flyInfo.Text = s3 end
 
                 local s4 = string.format(
-                    "  executor: %s\n  place: %s\n  player: %s\n  VIM: %s · mouse1click: %s\n  bosses: %d · quest configs: %d\n  fps: %.0f",
-                    tostring(identifyexecutor and identifyexecutor() or "?"),
-                    tostring(game.PlaceId),
-                    tostring(U.Name),
-                    tostring(U.VIM ~= nil),
-                    tostring(U.Fn and U.Fn.mouse1click ~= nil),
-                    #(St.ens or {}),
-                    St.huntCount or 0,
-                    St.fps or 60)
-                if cache.config ~= s4 then cache.config = s4; configInfo.Text = s4 end
+                    "  crow tool: %s\n  perched: %s · accepted: %d\n  auto: %s",
+                    St.crT and St.crT.Name or "not found",
+                    tostring(St.cPrch), St.cQs, tostring(St.crw))
+                if cache.crow ~= s4 then cache.crow = s4; crowInfo.Text = s4 end
 
-                -- Bottom bar refresh
+                local s5 = string.format(
+                    "  file: %s\n  exists: %s (%d bytes)\n  exec: %s · fps: %.0f",
+                    Cfg.ConfigFile,
+                    tostring(Cfg.exists()), Cfg.fileSize(),
+                    tostring(identifyexecutor and identifyexecutor() or "?"),
+                    St.fps or 60)
+                if cache.config ~= s5 then cache.config = s5; configInfo.Text = s5 end
+
                 local bar = string.format(
-                    "  fps: %.0f · state: %s · target: %s · hp: %s",
+                    "  fps: %.0f · state: %s · fly: %s",
                     St.fps or 60, St.cbtS,
-                    St.tgt and St.tgt.ch.Name or "none",
-                    hp)
+                    St.FlyActive and "ON" or "OFF")
                 if cache.bar ~= bar then cache.bar = bar; bottomBar.Text = bar end
             end
             task.wait(0.4)
@@ -501,7 +523,6 @@ function G.init(Ctx)
 
     G.gui = gui
     G.win = win
-    G.bottomBar = bottomBar
 end
 
 return G
