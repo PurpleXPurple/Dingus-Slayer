@@ -90,21 +90,42 @@ function S.init(Ctx)
         return found
     end
 
+    -- H5 fix: no GetDescendants(). Cached. Stack walk.
+    local cawCache = nil
+
+    local function scanForCaw(root)
+        if not root then return nil end
+        local stack = { root }
+        local iter = 0
+        while #stack > 0 do
+            local inst = table.remove(stack)
+            if inst and inst:IsA("Sound") then
+                if string.find(string.lower(inst.Name), "caw", 1, true) and inst.IsPlaying then
+                    return inst
+                end
+            end
+            if inst then
+                local ok, kids = pcall(function() return inst:GetChildren() end)
+                if ok and kids then
+                    for i = 1, #kids do table.insert(stack, kids[i]) end
+                end
+            end
+            iter = iter + 1
+            if iter % 1500 == 0 then task.wait() end
+        end
+        return nil
+    end
+
     function S.findCawSound()
-        local w = workspace:GetDescendants()
-        for i = 1, #w do
-            local s = w[i]
-            if s:IsA("Sound") and string.find(string.lower(s.Name), "caw", 1, true) then
-                if s.IsPlaying then return s end
-            end
+        if cawCache and cawCache.Parent and cawCache.IsPlaying then
+            return cawCache
         end
-        local rs = game:GetService("ReplicatedStorage"):GetDescendants()
-        for i = 1, #rs do
-            local s = rs[i]
-            if s:IsA("Sound") and string.find(string.lower(s.Name), "caw", 1, true) then
-                if s.IsPlaying then return s end
-            end
-        end
+        cawCache = nil
+        local s = scanForCaw(workspace)
+        if s then cawCache = s; return s end
+        s = scanForCaw(game:GetService("ReplicatedStorage"))
+        if s then cawCache = s end
+        return s
     end
 
     function S.deepScan(keywords)
