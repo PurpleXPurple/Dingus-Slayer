@@ -1,14 +1,11 @@
 --[[
-    Dingus-Slayer · utils.lua
-    Safe service loading, capability probing, nil-guarded helpers.
-    Never throws during module load — everything wrapped.
+    Dingus-Slayer · utils.lua v2
+    Adds: mouse2click family, full file-API probe, U.m2 helper.
+    Fixes audit H3 (m2 was a global).
 ]]--
 
 local U = {}
 
---============================================================
--- SAFE SERVICE LOADER
---============================================================
 local function svc(name)
     local ok, s = pcall(function() return game:GetService(name) end)
     return ok and s or nil
@@ -20,8 +17,7 @@ local SG  = svc("StarterGui")
 local UIS = svc("UserInputService")
 local RS  = svc("ReplicatedStorage")
 local CP  = svc("ContentProvider")
-
-local Lp = Plr and Plr.LocalPlayer
+local Lp  = Plr and Plr.LocalPlayer
 
 U.Plr = Plr
 U.Lp = Lp
@@ -32,12 +28,8 @@ U.RS = RS
 U.CP = CP
 U.Name = Lp and Lp.Name or "?"
 
---============================================================
--- CAPABILITY PROBE
---============================================================
 local function has(name)
-    local f = _G[name]
-    if type(f) == "function" then return true end
+    if type(_G[name]) == "function" then return true end
     local ok, v = pcall(function() return getfenv()[name] end)
     return ok and type(v) == "function"
 end
@@ -52,26 +44,33 @@ U.Fn = {
     mouse1click   = grab("mouse1click"),
     mouse1press   = grab("mouse1press"),
     mouse1release = grab("mouse1release"),
+    mouse2click   = grab("mouse2click"),
+    mouse2press   = grab("mouse2press"),
+    mouse2release = grab("mouse2release"),
     keypress      = grab("keypress"),
     keyrelease    = grab("keyrelease"),
     mousemoverel  = grab("mousemoverel"),
     setclipboard  = grab("setclipboard"),
     writefile     = grab("writefile"),
+    readfile      = grab("readfile"),
+    isfile        = grab("isfile"),
+    delfile       = grab("delfile"),
+    listfiles     = grab("listfiles"),
+    makefolder    = grab("makefolder"),
     identifyexecutor = grab("identifyexecutor"),
 }
 
 U.Caps = {
     mouse1click   = has("mouse1click"),
     mouse1press   = has("mouse1press"),
+    mouse2click   = has("mouse2click"),
     keypress      = has("keypress"),
     VIM           = VIM ~= nil,
     setclipboard  = has("setclipboard"),
     writefile     = has("writefile"),
+    readfile      = has("readfile"),
 }
 
---============================================================
--- KEY ENUMS
---============================================================
 U.Keys = {
     F = Enum.KeyCode.F, Q = Enum.KeyCode.Q, L = Enum.KeyCode.L,
     Z = Enum.KeyCode.Z, X = Enum.KeyCode.X, C = Enum.KeyCode.C,
@@ -88,9 +87,6 @@ U.VK = {
     Space = 0x20, LeftShift = 0x10, LeftControl = 0x11,
 }
 
---============================================================
--- CHARACTER
---============================================================
 function U.hum()
     if not Lp then return nil end
     local c = Lp.Character
@@ -111,9 +107,6 @@ function U.isPlayer(c)
     return ok and r or false
 end
 
---============================================================
--- NAME MATCHERS
---============================================================
 function U.isBossName(nm, list)
     if not nm or not list then return false end
     local l = string.lower(nm)
@@ -142,9 +135,6 @@ function U.isCrowName(nm)
         or string.find(l, "kasugai", 1, true) ~= nil
 end
 
---============================================================
--- MATH / TIME
---============================================================
 function U.xzDist(a, b)
     local dx, dz = a.X - b.X, a.Z - b.Z
     return math.sqrt(dx * dx + dz * dz)
@@ -159,9 +149,6 @@ end
 function U.clock() return os.clock() end
 function U.date() return os.date("%H:%M:%S") end
 
---============================================================
--- INPUT
---============================================================
 function U.keyDown(k)
     local kk = type(k) == "string" and U.Keys[k] or k
     local vk = type(k) == "string" and U.VK[k] or nil
@@ -212,30 +199,25 @@ function U.m1()
     return false
 end
 
-function U.detectInput()
-    if U.Fn.mouse1click then
-        if pcall(U.Fn.mouse1click) then return 1 end
+function U.m2()
+    if U.Fn.mouse2click then
+        if pcall(U.Fn.mouse2click) then return true end
     end
-    if U.Fn.mouse1press and U.Fn.mouse1release then
-        local ok = pcall(U.Fn.mouse1press)
+    if U.Fn.mouse2press and U.Fn.mouse2release then
+        pcall(U.Fn.mouse2press)
         task.wait(0.03)
-        pcall(U.Fn.mouse1release)
-        if ok then return 2 end
+        pcall(U.Fn.mouse2release)
+        return true
     end
     if VIM then
-        local ok = pcall(function()
-            VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0)
-            task.wait(0.03)
-            VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0)
-        end)
-        if ok then return 3 end
+        pcall(function() VIM:SendMouseButtonEvent(0, 0, 1, true, game, 0) end)
+        task.wait(0.03)
+        pcall(function() VIM:SendMouseButtonEvent(0, 0, 1, false, game, 0) end)
+        return true
     end
-    return 0
+    return false
 end
 
---============================================================
--- HUMANOID STATE
---============================================================
 function U.groundState()
     local h = U.hum()
     if not h then return end
@@ -251,9 +233,6 @@ function U.groundState()
     end)
 end
 
---============================================================
--- TREE WALKER
---============================================================
 function U.walkTree(root, maxDepth, perNode, yieldEvery)
     if not root then return end
     yieldEvery = yieldEvery or 2500
@@ -277,9 +256,6 @@ function U.walkTree(root, maxDepth, perNode, yieldEvery)
     end
 end
 
---============================================================
--- CLIPBOARD / FILE
---============================================================
 function U.copy(text)
     if not U.Fn.setclipboard then return false end
     return pcall(U.Fn.setclipboard, text)
@@ -290,9 +266,6 @@ function U.save(name, text)
     return pcall(U.Fn.writefile, name, text)
 end
 
---============================================================
--- NOTIFICATIONS
---============================================================
 function U.notify(title, text, dur)
     if not SG then return end
     pcall(function()
@@ -302,9 +275,6 @@ function U.notify(title, text, dur)
     end)
 end
 
---============================================================
--- RETRY HELPER
---============================================================
 function U.retry(fn, tries, delay)
     tries = tries or 3
     delay = delay or 0.1
@@ -316,29 +286,22 @@ function U.retry(fn, tries, delay)
     return nil
 end
 
---============================================================
--- SAFE CALL (never throws, returns nil on failure)
---============================================================
 function U.safe(fn, ...)
     local ok, res = pcall(fn, ...)
     return ok and res or nil
 end
 
---============================================================
--- DIAGNOSTIC
---============================================================
 function U.report()
     local r = {}
     r[#r+1] = "executor: " .. tostring(U.Fn.identifyexecutor and U.Fn.identifyexecutor() or "?")
     r[#r+1] = "place: " .. tostring(game.PlaceId)
     r[#r+1] = "player: " .. tostring(U.Name)
     r[#r+1] = "VIM: " .. tostring(VIM ~= nil)
-    r[#r+1] = "UIS: " .. tostring(UIS ~= nil)
     r[#r+1] = "mouse1click: " .. tostring(U.Caps.mouse1click)
-    r[#r+1] = "mouse1press: " .. tostring(U.Caps.mouse1press)
+    r[#r+1] = "mouse2click: " .. tostring(U.Caps.mouse2click)
     r[#r+1] = "keypress: " .. tostring(U.Caps.keypress)
-    r[#r+1] = "setclipboard: " .. tostring(U.Caps.setclipboard)
     r[#r+1] = "writefile: " .. tostring(U.Caps.writefile)
+    r[#r+1] = "readfile: " .. tostring(U.Caps.readfile)
     return table.concat(r, "\n")
 end
 
