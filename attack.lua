@@ -1,7 +1,7 @@
 --[[
-    Dingus-Slayer · attack.lua v23
-    State machine. Hitbox dual-path. User-input-aware movement.
-    Uses Ctx.Detect for enemy state, Ctx.Lists for classification.
+    Dingus-Slayer · attack.lua v25
+    Hover-behind positioning. BodyPosition locks character 8 studs behind boss.
+    Block in PS2 is directional — behind = boss can't block.
 ]]--
 
 local A = {}
@@ -13,9 +13,7 @@ function A.init(Ctx)
     local D = Ctx.Detect
     local L = Ctx.Lists
 
-    --============================================================
-    -- LOCAL STATE
-    --============================================================
+    -- State
     St.rHt = St.rHt or {}
     St.skCd = St.skCd or { 0, 0, 0, 0, 0 }
     St.aiI = St.aiI or Cfg.AtkInterval
@@ -25,15 +23,15 @@ function A.init(Ctx)
     St.lMove = 0
     St.lBrt = 0
     St.lFac = 0
-    St.lHitbox = 0
+    St.lHover = 0
+    St.lHoverRecalc = 0
     St.userMoveUntil = 0
-    St.hitsTotal = 0
-    St.attemptsTotal = 0
-    St.lastStateChange = 0
-    St.skillQueue = {}
     St.eq = St.eq or "none"
     St.lTl = false
-    St.cbtS = "IDLE"
+    St.cbtS = St.cbtS or "IDLE"
+    St.hoverBp = nil
+    St.hoverAtt = nil
+    St.hoverActive = false
 
     local SK_KEYS = { "Z", "X", "C", "V", "B" }
     local SK_CDS  = { 1.2, 2.0, 2.8, 3.6, 6.0 }
@@ -42,67 +40,97 @@ function A.init(Ctx)
     local UIS = game:GetService("UserInputService")
 
     --============================================================
-    -- STATE MACHINE
-    --============================================================
-    local STATE_PRIORITY = {
-        IDLE = 1,
-        APPROACH_FAR = 2,
-        APPROACH = 2,
-        CLOSE_SLOW = 2,
-        ATTACK = 3,
-        BREAK_BLOCK = 4,
-        PUNISH = 5,
-        RETREAT = 6,
-        DEAD = 7,
-        FLYING = 8,
-    }
-
-    local TRANSITIONS = {
-        IDLE         = { APPROACH_FAR=true, APPROACH=true, CLOSE_SLOW=true, ATTACK=true, BREAK_BLOCK=true, PUNISH=true, RETREAT=true, DEAD=true, FLYING=true },
-        APPROACH_FAR = { IDLE=true, APPROACH=true, CLOSE_SLOW=true, ATTACK=true, BREAK_BLOCK=true, PUNISH=true, RETREAT=true, DEAD=true, FLYING=true },
-        APPROACH     = { IDLE=true, APPROACH_FAR=true, CLOSE_SLOW=true, ATTACK=true, BREAK_BLOCK=true, PUNISH=true, RETREAT=true, DEAD=true, FLYING=true },
-        CLOSE_SLOW   = { IDLE=true, APPROACH=true, ATTACK=true, BREAK_BLOCK=true, PUNISH=true, RETREAT=true, DEAD=true, FLYING=true },
-        ATTACK       = { IDLE=true, APPROACH=true, CLOSE_SLOW=true, BREAK_BLOCK=true, PUNISH=true, RETREAT=true, DEAD=true, FLYING=true },
-        BREAK_BLOCK  = { IDLE=true, ATTACK=true, PUNISH=true, RETREAT=true, DEAD=true, FLYING=true },
-        PUNISH       = { IDLE=true, ATTACK=true, RETREAT=true, DEAD=true, FLYING=true },
-        RETREAT      = { IDLE=true, APPROACH=true, DEAD=true, FLYING=true },
-        DEAD         = { IDLE=true, FLYING=true },
-        FLYING       = { IDLE=true, APPROACH=true, DEAD=true },
-    }
-
-    local function setState(new)
-        if new == St.cbtS then return true end
-        local cur = St.cbtS
-        if not TRANSITIONS[cur] or not TRANSITIONS[cur][new] then
-            return false
-        end
-        local curP = STATE_PRIORITY[cur] or 0
-        local newP = STATE_PRIORITY[new] or 0
-        if newP < curP and not (TRANSITIONS[cur] and TRANSITIONS[cur][new]) then
-            return false
-        end
-        St.cbtS = new
-        St.lastStateChange = U.clock()
-        return true
-    end
-
-    --============================================================
     -- USER INPUT AWARENESS
     --============================================================
-    local movementKeys = {
-        [Enum.KeyCode.W] = true,
-        [Enum.KeyCode.A] = true,
-        [Enum.KeyCode.S] = true,
-        [Enum.KeyCode.D] = true,
+    local moveKeys = {
+        [Enum.KeyCode.W] = true, [Enum.KeyCode.A] = true,
+        [Enum.KeyCode.S] = true, [Enum.KeyCode.D] = true,
         [Enum.KeyCode.Space] = true,
     }
-
-    UIS.InputBegan:Connect(function(input, gp)
+    UIS.InputBegan:Connect(function(i, gp)
         if gp then return end
-        if movementKeys[input.KeyCode] then
-            St.userMoveUntil = U.clock() + 1.5
-        end
+        if moveKeys[i.KeyCode] then St.userMoveUntil = U.clock() + 1.5 end
     end)
+    local function canAutoMove() return U.clock() > St.userMoveUntil end
+
+    --============================================================
+    -- HOVER SYSTEM
+    --============================================================
+    local function scrubHover()
+        local r = U.hrp()
+        if not r then return end
+        for _, c in ipairs(r:GetChildren()) do
+            if c.Name == "DingusHoverBP" or c.Name == "DingusHoverAtt" then
+                c:Destroy()
+            end
+        end
+        St.hoverBp = nil
+        St.hoverAtt = nil
+        St.hoverActive = false
+    end
+
+    function A.startHover()
+        if St.hoverActive then return end
+        scrubHover()
+        local r = U.hrp()
+        if not r then return end
+
+        local att = Instance.new("Attachment")
+        att.Name = "DingusHoverAtt"
+        att.Parent = r
+
+        local bp = Instance.new("BodyPosition")
+        bp.Name = "DingusHoverBP"
+        bp.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+        bp.P = Cfg.HoverP
+        bp.D = Cfg.HoverD
+        bp.Position = r.Position
+        bp.Parent = r
+
+        St.hoverBp = bp
+        St.hoverAtt = att
+        St.hoverActive = true
+    end
+
+    function A.stopHover()
+        if St.hoverBp then pcall(function() St.hoverBp:Destroy() end); St.hoverBp = nil end
+        if St.hoverAtt then pcall(function() St.hoverAtt:Destroy() end); St.hoverAtt = nil end
+        St.hoverActive = false
+    end
+
+    -- Compute position behind a target
+    local function behindPos(targetRP)
+        local look = targetRP.CFrame.LookVector
+        local behind = targetRP.Position - look * Cfg.HoverDistance
+        return Vector3.new(behind.X, behind.Y + Cfg.HoverHeight, behind.Z)
+    end
+
+    local function updateHover(targetRP)
+        if not Cfg.HoverEnabled then
+            if St.hoverActive then A.stopHover() end
+            return
+        end
+        if not St.hoverActive then A.startHover() end
+        if not St.hoverBp then return end
+
+        local now = U.clock()
+        if now - St.lHover < Cfg.HoverTTL then return end
+        St.lHover = now
+
+        -- Compute target hover position
+        local goal = behindPos(targetRP)
+
+        -- Smooth chase, but fast enough to stay behind
+        local current = St.hoverBp.Position
+        local dist = (goal - current).Magnitude
+
+        -- If boss turned and we're more than 4 studs from goal, snap fast
+        if dist > 4 then
+            St.hoverBp.Position = current:Lerp(goal, 0.35)
+        else
+            St.hoverBp.Position = current:Lerp(goal, 0.15)
+        end
+    end
 
     --============================================================
     -- TOOL ACCESS
@@ -113,36 +141,26 @@ function A.init(Ctx)
         for _, t in ipairs(c:GetChildren()) do
             if t:IsA("Tool") and not L.isCrow(t.Name) then return t end
         end
-        return nil
     end
 
     local function inventoryTools()
         local out = {}
         local c = U.Lp.Character
-        if c then
-            for _, t in ipairs(c:GetChildren()) do
-                if t:IsA("Tool") then table.insert(out, t) end
-            end
-        end
+        if c then for _, t in ipairs(c:GetChildren()) do
+            if t:IsA("Tool") then table.insert(out, t) end
+        end end
         local bp = U.Lp:FindFirstChildOfClass("Backpack")
-        if bp then
-            for _, t in ipairs(bp:GetChildren()) do
-                if t:IsA("Tool") then table.insert(out, t) end
-            end
-        end
+        if bp then for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") then table.insert(out, t) end
+        end end
         return out
     end
 
-    --============================================================
-    -- WEAPON EQUIP
-    --============================================================
     local function equipWeapon()
         local now = U.clock()
         if now - St.lEqp < 1.2 then return end
         St.lEqp = now
-
-        local h = U.hum()
-        if not h then return end
+        local h = U.hum(); if not h then return end
 
         local current = equippedTool()
         if current and L.isWeapon(current.Name) then
@@ -150,9 +168,7 @@ function A.init(Ctx)
             return
         end
 
-        local tools = inventoryTools()
-        for i = 1, #tools do
-            local t = tools[i]
+        for _, t in ipairs(inventoryTools()) do
             if L.isWeapon(t.Name) then
                 if current then
                     pcall(function() h:UnequipTools() end)
@@ -161,7 +177,6 @@ function A.init(Ctx)
                 pcall(function() h:EquipTool(t) end)
                 St.eq = t.Name
                 St.swp = (St.swp or 0) + 1
-                print("[Dingus] equipped " .. t.Name)
                 return
             end
         end
@@ -169,111 +184,32 @@ function A.init(Ctx)
     end
 
     --============================================================
-    -- SKILL QUEUE
+    -- SKILLS
     --============================================================
-    local function enqueueSkill(idx)
+    local function fireSkill(idx)
         local now = U.clock()
         if now < St.skCd[idx] then return false end
-        table.insert(St.skillQueue, { idx = idx, at = now })
-        return true
-    end
-
-    local function processSkillQueue()
-        if #St.skillQueue == 0 then return end
-        local item = table.remove(St.skillQueue, 1)
-        local now = U.clock()
-        local idx = item.idx
-        if now < St.skCd[idx] then return end
         U.tap(SK_KEYS[idx])
         St.skCd[idx] = now + SK_CDS[idx]
         St.skC = (St.skC or 0) + 1
+        return true
     end
 
     local function fireRotation()
-        for i = 1, #ROTATION do
-            enqueueSkill(ROTATION[i])
+        for _, i in ipairs(ROTATION) do
+            if fireSkill(i) then return true end
         end
     end
 
     --============================================================
-    -- HITBOX ATTACK (dual-path)
-    --============================================================
-    local function buildHitboxCF(targetPart)
-        return targetPart.CFrame * CFrame.new(0, 0, -3)
-    end
-
-    local function hitboxScan(targetPart)
-        local params = OverlapParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        params.FilterDescendantsInstances = { U.Lp.Character }
-        local ok, parts = pcall(function()
-            return workspace:GetPartBoundsInBox(
-                buildHitboxCF(targetPart),
-                Vector3.new(7, 9, 7),
-                params
-            )
-        end)
-        if not ok or not parts then return nil end
-        for i = 1, #parts do
-            local parent = parts[i].Parent
-            if parent and parent:FindFirstChildOfClass("Humanoid") then
-                return parent, parts[i]
-            end
-        end
-        return nil
-    end
-
-    local function fireAttack(t)
-        -- Path 1: mouse click
-        U.m1()
-
-        -- Path 2: touch interest on target HRP (if supported)
-        if firetouchinterest and t and t.rp then
-            pcall(function()
-                firetouchinterest(t.rp, U.hrp(), 0)
-                task.wait()
-                firetouchinterest(t.rp, U.hrp(), 1)
-            end)
-        end
-
-        -- Path 3: activate tool
-        local tool = equippedTool()
-        if tool then pcall(function() tool:Activate() end) end
-
-        -- Path 4: hitbox scan — validate proximity to target
-        if t and t.rp then
-            local nearbyChar = hitboxScan(t.rp)
-            if nearbyChar and nearbyChar == t.ch then
-                -- Correct target is in range
-            end
-        end
-    end
-
-    --============================================================
-    -- ADAPTIVE INTERVAL
-    --============================================================
-    local function currentInterval()
-        local h = St.rHt
-        if #h < 5 then return St.aiI end
-        local hits = 0
-        for i = 1, #h do if h[i] then hits = hits + 1 end end
-        local rate = hits / #h
-        if rate > 0.7 then
-            St.aiI = math.max(Cfg.AtkIntMin, St.aiI - 0.02)
-        elseif rate < 0.3 then
-            St.aiI = math.min(Cfg.AtkIntMax, St.aiI + 0.02)
-        end
-        return St.aiI
-    end
-
-    --============================================================
-    -- STRIKE
+    -- ATTACK
     --============================================================
     local function strike(t)
         St.aAt = (St.aAt or 0) + 1
         local hpBefore = t.hm.Health
-
-        fireAttack(t)
+        U.m1()
+        local tool = equippedTool()
+        if tool then pcall(function() tool:Activate() end) end
 
         task.spawn(function()
             task.wait(0.25)
@@ -289,81 +225,68 @@ function A.init(Ctx)
         end)
     end
 
+    local function currentInterval()
+        if #St.rHt < 5 then return St.aiI end
+        local hits = 0
+        for i = 1, #St.rHt do if St.rHt[i] then hits = hits + 1 end end
+        local rate = hits / #St.rHt
+        if rate > 0.7 then
+            St.aiI = math.max(Cfg.AtkIntMin, St.aiI - 0.02)
+        elseif rate < 0.3 then
+            St.aiI = math.min(Cfg.AtkIntMax, St.aiI + 0.02)
+        end
+        return St.aiI
+    end
+
     --============================================================
-    -- FACING
+    -- FACING / WALK
     --============================================================
-    local function face(r, targetPos)
+    local function face(r, pos)
         pcall(function()
-            r.CFrame = CFrame.new(r.Position, Vector3.new(targetPos.X, r.Position.Y, targetPos.Z))
+            r.CFrame = CFrame.new(r.Position, Vector3.new(pos.X, r.Position.Y, pos.Z))
         end)
     end
 
-    --============================================================
-    -- MOVEMENT (user-aware)
-    --============================================================
-    local function canAutoMove()
-        return U.clock() > St.userMoveUntil
-    end
-
-    local function walkTo(h, r, targetPos)
+    local function walkTo(h, target)
         if not canAutoMove() then return end
-
         local now = U.clock()
         if now - St.lMove < 0.3 then return end
         St.lMove = now
-
-        -- Use MoveTo only, never mix with Move
-        pcall(function() h:MoveTo(targetPos) end)
+        pcall(function() h:MoveTo(target) end)
     end
 
     --============================================================
-    -- RETREAT (isolated)
+    -- RETREAT
     --============================================================
     local retreatRunning = false
-
     local function startRetreat(from)
         if retreatRunning then return end
         retreatRunning = true
         St.rtrC = (St.rtrC or 0) + 1
-        setState("RETREAT")
-
-        if Ctx.Spoof and Ctx.Spoof.surfaceUp then
-            pcall(Ctx.Spoof.surfaceUp)
-        end
+        St.cbtS = "RETREAT"
+        A.stopHover()
+        if Ctx.Spoof and Ctx.Spoof.surfaceUp then pcall(Ctx.Spoof.surfaceUp) end
 
         task.spawn(function()
-            U.tap("Q")
-            task.wait(0.25)
-
-            local r = U.hrp()
-            local h = U.hum()
-            if not r or not h then
-                retreatRunning = false
-                setState("IDLE")
-                return
-            end
+            U.tap("Q"); task.wait(0.25)
+            local r = U.hrp(); local h = U.hum()
+            if not r or not h then retreatRunning = false; St.cbtS = "IDLE"; return end
 
             local away = r.Position - from
             local flat = Vector3.new(away.X, 0, away.Z)
             if flat.Magnitude < 0.5 then flat = Vector3.new(1, 0, 0) end
-
             h.WalkSpeed = Cfg.RunSpeed
-            local dest = r.Position + flat.Unit * 60
-            pcall(function() h:MoveTo(dest) end)
+            pcall(function() h:MoveTo(r.Position + flat.Unit * 60) end)
 
-            local deadline = U.clock() + (Cfg.RetreatDelay or 4)
+            local deadline = U.clock() + Cfg.RetreatDelay
             while U.clock() < deadline do
-                local hh = U.hum()
-                if not hh then break end
-                if hh.Health / hh.MaxHealth > (Cfg.RetreatClearHP or 0.65) then break end
+                local hh = U.hum(); if not hh then break end
+                if hh.Health / hh.MaxHealth > Cfg.RetreatClearHP then break end
                 task.wait(0.25)
             end
-
             retreatRunning = false
             St.tgt = nil
-            if Ctx.Detect and Ctx.Detect.invalidate then
-                Ctx.Detect.invalidate()
-            end
+            if D.invalidate then D.invalidate() end
         end)
     end
 
@@ -375,8 +298,7 @@ function A.init(Ctx)
         St.tgt = tgt
         St.tgtKind = kind
         if tgt then
-            print(string.format("[Dingus] target %s (%s) @%.0f",
-                tgt.ch.Name, tostring(kind), tgt.d))
+            print(string.format("[Dingus] target %s (%s) @%.0f", tgt.ch.Name, kind, tgt.d))
         end
         return tgt
     end
@@ -385,60 +307,38 @@ function A.init(Ctx)
     -- COMBAT TICK
     --============================================================
     function A.combatTick()
-        if St.FlyActive then
-            setState("FLYING")
-            return
-        end
-
         if not St.cbt then
-            setState("IDLE")
+            St.cbtS = "IDLE"
+            if St.hoverActive then A.stopHover() end
             return
         end
 
-        local h = U.hum()
-        local r = U.hrp()
-        if not h or not r then
-            setState("IDLE")
-            return
-        end
-
-        if h.Health <= 0 then
-            setState("DEAD")
-            return
-        end
+        local h = U.hum(); local r = U.hrp()
+        if not h or not r then St.cbtS = "NO_CHAR"; return end
+        if h.Health <= 0 then St.cbtS = "DEAD"; if St.hoverActive then A.stopHover() end; return end
 
         local now = U.clock()
         local hpFrac = h.Health / h.MaxHealth
 
-        -- Maintenance
         equipWeapon()
         U.groundState()
-        processSkillQueue()
 
-        -- Damage tracking
         if h.Health < (St.lHp or 0) and now - (St.lHpT or 0) > 0.05 then
             St.lDmg = now
         end
         St.lHp = h.Health
         St.lHpT = now
 
-        -- Breath
-        if now - St.lBrt > 2.5 then
-            St.lBrt = now
-            U.tap("L")
-        end
+        if now - St.lBrt > 2.5 then St.lBrt = now; U.tap("L") end
 
         -- Retreat
         if St.rtr and hpFrac < Cfg.RetreatHP and not retreatRunning then
             local nearest = St.ths and St.ths[1]
-            if nearest then
-                startRetreat(nearest.rp.Position)
-                return
-            end
+            if nearest then startRetreat(nearest.rp.Position); return end
         end
         if retreatRunning then return end
 
-        -- Target validation
+        -- Target
         if not St.tgt or not St.tgt.ch.Parent or St.tgt.hm.Health <= 0 then
             if St.tgt then
                 St.kll = (St.kll or 0) + 1
@@ -449,32 +349,29 @@ function A.init(Ctx)
             end
             acquireTarget()
             if not St.tgt then
-                setState("IDLE")
+                St.cbtS = "IDLE"
+                if St.hoverActive then A.stopHover() end
                 return
             end
         end
 
         local t = St.tgt
         local tPos = t.ch:FindFirstChild("HumanoidRootPart")
-        if not tPos then
-            St.tgt = nil
-            return
-        end
+        if not tPos then St.tgt = nil; return end
 
         local dist = U.xzDist(r.Position, tPos.Position)
         t.d = dist
 
-        -- Evaluate enemy state once per tick
         local blocking = D.isEnemyBlocking(t)
         local stunned = D.isEnemyStunned(t)
 
         --========================================================
-        -- STATE: PUNISH (stun)
+        -- STATE: PUNISH
         --========================================================
         if stunned and dist <= 12 then
-            setState("PUNISH")
+            St.cbtS = "PUNISH"
             h.WalkSpeed = 16
-            face(r, tPos.Position)
+            updateHover(tPos)
 
             if now - St.lAtk >= Cfg.StunAtkInt then
                 St.lAtk = now
@@ -488,30 +385,12 @@ function A.init(Ctx)
         end
 
         --========================================================
-        -- STATE: BREAK_BLOCK
+        -- STATE: ATTACK (in range, hover behind)
         --========================================================
-        if blocking and dist <= 12 then
-            setState("BREAK_BLOCK")
+        if dist <= Cfg.AtkRange + 4 then
+            St.cbtS = "ATTACK"
             h.WalkSpeed = 16
-            face(r, tPos.Position)
-
-            if St.skl and now - St.lSkl > 0.5 then
-                St.lSkl = now
-                fireRotation()
-            end
-            if now - St.lAtk > St.aiI * 1.5 then
-                St.lAtk = now
-                strike(t)
-            end
-            return
-        end
-
-        --========================================================
-        -- STATE: ATTACK (close)
-        --========================================================
-        if dist <= Cfg.AtkRange then
-            setState("ATTACK")
-            h.WalkSpeed = 16
+            updateHover(tPos)
             face(r, tPos.Position)
 
             if now - St.lAtk >= currentInterval() then
@@ -526,29 +405,16 @@ function A.init(Ctx)
         end
 
         --========================================================
-        -- STATE: CLOSE_SLOW (mid-range defensive)
-        --========================================================
-        if dist <= 30 and (blocking or stunned) then
-            setState("CLOSE_SLOW")
-            h.WalkSpeed = Cfg.CloseInSpeed
-            walkTo(h, r, tPos.Position)
-            face(r, tPos.Position)
-            if St.skl and now - St.lSkl > 1.0 then
-                St.lSkl = now
-                fireRotation()
-            end
-            return
-        end
-
-        --========================================================
-        -- STATE: APPROACH (mid-range)
+        -- STATE: APPROACH (out of range, walk in)
         --========================================================
         if dist <= 30 then
-            setState("APPROACH")
-            h.WalkSpeed = Cfg.RunSpeed
-            walkTo(h, r, tPos.Position)
+            St.cbtS = "APPROACH"
+            if St.hoverActive then A.stopHover() end
+            h.WalkSpeed = blocking and Cfg.CloseInSpeed or Cfg.RunSpeed
+            walkTo(h, tPos.Position)
             face(r, tPos.Position)
-            if St.skl and now - St.lSkl > 1.6 then
+
+            if St.skl and now - St.lSkl > 1.5 then
                 St.lSkl = now
                 fireRotation()
             end
@@ -556,11 +422,12 @@ function A.init(Ctx)
         end
 
         --========================================================
-        -- STATE: APPROACH_FAR
+        -- STATE: FAR
         --========================================================
-        setState("APPROACH_FAR")
+        St.cbtS = "FAR"
+        if St.hoverActive then A.stopHover() end
         h.WalkSpeed = Cfg.RunSpeed
-        walkTo(h, r, tPos.Position)
+        walkTo(h, tPos.Position)
         face(r, tPos.Position)
         if St.skl and now - St.lSkl > 2.0 then
             St.lSkl = now
@@ -568,7 +435,11 @@ function A.init(Ctx)
         end
     end
 
-    print("[Dingus][attack] initialized · state machine + hitbox")
+    -- Cleanup on unload
+    Ctx.Cleanup = Ctx.Cleanup or {}
+    table.insert(Ctx.Cleanup, function() A.stopHover() end)
+
+    print("[Dingus][attack] initialized · hover-behind")
 end
 
 return A
