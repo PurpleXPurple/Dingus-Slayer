@@ -1,8 +1,7 @@
 local Cfg = {}
 
-Cfg.VERSION = 1
+Cfg.VERSION = 2
 
--- COMBAT
 Cfg.AtkRange       = 8
 Cfg.AtkInterval    = 0.55
 Cfg.AtkIntMin      = 0.35
@@ -10,46 +9,38 @@ Cfg.AtkIntMax      = 0.75
 Cfg.StunAtkInt     = 0.28
 Cfg.HitWindow      = 12
 
--- MOVEMENT
 Cfg.RunSpeed       = 32
 Cfg.CloseInSpeed   = 6
 Cfg.MaxMoveTick    = 8
 
--- RETREAT
 Cfg.RetreatHP      = 0.35
 Cfg.RetreatDelay   = 4.0
 Cfg.RetreatClearHP = 0.65
 
--- SCANNING
 Cfg.ScanTTL        = 1.2
 Cfg.CrowCheckT     = 1.5
 Cfg.QuestCycleT    = 5.0
 
--- HOVER-BEHIND
 Cfg.HoverEnabled   = true
-Cfg.HoverDistance  = 8      -- studs behind the boss
-Cfg.HoverHeight    = 2      -- studs above ground
-Cfg.HoverP         = 12000  -- high P, holds position firmly
-Cfg.HoverD         = 900    -- higher D, less oscillation
-Cfg.HoverTTL       = 0.05   -- recompute position this often
-Cfg.HoverRecalcT   = 0.15   -- full re-read of boss CFrame this often
+Cfg.HoverDistance  = 8
+Cfg.HoverHeight    = 2
+Cfg.HoverP         = 12000
+Cfg.HoverD         = 900
+Cfg.HoverTTL       = 0.05
+Cfg.HoverRecalcT   = 0.15
 
--- UNDERGROUND EVASION
 Cfg.UGDepth        = 22
 Cfg.UGTrigHP       = 0.55
 Cfg.UGMaxT         = 6
 Cfg.UGClearT       = 1.6
 
--- SKILLS
 Cfg.SkillKeys      = { "Z", "X", "C", "V", "B" }
 Cfg.SkillCooldowns = { 1.2, 2.0, 2.8, 3.6, 6.0 }
 Cfg.RotationOrder  = { 2, 1, 3, 4, 5 }
 
--- PULL
 Cfg.PullRange      = 45
 Cfg.MaxPull        = 12
 
--- PERSISTENCE
 Cfg.ConfigFile     = "dingus_config.json"
 Cfg.AutoSaveT      = 30
 
@@ -90,6 +81,12 @@ end
 
 function Cfg.setUtils(u) U = u end
 
+function Cfg.slotFile(slot)
+    slot = slot or "default"
+    if slot == "default" then return Cfg.ConfigFile end
+    return "dingus_config_" .. slot .. ".json"
+end
+
 function Cfg.snapshot()
     local t = { _version = Cfg.VERSION, _saved_at = os.time() }
     for _, k in ipairs(PERSIST) do t[k] = Cfg[k] end
@@ -113,20 +110,20 @@ function Cfg.apply(data)
     return applied, skipped
 end
 
-function Cfg.save()
+function Cfg.save(slot)
     if not U or not U.Fn or not U.Fn.writefile then return false, "no writefile" end
     local s = http()
     if not s then return false, "no HttpService" end
     local okE, encoded = pcall(function() return s:JSONEncode(Cfg.snapshot()) end)
     if not okE or not encoded then return false, "encode failed" end
-    local okW = pcall(U.Fn.writefile, Cfg.ConfigFile, encoded)
+    local okW = pcall(U.Fn.writefile, Cfg.slotFile(slot), encoded)
     if not okW then return false, "write failed" end
     return true, #encoded
 end
 
-function Cfg.load()
-    if not readfile then return false, "no readfile" end
-    local okR, raw = pcall(readfile, Cfg.ConfigFile)
+function Cfg.load(slot)
+    if not U or not U.Fn or not U.Fn.readfile then return false, "no readfile" end
+    local okR, raw = pcall(U.Fn.readfile, Cfg.slotFile(slot))
     if not okR or not raw or #raw < 5 then return false, "empty" end
     local s = http()
     if not s then return false, "no HttpService" end
@@ -142,29 +139,29 @@ function Cfg.reset()
     return true
 end
 
-function Cfg.delete()
-    if delfile then return pcall(delfile, Cfg.ConfigFile) end
-    return false
+function Cfg.delete(slot)
+    if not U or not U.Fn or not U.Fn.delfile then return false, "no delfile" end
+    return pcall(U.Fn.delfile, Cfg.slotFile(slot))
 end
 
-function Cfg.exists()
-    if isfile then
-        local ok, r = pcall(isfile, Cfg.ConfigFile)
+function Cfg.exists(slot)
+    if not U or not U.Fn then return false end
+    if U.Fn.isfile then
+        local ok, r = pcall(U.Fn.isfile, Cfg.slotFile(slot))
         if ok then return r end
     end
-    if readfile then
-        local ok, raw = pcall(readfile, Cfg.ConfigFile)
+    if U.Fn.readfile then
+        local ok, raw = pcall(U.Fn.readfile, Cfg.slotFile(slot))
         return ok and raw ~= nil
     end
     return false
 end
 
-function Cfg.fileSize()
-    if readfile then
-        local ok, raw = pcall(readfile, Cfg.ConfigFile)
-        return ok and raw and #raw or 0
-    end
-    return 0
+function Cfg.fileSize(slot)
+    if not U or not U.Fn or not U.Fn.readfile then return nil end
+    local ok, raw = pcall(U.Fn.readfile, Cfg.slotFile(slot))
+    if not ok or raw == nil then return nil end
+    return #raw
 end
 
 function Cfg.pretty()
