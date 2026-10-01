@@ -1,84 +1,58 @@
---[[
-    Dingus-Slayer · config.lua
-    Central settings store + JSON persistence.
-    Every field used by attack/main/gui is declared here with a default.
-]]--
-
 local Cfg = {}
 
---============================================================
--- VERSION (bump when schema changes)
---============================================================
 Cfg.VERSION = 1
 
---============================================================
 -- COMBAT
---============================================================
-Cfg.AtkRange       = 8       -- studs; melee hitbox begins here
-Cfg.AtkInterval    = 0.55    -- base seconds between M1 clicks
-Cfg.AtkIntMin      = 0.35    -- adaptive interval floor
-Cfg.AtkIntMax      = 0.75    -- adaptive interval ceiling
-Cfg.StunAtkInt     = 0.28    -- faster attack when enemy stunned
-Cfg.HitWindow      = 12      -- samples used by adaptive tracker
+Cfg.AtkRange       = 8
+Cfg.AtkInterval    = 0.55
+Cfg.AtkIntMin      = 0.35
+Cfg.AtkIntMax      = 0.75
+Cfg.StunAtkInt     = 0.28
+Cfg.HitWindow      = 12
 
---============================================================
 -- MOVEMENT
---============================================================
-Cfg.RunSpeed       = 32      -- WalkSpeed when chasing (default 16)
-Cfg.CloseInSpeed   = 6       -- slow approach when enemy blocking/stunned
-Cfg.MaxMoveTick    = 8       -- studs per tick when using CFrame nudge
+Cfg.RunSpeed       = 32
+Cfg.CloseInSpeed   = 6
+Cfg.MaxMoveTick    = 8
 
---============================================================
 -- RETREAT
---============================================================
-Cfg.RetreatHP      = 0.35    -- retreat when HP drops below this fraction
-Cfg.RetreatDelay   = 4.0     -- seconds spent running away
-Cfg.RetreatClearHP = 0.65    -- stop retreating once HP exceeds this
+Cfg.RetreatHP      = 0.35
+Cfg.RetreatDelay   = 4.0
+Cfg.RetreatClearHP = 0.65
 
---============================================================
 -- SCANNING
---============================================================
-Cfg.ScanTTL        = 1.2     -- boss scan cache TTL
-Cfg.CrowCheckT     = 1.5     -- crow cycle interval
-Cfg.QuestCycleT    = 5.0     -- BossHunts rescan interval
+Cfg.ScanTTL        = 1.2
+Cfg.CrowCheckT     = 1.5
+Cfg.QuestCycleT    = 5.0
 
---============================================================
--- HOVER (used for underground positioning + optional combat hover)
---============================================================
-Cfg.HoverHeight    = 20      -- studs above target if hover enabled
-Cfg.HoverP         = 4000    -- BodyPosition proportional constant
-Cfg.HoverD         = 700     -- BodyPosition derivative constant
+-- HOVER-BEHIND
+Cfg.HoverEnabled   = true
+Cfg.HoverDistance  = 8      -- studs behind the boss
+Cfg.HoverHeight    = 2      -- studs above ground
+Cfg.HoverP         = 12000  -- high P, holds position firmly
+Cfg.HoverD         = 900    -- higher D, less oscillation
+Cfg.HoverTTL       = 0.05   -- recompute position this often
+Cfg.HoverRecalcT   = 0.15   -- full re-read of boss CFrame this often
 
---============================================================
 -- UNDERGROUND EVASION
---============================================================
-Cfg.UGDepth        = 22      -- studs below ground level
-Cfg.UGTrigHP       = 0.55    -- dive trigger HP fraction
-Cfg.UGMaxT         = 6       -- seconds maximum underground
-Cfg.UGClearT       = 1.6     -- surfacing delay after threats clear
+Cfg.UGDepth        = 22
+Cfg.UGTrigHP       = 0.55
+Cfg.UGMaxT         = 6
+Cfg.UGClearT       = 1.6
 
---============================================================
 -- SKILLS
---============================================================
 Cfg.SkillKeys      = { "Z", "X", "C", "V", "B" }
 Cfg.SkillCooldowns = { 1.2, 2.0, 2.8, 3.6, 6.0 }
 Cfg.RotationOrder  = { 2, 1, 3, 4, 5 }
 
---============================================================
 -- PULL
---============================================================
 Cfg.PullRange      = 45
 Cfg.MaxPull        = 12
 
---============================================================
 -- PERSISTENCE
---============================================================
 Cfg.ConfigFile     = "dingus_config.json"
-Cfg.AutoSaveT      = 30      -- seconds between auto-saves
+Cfg.AutoSaveT      = 30
 
---============================================================
--- DEFAULT TOGGLES (session state, not persisted)
---============================================================
 Cfg.DefaultToggles = {
     combat  = false,
     skl     = true,
@@ -87,33 +61,24 @@ Cfg.DefaultToggles = {
     gsp     = true,
     crw     = true,
     stunPun = true,
+    hover   = true,
 }
 
---============================================================
--- FIELDS THAT GET SAVED / LOADED
---============================================================
 local PERSIST = {
     "AtkRange", "AtkInterval", "AtkIntMin", "AtkIntMax",
     "StunAtkInt", "HitWindow",
     "RunSpeed", "CloseInSpeed", "MaxMoveTick",
     "RetreatHP", "RetreatDelay", "RetreatClearHP",
     "ScanTTL", "CrowCheckT", "QuestCycleT",
-    "HoverHeight", "HoverP", "HoverD",
+    "HoverEnabled", "HoverDistance", "HoverHeight", "HoverP", "HoverD",
     "UGDepth", "UGTrigHP", "UGMaxT", "UGClearT",
     "PullRange", "MaxPull", "AutoSaveT",
 }
 
--- Snapshot of defaults for reset
 local DEFAULTS = {}
-for _, k in ipairs(PERSIST) do
-    DEFAULTS[k] = Cfg[k]
-end
+for _, k in ipairs(PERSIST) do DEFAULTS[k] = Cfg[k] end
 
---============================================================
--- HANDLERS
---============================================================
-local U     -- utils module (injected)
-local HttpS -- cached HttpService
+local U, HttpS
 
 local function http()
     if not HttpS then
@@ -123,44 +88,21 @@ local function http()
     return HttpS
 end
 
-local function canWrite()
-    return U and U.Fn and U.Fn.writefile ~= nil
-end
-
-local function canRead()
-    if readfile then return true end
-    return false
-end
-
-local function doRead(name)
-    if not readfile then return nil end
-    local ok, data = pcall(readfile, name)
-    if ok then return data end
-    return nil
-end
-
-function Cfg.setUtils(u)
-    U = u
-end
+function Cfg.setUtils(u) U = u end
 
 function Cfg.snapshot()
     local t = { _version = Cfg.VERSION, _saved_at = os.time() }
-    for _, k in ipairs(PERSIST) do
-        t[k] = Cfg[k]
-    end
+    for _, k in ipairs(PERSIST) do t[k] = Cfg[k] end
     return t
 end
 
 function Cfg.apply(data)
-    if type(data) ~= "table" then
-        return 0, "input not table"
-    end
+    if type(data) ~= "table" then return 0, 0 end
     local applied, skipped = 0, 0
     for _, k in ipairs(PERSIST) do
         local v = data[k]
         if v ~= nil then
-            local expected = type(DEFAULTS[k])
-            if type(v) == expected then
+            if type(v) == type(DEFAULTS[k]) then
                 Cfg[k] = v
                 applied = applied + 1
             else
@@ -172,60 +114,36 @@ function Cfg.apply(data)
 end
 
 function Cfg.save()
-    if not canWrite() then
-        return false, "no writefile"
-    end
+    if not U or not U.Fn or not U.Fn.writefile then return false, "no writefile" end
     local s = http()
-    if not s then
-        return false, "no HttpService"
-    end
-    local data = Cfg.snapshot()
-    local okE, encoded = pcall(function() return s:JSONEncode(data) end)
-    if not okE or not encoded then
-        return false, "encode failed: " .. tostring(encoded)
-    end
-    local okW, errW = pcall(U.Fn.writefile, Cfg.ConfigFile, encoded)
-    if not okW then
-        return false, "write failed: " .. tostring(errW)
-    end
+    if not s then return false, "no HttpService" end
+    local okE, encoded = pcall(function() return s:JSONEncode(Cfg.snapshot()) end)
+    if not okE or not encoded then return false, "encode failed" end
+    local okW = pcall(U.Fn.writefile, Cfg.ConfigFile, encoded)
+    if not okW then return false, "write failed" end
     return true, #encoded
 end
 
 function Cfg.load()
-    if not canRead() then
-        return false, "no readfile"
-    end
-    local raw = doRead(Cfg.ConfigFile)
-    if not raw or #raw < 5 then
-        return false, "empty or missing"
-    end
+    if not readfile then return false, "no readfile" end
+    local okR, raw = pcall(readfile, Cfg.ConfigFile)
+    if not okR or not raw or #raw < 5 then return false, "empty" end
     local s = http()
-    if not s then
-        return false, "no HttpService"
-    end
+    if not s then return false, "no HttpService" end
     local okD, data = pcall(function() return s:JSONDecode(raw) end)
-    if not okD or type(data) ~= "table" then
-        return false, "decode failed: " .. tostring(data)
-    end
+    if not okD or type(data) ~= "table" then return false, "decode failed" end
     local applied, skipped = Cfg.apply(data)
-    if applied == 0 then
-        return false, "no fields applied"
-    end
-    return true, string.format("%d applied, %d skipped", applied, skipped)
+    if applied == 0 then return false, "nothing applied" end
+    return true, string.format("%d applied", applied)
 end
 
 function Cfg.reset()
-    for _, k in ipairs(PERSIST) do
-        Cfg[k] = DEFAULTS[k]
-    end
-    return true, "reset to defaults"
+    for _, k in ipairs(PERSIST) do Cfg[k] = DEFAULTS[k] end
+    return true
 end
 
 function Cfg.delete()
-    if delfile then
-        local ok = pcall(delfile, Cfg.ConfigFile)
-        return ok
-    end
+    if delfile then return pcall(delfile, Cfg.ConfigFile) end
     return false
 end
 
@@ -234,33 +152,30 @@ function Cfg.exists()
         local ok, r = pcall(isfile, Cfg.ConfigFile)
         if ok then return r end
     end
-    return doRead(Cfg.ConfigFile) ~= nil
+    if readfile then
+        local ok, raw = pcall(readfile, Cfg.ConfigFile)
+        return ok and raw ~= nil
+    end
+    return false
 end
 
 function Cfg.fileSize()
-    local raw = doRead(Cfg.ConfigFile)
-    return raw and #raw or 0
+    if readfile then
+        local ok, raw = pcall(readfile, Cfg.ConfigFile)
+        return ok and raw and #raw or 0
+    end
+    return 0
 end
 
 function Cfg.pretty()
-    local lines = {}
-    lines[#lines+1] = "=== Current Config ==="
+    local lines = { "=== Current Config ===" }
     for _, k in ipairs(PERSIST) do
         local v = Cfg[k]
-        local vs
-        if type(v) == "number" then
-            vs = string.format("%.3f", v)
-            vs = vs:gsub("%.?0+$", "")
-        else
-            vs = tostring(v)
-        end
+        local vs = type(v) == "number" and string.format("%.3f", v) or tostring(v)
+        vs = vs:gsub("%.?0+$", "")
         lines[#lines+1] = string.format("  %-16s = %s", k, vs)
     end
     return table.concat(lines, "\n")
-end
-
-function Cfg.list()
-    return PERSIST
 end
 
 return Cfg
