@@ -1,7 +1,7 @@
 --[[
-    Dingus-Slayer · attack.lua v21
-    Movement fix: throttled MoveTo + directional Move every tick.
-    Range-based behavior. No hover.
+    Dingus-Slayer · attack.lua v22
+    Combat handler. Distance-tiered behavior. Uses detect for targeting,
+    Lists for classification. No hover. Throttled movement. Clean retreat.
 ]]--
 
 local A = {}
@@ -11,87 +11,126 @@ function A.init(Ctx)
     local Cfg = Ctx.Cfg
     local St = Ctx.St
     local D = Ctx.Detect
-    local Lists = Ctx.Lists
+    local L = Ctx.Lists
 
-    St.rHt = {}
-    St.aiI = Cfg.AtkInterval
-    St.skCd = { 0, 0, 0, 0, 0 }
-    St.lMove = 0
+    --============================================================
+    -- LOCAL STATE
+    --============================================================
+    St.rHt = St.rHt or {}
+    St.skCd = St.skCd or { 0, 0, 0, 0, 0 }
+    St.aiI = St.aiI or Cfg.AtkInterval
+    St.lAtk = St.lAtk or 0
+    St.lSkl = St.lSkl or 0
+    St.lEqp = St.lEqp or 0
+    St.lMove = St.lMove or 0
+    St.lBrt = St.lBrt or 0
+    St.lFac = St.lFac or 0
+    St.eq = St.eq or "none"
+    St.lTl = St.lTl or false
 
-    local function getEquipped()
+    local SK_KEYS = { "Z", "X", "C", "V", "B" }
+    local SK_CDS  = { 1.2, 2.0, 2.8, 3.6, 6.0 }
+    local ROTATION = { 2, 1, 3, 4, 5 }
+
+    --============================================================
+    -- TOOL ACCESS
+    --============================================================
+    local function equippedTool()
         local c = U.Lp.Character
         if not c then return nil end
         for _, t in ipairs(c:GetChildren()) do
-            if t:IsA("Tool") and not Lists.isCrow(t.Name) then return t end
+            if t:IsA("Tool") and not L.isCrow(t.Name) then return t end
         end
+        return nil
     end
 
-    local function getAllTools()
-        local l = {}
+    local function inventoryTools()
+        local out = {}
         local c = U.Lp.Character
         if c then
             for _, t in ipairs(c:GetChildren()) do
-                if t:IsA("Tool") then table.insert(l, t) end
+                if t:IsA("Tool") then table.insert(out, t) end
             end
         end
         local bp = U.Lp:FindFirstChildOfClass("Backpack")
         if bp then
             for _, t in ipairs(bp:GetChildren()) do
-                if t:IsA("Tool") then table.insert(l, t) end
+                if t:IsA("Tool") then table.insert(out, t) end
             end
         end
-        return l
+        return out
     end
 
-    function A.equipWeapon()
+    --============================================================
+    -- WEAPON EQUIP
+    --============================================================
+    local function equipWeapon()
         local now = U.clock()
         if now - St.lEqp < 1.0 then return end
         St.lEqp = now
+
         local h = U.hum()
         if not h then return end
-        local tools = getAllTools()
-        local eq = getEquipped()
-        if eq and Lists.isWeapon(eq.Name) then
-            St.eq = eq.Name
+
+        local current = equippedTool()
+        if current and L.isWeapon(current.Name) then
+            St.eq = current.Name
             return
         end
+
+        local tools = inventoryTools()
+        local best = nil
         for i = 1, #tools do
             local t = tools[i]
-            if t ~= eq and Lists.isWeapon(t.Name) then
-                if eq then
-                    pcall(function() h:UnequipTools() end)
-                    task.wait(0.1)
-                end
-                pcall(function() h:EquipTool(t) end)
-                St.eq = t.Name
-                St.swp = St.swp + 1
-                return
+            if L.isWeapon(t.Name) then
+                best = t
+                break
             end
         end
+        if not best then
+            St.eq = "unarmed"
+            return
+        end
+
+        if current then
+            pcall(function() h:UnequipTools() end)
+            task.wait(0.08)
+        end
+        pcall(function() h:EquipTool(best) end)
+        St.eq = best.Name
+        St.swp = (St.swp or 0) + 1
     end
 
-    local function fireSkill(i)
+    --============================================================
+    -- SKILLS
+    --============================================================
+    local function fireSkill(idx)
         local now = U.clock()
-        if now < St.skCd[i] then return false end
-        local keys = { "Z", "X", "C", "V", "B" }
-        local cds = { 1.2, 2.0, 2.8, 3.6, 6.0 }
-        U.tap(keys[i])
-        St.skCd[i] = now + cds[i]
-        St.skC = St.skC + 1
+        if now < St.skCd[idx] then return false end
+        U.tap(SK_KEYS[idx])
+        St.skCd[idx] = now + SK_CDS[idx]
+        St.skC = (St.skC or 0) + 1
         return true
     end
 
-    function A.fireRotation()
-        for _, i in ipairs({ 2, 1, 3, 4, 5 }) do
-            if fireSkill(i) then return true end
+    local function fireRotation()
+        for i = 1, #ROTATION do
+            if fireSkill(ROTATION[i]) then return true end
         end
+        return false
     end
 
-    local function adaptiveInterval()
-        if #St.rHt < 5 then return St.aiI end
+    --============================================================
+    -- ADAPTIVE ATTACK INTERVAL
+    --============================================================
+    local function currentInterval()
+        local h = St.rHt
+        if #h < 5 then return St.aiI end
         local hits = 0
-        for i = 1, #St.rHt do if St.rHt[i] then hits = hits + 1 end end
-        local rate = hits / #St.rHt
+        for i = 1, #h do
+            if h[i] then hits = hits + 1 end
+        end
+        local rate = hits / #h
         if rate > 0.7 then
             St.aiI = math.max(Cfg.AtkIntMin, St.aiI - 0.02)
         elseif rate < 0.3 then
@@ -100,192 +139,300 @@ function A.init(Ctx)
         return St.aiI
     end
 
-    function A.attackTarget(t)
-        St.aAt = St.aAt + 1
-        local before = t.hm.Health
+    --============================================================
+    -- SINGLE ATTACK
+    --============================================================
+    local function strike(t)
+        St.aAt = (St.aAt or 0) + 1
+        local hpBefore = t.hm.Health
+
         U.m1()
-        local eq = getEquipped()
-        if eq then pcall(function() eq:Activate() end) end
+        local tool = equippedTool()
+        if tool then pcall(function() tool:Activate() end) end
+
         task.spawn(function()
             task.wait(0.2)
-            if t and t.hm and t.hm.Parent then
-                if t.hm.Health < before then
-                    St.aHi = St.aHi + 1
-                    table.insert(St.rHt, true)
-                else
-                    St.aMs = St.aMs + 1
-                    table.insert(St.rHt, false)
-                end
-                if #St.rHt > 12 then table.remove(St.rHt, 1) end
+            if not (t and t.hm and t.hm.Parent) then return end
+            local hpAfter = t.hm.Health
+            local hit = hpAfter < hpBefore
+            table.insert(St.rHt, hit)
+            if #St.rHt > Cfg.HitWindow then table.remove(St.rHt, 1) end
+            if hit then
+                St.aHi = (St.aHi or 0) + 1
+            else
+                St.aMs = (St.aMs or 0) + 1
             end
         end)
     end
 
-    local function face(r, x2)
+    --============================================================
+    -- FACING / MOVEMENT
+    --============================================================
+    local function face(r, targetPos)
         pcall(function()
-            r.CFrame = CFrame.new(r.Position, Vector3.new(x2.Position.X, r.Position.Y, x2.Position.Z))
+            r.CFrame = CFrame.new(r.Position, Vector3.new(targetPos.X, r.Position.Y, targetPos.Z))
         end)
     end
 
-    -- Movement: MoveTo throttled + Move every tick
-    local function moveTo(h, r, targetPos)
-        local now = U.clock()
-        local myPos = r.Position
-        local dir = targetPos - myPos
+    local function walk(h, r, targetPos)
+        local dir = targetPos - r.Position
         dir = Vector3.new(dir.X, 0, dir.Z)
-
         if dir.Magnitude < 0.5 then return end
 
-        local dirUnit = dir.Unit
-
-        -- Persistent push every tick
-        pcall(function() h:Move(dirUnit) end)
+        -- Persistent directional push
+        pcall(function() h:Move(dir.Unit) end)
         pcall(function() h.WalkToPoint = targetPos end)
 
         -- Throttled MoveTo for pathfinding
-        if now - (St.lMove or 0) > 0.25 then
+        local now = U.clock()
+        if now - St.lMove > 0.25 then
             St.lMove = now
             pcall(function() h:MoveTo(targetPos) end)
         end
     end
 
+    --============================================================
+    -- RETREAT
+    --============================================================
+    local function startRetreat(from)
+        if St.cbtS == "RETREAT" then return end
+        St.cbtS = "RETREAT"
+        St.rtrC = (St.rtrC or 0) + 1
+        St.tgt = nil
+
+        if Ctx.Spoof and Ctx.Spoof.surfaceUp then
+            pcall(Ctx.Spoof.surfaceUp)
+        end
+
+        task.spawn(function()
+            U.tap("Q")
+            task.wait(0.25)
+
+            local r = U.hrp()
+            local h = U.hum()
+            if not r or not h then St.cbtS = "IDLE"; return end
+
+            local away = r.Position - from
+            local flat = Vector3.new(away.X, 0, away.Z)
+            if flat.Magnitude < 0.5 then flat = Vector3.new(1, 0, 0) end
+
+            h.WalkSpeed = Cfg.RunSpeed
+            pcall(function() h:MoveTo(r.Position + flat.Unit * 60) end)
+
+            local deadline = U.clock() + Cfg.RetreatDelay
+            while U.clock() < deadline do
+                local hh = U.hum()
+                if not hh then break end
+                if hh.Health / hh.MaxHealth > Cfg.RetreatClearHP then break end
+                task.wait(0.25)
+            end
+
+            St.cbtS = "IDLE"
+        end)
+    end
+
+    --============================================================
+    -- TARGET ACQUISITION
+    --============================================================
+    local function acquireTarget()
+        local tgt, kind = D.pickTarget()
+        St.tgt = tgt
+        St.tgtKind = kind
+        if tgt then
+            St.cbtS = "ENGAGE"
+            print(string.format("[Dingus] target %s (%s) @%.0f", tgt.ch.Name, kind, tgt.d))
+        end
+        return tgt
+    end
+
+    --============================================================
+    -- MAIN TICK
+    --============================================================
     function A.combatTick()
-        if not St.cbt then St.cbtS = "IDLE"; return end
+        if not St.cbt then
+            St.cbtS = "IDLE"
+            return
+        end
 
         local h = U.hum()
         local r = U.hrp()
-        if not h or not r then St.cbtS = "NO_CHAR"; return end
-        if h.Health <= 0 then St.cbtS = "DEAD"; return end
+        if not h or not r then
+            St.cbtS = "NO_CHAR"
+            return
+        end
+        if h.Health <= 0 then
+            St.cbtS = "DEAD"
+            return
+        end
 
         local now = U.clock()
         local hpFrac = h.Health / h.MaxHealth
 
-        A.equipWeapon()
+        -- Maintenance
+        equipWeapon()
         U.groundState()
 
+        -- Track damage timing
         if h.Health < (St.lHp or 0) and now - (St.lHpT or 0) > 0.05 then
             St.lDmg = now
         end
         St.lHp = h.Health
         St.lHpT = now
 
-        if now - (St.lBrt or 0) > 2.5 then
+        -- Breath maintenance
+        if now - St.lBrt > 2.5 then
             St.lBrt = now
             U.tap("L")
         end
 
-        -- Retreat
+        -- Retreat check
         if St.rtr and hpFrac < Cfg.RetreatHP then
             local nearest = St.ths and St.ths[1]
             if nearest then
-                local d = r.Position - nearest.rp.Position
-                local flat = Vector3.new(d.X, 0, d.Z)
-                if flat.Magnitude < 0.5 then flat = Vector3.new(1, 0, 0) end
-                St.tgt = nil
-                St.cbtS = "RETREAT"
-                St.rtrC = St.rtrC + 1
-                if Ctx.Spoof and Ctx.Spoof.surfaceUp then Ctx.Spoof.surfaceUp() end
-                task.spawn(function()
-                    U.tap("Q")
-                    task.wait(0.3)
-                    local hh = U.hum()
-                    if hh then
-                        h.WalkSpeed = Cfg.RunSpeed
-                        pcall(hh.MoveTo, hh, r.Position + flat.Unit * 60)
-                    end
-                    local dl = U.clock() + 4
-                    while U.clock() < dl do
-                        local x = U.hum()
-                        if not x or x.Health / x.MaxHealth > 0.65 then break end
-                        task.wait(0.3)
-                    end
-                    St.cbtS = "IDLE"
-                end)
+                startRetreat(nearest.rp.Position)
                 return
             end
         end
-
         if St.cbtS == "RETREAT" then return end
 
-        -- Target acquisition
+        -- Target acquisition / validation
         if not St.tgt or not St.tgt.ch.Parent or St.tgt.hm.Health <= 0 then
             if St.tgt then
-                St.kll = St.kll + 1
-                St.bKll = St.bKll + 1
+                St.kll = (St.kll or 0) + 1
+                St.bKll = (St.bKll or 0) + 1
                 print(string.format("[Dingus] killed %s (%d)", St.tgt.ch.Name, St.bKll))
                 St.tgt = nil
-                St.lScn = 0
+                if D.invalidate then D.invalidate() end
             end
-            local list = D.scanBosses()
-            St.tgt = list[1]
-            if not St.tgt then St.cbtS = "IDLE"; return end
-            St.cbtS = "ENGAGE"
-            print(string.format("[Dingus] target %s @%.0f", St.tgt.ch.Name, St.tgt.d))
+            acquireTarget()
+            if not St.tgt then
+                St.cbtS = "IDLE"
+                return
+            end
         end
 
         local t = St.tgt
-        local x2 = t.ch:FindFirstChild("HumanoidRootPart")
-        if not x2 then St.tgt = nil; return end
+        local tPos = t.ch:FindFirstChild("HumanoidRootPart")
+        if not tPos then
+            St.tgt = nil
+            return
+        end
 
-        local dist = U.xzDist(r.Position, x2.Position)
+        local dist = U.xzDist(r.Position, tPos.Position)
         t.d = dist
 
-        local eBlk = D.isEnemyBlocking(t)
-        local eSt = D.isEnemyStunned(t)
+        -- Enemy state checks
+        local blocking = D.isEnemyBlocking(t)
+        local stunned = D.isEnemyStunned(t)
 
-        -- FAR: > 30 studs
+        --========================================================
+        -- DISTANCE 1: FAR (> 30) — chase + ranged skills
+        --========================================================
         if dist > 30 then
             St.cbtS = "APPROACH_FAR"
             h.WalkSpeed = Cfg.RunSpeed
-            moveTo(h, r, x2.Position)
-            face(r, x2)
-            if St.skl and now - (St.lSkl or 0) > 2.0 then
+            walk(h, r, tPos.Position)
+            face(r, tPos.Position)
+
+            if St.skl and now - St.lSkl > 2.0 then
                 St.lSkl = now
-                A.fireRotation()
+                fireRotation()
             end
             return
         end
 
-        -- MID: 8-30 studs
+        --========================================================
+        -- DISTANCE 2: MID (8-30) — approach + skills
+        --========================================================
         if dist > 8 then
-            if eBlk or eSt then
+            if blocking or stunned then
+                -- Slow, careful approach when boss is defensive
                 St.cbtS = "CLOSE_SLOW"
                 h.WalkSpeed = Cfg.CloseInSpeed
-                moveTo(h, r, x2.Position)
-                face(r, x2)
-                if St.skl and now - (St.lSkl or 0) > 1.0 then
+                walk(h, r, tPos.Position)
+                face(r, tPos.Position)
+
+                if St.skl and now - St.lSkl > 1.0 then
                     St.lSkl = now
-                    A.fireRotation()
+                    fireRotation()
                 end
                 return
             end
+
             St.cbtS = "APPROACH"
             h.WalkSpeed = Cfg.RunSpeed
-            moveTo(h, r, x2.Position)
-            face(r, x2)
-            if St.skl and now - (St.lSkl or 0) > 1.6 then
+            walk(h, r, tPos.Position)
+            face(r, tPos.Position)
+
+            if St.skl and now - St.lSkl > 1.6 then
                 St.lSkl = now
-                A.fireRotation()
+                fireRotation()
             end
             return
         end
 
-        -- CLOSE: < 8 studs
-        St.cbtS = eBlk and "BREAK_BLOCK" or (eSt and "PUNISH" or "ATTACK")
+        --========================================================
+        -- DISTANCE 3: CLOSE (< 8) — melee
+        --========================================================
         h.WalkSpeed = 16
-        face(r, x2)
+        face(r, tPos.Position)
 
-        local interval = eSt and Cfg.StunAtkInt or adaptiveInterval()
+        if blocked(stunned, blocking) then
+            return
+        end
+
+        -- Normal attack cycle
+        local interval = currentInterval()
         if now - St.lAtk >= interval then
             St.lAtk = now
-            A.attackTarget(t)
+            strike(t)
         end
 
-        if St.skl and now - (St.lSkl or 0) > 1.6 then
+        if St.skl and now - St.lSkl > 1.6 then
             St.lSkl = now
-            A.fireRotation()
+            fireRotation()
         end
     end
+
+    --============================================================
+    -- CLOSE-RANGE STATE DISPATCH
+    --============================================================
+    function blocked(stunned, blocking)
+        local now = U.clock()
+
+        if stunned then
+            St.cbtS = "PUNISH"
+            if now - St.lAtk >= Cfg.StunAtkInt then
+                St.lAtk = now
+                strike(St.tgt)
+            end
+            if St.skl and now - St.lSkl > 0.3 then
+                St.lSkl = now
+                fireRotation()
+            end
+            return true
+        end
+
+        if blocking then
+            St.cbtS = "BREAK_BLOCK"
+            -- Skills break blocks faster than melee
+            if St.skl and now - St.lSkl > 0.5 then
+                St.lSkl = now
+                fireRotation()
+            end
+            -- Occasional melee to keep pressure
+            if now - St.lAtk > St.aiI * 1.5 then
+                St.lAtk = now
+                strike(St.tgt)
+            end
+            return true
+        end
+
+        St.cbtS = "ATTACK"
+        return false
+    end
+
+    print("[Dingus][attack] initialized")
 end
 
 return A
