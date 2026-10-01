@@ -7,6 +7,10 @@ function Sp.init(Ctx)
 
     St.Spf = { hpC = 0, bkC = 0, spdC = 0, kbC = 0, jmpC = 0 }
 
+    local function log(msg)
+        print("[Dingus][UG] " .. msg)
+    end
+
     local function spoofHP()
         local h = U.hum()
         if not h then return end
@@ -119,8 +123,8 @@ function Sp.init(Ctx)
         St.uGt = U.clock() + Cfg.UGMaxT
         St.uST = 0
         St.uThC = 0
-        if Ctx.Log then Ctx.Log("UG", "dive #" .. (St.uC+1 or 1)) end
         St.uC = (St.uC or 0) + 1
+        log("dive #" .. St.uC)
     end
 
     function Sp.surfaceUp()
@@ -136,7 +140,7 @@ function Sp.init(Ctx)
         local res = workspace:Raycast(r.Position, Vector3.new(0, 200, 0), rp)
         local uy = res and (res.Position.Y + 3) or (r.Position.Y + Cfg.UGDepth + 3)
         bp.Position = Vector3.new(r.Position.X, uy, r.Position.Z)
-        if Ctx.Log then Ctx.Log("UG", string.format("up after %.1fs", St.uST or 0)) end
+        log(string.format("up after %.1fs", St.uST or 0))
     end
 
     function Sp.checkUG()
