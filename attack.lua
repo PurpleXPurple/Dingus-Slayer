@@ -1,10 +1,3 @@
---[[
-    Dingus-Slayer · attack.lua v26
-    Single heartbeat movement loop. Humanoid:Move per frame.
-    Attacks gated by real range. Stall detection forces CFrame.
-    No hover. No pathfinding. Just direct chase.
-]]--
-
 local A = {}
 
 function A.init(Ctx)
@@ -14,11 +7,7 @@ function A.init(Ctx)
     local D = Ctx.Detect
     local L = Ctx.Lists
     local RunService = game:GetService("RunService")
-    local UIS = game:GetService("UserInputService")
 
-    --============================================================
-    -- STATE
-    --============================================================
     St.rHt = {}
     St.skCd = { 0, 0, 0, 0, 0 }
     St.aiI = Cfg.AtkInterval
@@ -34,14 +23,19 @@ function A.init(Ctx)
     St.lastPos = nil
     St.lastPosTime = 0
     St.stuckWarnings = 0
+    St.lastComboStep = 0
+    St.comboIndex = 0
+    St.lastComboTime = 0
 
     local SK_KEYS = { "Z", "X", "C", "V", "B" }
     local SK_CDS  = { 1.2, 2.0, 2.8, 3.6, 6.0 }
     local ROTATION = { 2, 1, 3, 4, 5 }
 
-    --============================================================
-    -- SCRUB ORPHAN MOVERS (critical — this is what keeps failing)
-    --============================================================
+    local COMBO_AIR = { "m1", "m2", "m1", "m2", "m1" }
+    local COMBO_SPECIAL_A = { "m2", "m2", "m1", "m2", "m1" }
+    local COMBO_SPECIAL_B = { "m1", "m1", "m2", "m1", "m2" }
+    local COMBO_RESET_TIME = 1.2
+
     local function scrubMovers()
         local r = U.hrp()
         if not r then return 0 end
@@ -49,8 +43,7 @@ function A.init(Ctx)
         for _, c in ipairs(r:GetChildren()) do
             if c:IsA("BodyPosition") or c:IsA("BodyVelocity")
                 or c:IsA("BodyGyro") or c:IsA("BodyForce")
-                or c:IsA("LinearVelocity") or c:IsA("AlignOrientation")
-                or c:IsA("AlignPosition") then
+                or c:IsA("LinearVelocity") or c:IsA("AlignOrientation") then
                 c:Destroy()
                 n = n + 1
             end
@@ -62,17 +55,12 @@ function A.init(Ctx)
         end
         return n
     end
-
-    -- Run scrub on init and on respawn
     scrubMovers()
     U.Lp.CharacterAdded:Connect(function()
         task.wait(1)
         scrubMovers()
     end)
 
-    --============================================================
-    -- TOOL / WEAPON
-    --============================================================
     local function equippedTool()
         local c = U.Lp.Character
         if not c then return nil end
@@ -122,9 +110,6 @@ function A.init(Ctx)
         end
     end
 
-    --============================================================
-    -- SKILLS
-    --============================================================
     local function fireSkill(idx)
         local now = U.clock()
         if now < St.skCd[idx] then return false end
@@ -140,15 +125,43 @@ function A.init(Ctx)
         end
     end
 
-    --============================================================
-    -- ATTACK (only fires when in range)
-    --============================================================
+    local function m1() U.m1() end
+    local function m2()
+        if mouse2click then
+            pcall(mouse2click)
+        elseif VIM then
+            pcall(function() VIM:SendMouseButtonEvent(0, 0, 1, true, game, 0) end)
+            task.wait(0.03)
+            pcall(function() VIM:SendMouseButtonEvent(0, 0, 1, false, game, 0) end)
+        end
+    end
+
     local function strike(t)
         St.aAt = (St.aAt or 0) + 1
         local hpBefore = t.hm.Health
-        U.m1()
+
+        local now = U.clock()
+        if now - St.lastComboTime > COMBO_RESET_TIME then
+            St.comboIndex = 0
+        end
+        St.lastComboTime = now
+        St.comboIndex = St.comboIndex + 1
+
+        local combo
+        if t.d and t.d > 15 then
+            combo = COMBO_AIR
+        elseif math.random() < 0.5 then
+            combo = COMBO_SPECIAL_A
+        else
+            combo = COMBO_SPECIAL_B
+        end
+
+        local step = combo[((St.comboIndex - 1) % #combo) + 1]
+        if step == "m2" then m2() else m1() end
+
         local tool = equippedTool()
         if tool then pcall(function() tool:Activate() end) end
+
         task.spawn(function()
             task.wait(0.25)
             if not (t and t.hm and t.hm.Parent) then return end
@@ -176,21 +189,16 @@ function A.init(Ctx)
         return St.aiI
     end
 
-    --============================================================
-    -- FACING
-    --============================================================
     local function faceTarget(r, targetPos)
         pcall(function()
             r.CFrame = CFrame.new(r.Position, Vector3.new(targetPos.X, r.Position.Y, targetPos.Z))
         end)
     end
 
-    --============================================================
-    -- MOVEMENT (runs on heartbeat, always)
-    --============================================================
     local function movementTick(dt)
         if not St.cbt then return end
         if St.cbtS == "RETREAT" then return end
+        if St.FlyActive then return end
         if not St.tgt or not St.tgt.ch.Parent or St.tgt.hm.Health <= 0 then return end
 
         local h = U.hum()
@@ -204,25 +212,19 @@ function A.init(Ctx)
         local targetPos = targetHRP.Position
         local dist = U.xzDist(myPos, targetPos)
 
-        -- Stop moving if within melee range
         if dist <= Cfg.AtkRange then
             h:Move(Vector3.zero)
             return
         end
 
-        -- Direction to target (flat, no Y)
         local dir = targetPos - myPos
         local flatDir = Vector3.new(dir.X, 0, dir.Z)
         if flatDir.Magnitude < 0.1 then return end
         flatDir = flatDir.Unit
 
-        -- Force walkspeed
         h.WalkSpeed = Cfg.RunSpeed
-
-        -- PRIMARY: Humanoid:Move every single frame
         h:Move(flatDir)
 
-        -- STALL DETECTION: track position, force CFrame if stuck
         local now = U.clock()
         if not St.lastPos then
             St.lastPos = myPos
@@ -233,7 +235,6 @@ function A.init(Ctx)
                 St.lastPos = myPos
                 St.lastPosTime = now
             elseif now - St.lastPosTime > 1.2 then
-                -- Stuck: force CFrame nudge forward
                 local nudge = flatDir * 2.5
                 local newPos = myPos + nudge
                 pcall(function()
@@ -242,33 +243,26 @@ function A.init(Ctx)
                 St.lastPos = newPos
                 St.lastPosTime = now
                 St.stuckWarnings = St.stuckWarnings + 1
-                if St.stuckWarnings % 5 == 1 then
-                    print(string.format("[Dingus][Move] stuck — forced CFrame #%d", St.stuckWarnings))
-                end
             end
         end
 
-        -- Periodically log movement state
         if now - St.lMoveLog > 2.0 then
             St.lMoveLog = now
             print(string.format("[Dingus][Move] chasing %s @%.0f", St.tgt.ch.Name, dist))
         end
     end
 
-    -- Start heartbeat movement loop
     RunService.Heartbeat:Connect(function(dt)
         pcall(movementTick, dt)
     end)
 
-    --============================================================
-    -- RETREAT
-    --============================================================
     local retreatRunning = false
     local function startRetreat(from)
         if retreatRunning then return end
         retreatRunning = true
         St.rtrC = (St.rtrC or 0) + 1
         St.cbtS = "RETREAT"
+        if Ctx.Fly and Ctx.Fly.stop then Ctx.Fly.stop() end
         if Ctx.Spoof and Ctx.Spoof.surfaceUp then pcall(Ctx.Spoof.surfaceUp) end
         task.spawn(function()
             U.tap("Q"); task.wait(0.25)
@@ -292,9 +286,6 @@ function A.init(Ctx)
         end)
     end
 
-    --============================================================
-    -- TARGET ACQUISITION
-    --============================================================
     local function acquireTarget()
         local tgt, kind = D.pickTarget()
         St.tgt = tgt
@@ -305,19 +296,21 @@ function A.init(Ctx)
         return tgt
     end
 
-    --============================================================
-    -- COMBAT TICK (attacks only)
-    --============================================================
     function A.combatTick()
         if not St.cbt then
             St.cbtS = "IDLE"
+            if Ctx.Fly and Ctx.Fly.active then Ctx.Fly.stop() end
             return
         end
 
         local h = U.hum()
         local r = U.hrp()
         if not h or not r then St.cbtS = "NO_CHAR"; return end
-        if h.Health <= 0 then St.cbtS = "DEAD"; return end
+        if h.Health <= 0 then
+            St.cbtS = "DEAD"
+            if Ctx.Fly and Ctx.Fly.active then Ctx.Fly.stop() end
+            return
+        end
 
         local now = U.clock()
         local hpFrac = h.Health / h.MaxHealth
@@ -333,24 +326,27 @@ function A.init(Ctx)
 
         if now - St.lBrt > 2.5 then St.lBrt = now; U.tap("L") end
 
-        -- Retreat check
         if St.rtr and hpFrac < Cfg.RetreatHP and not retreatRunning then
             local nearest = St.ths and St.ths[1]
             if nearest then startRetreat(nearest.rp.Position); return end
         end
         if retreatRunning then return end
 
-        -- Target
         if not St.tgt or not St.tgt.ch.Parent or St.tgt.hm.Health <= 0 then
             if St.tgt then
                 St.kll = (St.kll or 0) + 1
                 St.bKll = (St.bKll or 0) + 1
                 print(string.format("[Dingus] killed %s (%d)", St.tgt.ch.Name, St.bKll))
                 St.tgt = nil
+                if Ctx.Fly and Ctx.Fly.active then Ctx.Fly.stop() end
                 if D.invalidate then D.invalidate() end
             end
             acquireTarget()
-            if not St.tgt then St.cbtS = "IDLE"; return end
+            if not St.tgt then
+                St.cbtS = "IDLE"
+                if Ctx.Fly and Ctx.Fly.active then Ctx.Fly.stop() end
+                return
+            end
         end
 
         local t = St.tgt
@@ -360,10 +356,14 @@ function A.init(Ctx)
         local dist = U.xzDist(r.Position, tPos.Position)
         t.d = dist
 
-        -- STATE: out of range
-        if dist > Cfg.AtkRange then
+        if dist > Cfg.AtkRange + 4 then
             St.cbtS = "APPROACH"
-            -- Movement loop handles this. Fire ranged skills while walking.
+            if Ctx.Fly and not Ctx.Fly.active then
+                Ctx.Fly.start()
+            end
+            if Ctx.Fly and Ctx.Fly.active then
+                return
+            end
             faceTarget(r, tPos.Position)
             if St.skl and now - St.lSkl > 2.0 then
                 St.lSkl = now
@@ -372,7 +372,11 @@ function A.init(Ctx)
             return
         end
 
-        -- STATE: in range — attack
+        if Ctx.Fly and Ctx.Fly.active then
+            Ctx.Fly.stop()
+            task.wait(0.15)
+        end
+
         local blocking = D.isEnemyBlocking(t)
         local stunned = D.isEnemyStunned(t)
 
@@ -415,9 +419,6 @@ function A.init(Ctx)
         end
     end
 
-    --============================================================
-    -- MANUAL TEST BUTTON API
-    --============================================================
     function A.forceScan()
         if D.invalidate then D.invalidate() end
         local list = D.scanBosses()
@@ -427,22 +428,12 @@ function A.init(Ctx)
         end
     end
 
-    function A.forceMove()
-        if not St.tgt then
-            print("[Dingus] no target — nothing to move to")
-            return
-        end
-        local r = U.hrp()
-        local tPos = St.tgt.ch:FindFirstChild("HumanoidRootPart")
-        if r and tPos then
-            r.CFrame = CFrame.new(tPos.Position + Vector3.new(0, 3, 0))
-            print("[Dingus] teleported to target for testing")
-        end
-    end
-
     Ctx.Cleanup = Ctx.Cleanup or {}
+    table.insert(Ctx.Cleanup, function()
+        if Ctx.Fly and Ctx.Fly.stop then Ctx.Fly.stop() end
+    end)
 
-    print("[Dingus][attack] initialized · v26 chase-move")
+    print("[Dingus][attack] initialized · target-locked combat")
 end
 
 return A
