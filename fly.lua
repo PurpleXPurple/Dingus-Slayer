@@ -219,7 +219,7 @@ function F.init(Ctx)
             F.bg.CFrame = CFrame.new(myPos, horizontalLook)
         end
 
-        local measuredSpeed = hum.RootPart and hum.RootPart.AssemblyLinearVelocity.Magnitude or 0
+        local measuredSpeed = hrp.AssemblyLinearVelocity.Magnitude
         F.speedSamples = F.speedSamples + 1
         F.speedSum = F.speedSum + measuredSpeed
         F.avgSpeed = F.speedSum / F.speedSamples
@@ -240,8 +240,7 @@ function F.init(Ctx)
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function() F.stop() end)
 
-    Ctx.Fly = F
-    print("[Dingus][Fly] initialized")
+    print("[Dingus][fly] initialized")
 end
 
 return F
