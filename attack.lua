@@ -23,15 +23,14 @@ function A.init(Ctx)
     St.lastPos = nil
     St.lastPosTime = 0
     St.stuckWarnings = 0
-    St.lastComboStep = 0
-    St.comboIndex = 0
     St.lastComboTime = 0
+    St.comboIndex = 0
 
     local SK_KEYS = { "Z", "X", "C", "V", "B" }
     local SK_CDS  = { 1.2, 2.0, 2.8, 3.6, 6.0 }
     local ROTATION = { 2, 1, 3, 4, 5 }
 
-    local COMBO_AIR = { "m1", "m2", "m1", "m2", "m1" }
+    local COMBO_AIR       = { "m1", "m2", "m1", "m2", "m1" }
     local COMBO_SPECIAL_A = { "m2", "m2", "m1", "m2", "m1" }
     local COMBO_SPECIAL_B = { "m1", "m1", "m2", "m1", "m2" }
     local COMBO_RESET_TIME = 1.2
@@ -126,6 +125,7 @@ function A.init(Ctx)
     end
 
     local function m1() U.m1() end
+
     local function m2()
         if mouse2click then
             pcall(mouse2click)
@@ -357,7 +357,7 @@ function A.init(Ctx)
         t.d = dist
 
         if dist > Cfg.AtkRange + 4 then
-            St.cbtS = "APPROACH"
+            St.cbtS = "FLY"
             if Ctx.Fly and not Ctx.Fly.active then
                 Ctx.Fly.start()
             end
@@ -428,12 +428,21 @@ function A.init(Ctx)
         end
     end
 
+    function A.forceMove()
+        if not St.tgt then return end
+        local r = U.hrp()
+        local tPos = St.tgt.ch:FindFirstChild("HumanoidRootPart")
+        if r and tPos then
+            r.CFrame = CFrame.new(tPos.Position + Vector3.new(0, 3, 0))
+        end
+    end
+
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function()
         if Ctx.Fly and Ctx.Fly.stop then Ctx.Fly.stop() end
     end)
 
-    print("[Dingus][attack] initialized · target-locked combat")
+    print("[Dingus][attack] initialized")
 end
 
 return A
