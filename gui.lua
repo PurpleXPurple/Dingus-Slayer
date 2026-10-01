@@ -1,6 +1,7 @@
 --[[
-    Dingus-Slayer · gui.lua v24
-    Resize-safe. Type-guarded visibility. Persistent size memory.
+    Dingus-Slayer · gui.lua v25
+    Dual-frame architecture: full window + minimized pill.
+    TweenService transitions. Draggable pill persists position.
 ]]--
 
 local G = {}
@@ -10,6 +11,9 @@ function G.init(Ctx)
     local Cfg = Ctx.Cfg
     local St = Ctx.St
 
+    local Tween = game:GetService("TweenService")
+    local UIS = game:GetService("UserInputService")
+
     local parent = (gethui and gethui()) or game:GetService("CoreGui")
     local old = parent:FindFirstChild("DingusUI")
     if old then old:Destroy() end
@@ -18,155 +22,281 @@ function G.init(Ctx)
     gui.Name = "DingusUI"
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     gui.Parent = parent
 
     --============================================================
-    -- WINDOW
+    -- WINDOW CONSTANTS
     --============================================================
-    local FULL_W, FULL_H = 520, 500
-    local MINI_W, MINI_H = 140, 30
+    local WIN_W, WIN_H = 520, 500
+    local PILL_W, PILL_H = 150, 34
 
+    --============================================================
+    -- COLOR PALETTE
+    --============================================================
+    local CLR = {
+        bg        = Color3.fromRGB(14, 14, 18),
+        bgHeader  = Color3.fromRGB(30, 18, 16),
+        bgPanel   = Color3.fromRGB(20, 20, 28),
+        bgRow     = Color3.fromRGB(24, 24, 32),
+        bgSlider  = Color3.fromRGB(38, 38, 48),
+        border    = Color3.fromRGB(200, 90, 70),
+        accent    = Color3.fromRGB(220, 90, 70),
+        accentDim = Color3.fromRGB(150, 60, 50),
+        green     = Color3.fromRGB(70, 180, 100),
+        red       = Color3.fromRGB(200, 60, 70),
+        blue      = Color3.fromRGB(60, 130, 200),
+        text      = Color3.fromRGB(230, 230, 240),
+        textDim   = Color3.fromRGB(160, 170, 190),
+        textMuted = Color3.fromRGB(120, 130, 150),
+    }
+
+    --============================================================
+    -- FULL WINDOW FRAME
+    --============================================================
     local win = Instance.new("Frame")
     win.Name = "Window"
-    win.Size = UDim2.new(0, FULL_W, 0, FULL_H)
-    win.Position = UDim2.new(0.5, -FULL_W / 2, 0.5, -FULL_H / 2)
-    win.BackgroundColor3 = Color3.fromRGB(16, 16, 20)
+    win.Size = UDim2.new(0, WIN_W, 0, WIN_H)
+    win.Position = UDim2.new(0.5, -WIN_W/2, 0.5, -WIN_H/2)
+    win.BackgroundColor3 = CLR.bg
     win.BorderSizePixel = 0
     win.Active = true
     win.Draggable = true
-    win.ClipsDescendants = true
     win.Parent = gui
-    Instance.new("UICorner", win).CornerRadius = UDim.new(0, 8)
+    Instance.new("UICorner", win).CornerRadius = UDim.new(0, 10)
+
     local winStroke = Instance.new("UIStroke", win)
-    winStroke.Color = Color3.fromRGB(200, 90, 70)
+    winStroke.Color = CLR.border
     winStroke.Thickness = 1
+    winStroke.Transparency = 0.3
 
     --============================================================
-    -- TITLE BAR (always visible)
+    -- TITLE BAR
     --============================================================
-    local title = Instance.new("TextLabel")
-    title.Name = "Title"
-    title.Size = UDim2.new(1, 0, 0, 30)
-    title.Position = UDim2.new(0, 0, 0, 0)
-    title.BackgroundColor3 = Color3.fromRGB(35, 20, 18)
-    title.BorderSizePixel = 0
-    title.Text = "  Dingus-Slayer"
-    title.TextColor3 = Color3.fromRGB(245, 220, 220)
-    title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Font = Enum.Font.GothamBold
-    title.TextSize = 13
-    title.ZIndex = 2
-    title.Parent = win
-    Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
+    local titleBar = Instance.new("Frame")
+    titleBar.Name = "TitleBar"
+    titleBar.Size = UDim2.new(1, 0, 0, 34)
+    titleBar.BackgroundColor3 = CLR.bgHeader
+    titleBar.BorderSizePixel = 0
+    titleBar.Parent = win
+    Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 10)
+
+    local titleFix = Instance.new("Frame")
+    titleFix.Size = UDim2.new(1, 0, 0, 10)
+    titleFix.Position = UDim2.new(0, 0, 1, -10)
+    titleFix.BackgroundColor3 = CLR.bgHeader
+    titleFix.BorderSizePixel = 0
+    titleFix.Parent = titleBar
+
+    local titleDot = Instance.new("Frame")
+    titleDot.Size = UDim2.new(0, 8, 0, 8)
+    titleDot.Position = UDim2.new(0, 14, 0, 13)
+    titleDot.BackgroundColor3 = CLR.accent
+    titleDot.BorderSizePixel = 0
+    titleDot.Parent = titleBar
+    Instance.new("UICorner", titleDot).CornerRadius = UDim.new(1, 0)
+
+    local titleLbl = Instance.new("TextLabel")
+    titleLbl.Size = UDim2.new(1, -100, 1, 0)
+    titleLbl.Position = UDim2.new(0, 28, 0, 0)
+    titleLbl.BackgroundTransparency = 1
+    titleLbl.Text = "Dingus-Slayer"
+    titleLbl.TextColor3 = CLR.text
+    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+    titleLbl.Font = Enum.Font.GothamBold
+    titleLbl.TextSize = 13
+    titleLbl.Parent = titleBar
 
     --============================================================
-    -- WINDOW CONTROL BUTTONS
+    -- WINDOW CONTROLS (minimize, close)
     --============================================================
-    local closeBtn = Instance.new("TextButton")
-    closeBtn.Name = "Close"
-    closeBtn.Size = UDim2.new(0, 22, 0, 22)
-    closeBtn.Position = UDim2.new(1, -26, 0, 4)
-    closeBtn.BackgroundColor3 = Color3.fromRGB(140, 40, 50)
-    closeBtn.BorderSizePixel = 0
-    closeBtn.Text = "X"
-    closeBtn.TextColor3 = Color3.new(1, 1, 1)
-    closeBtn.Font = Enum.Font.GothamBold
-    closeBtn.TextSize = 12
-    closeBtn.ZIndex = 3
-    closeBtn.Parent = win
-    Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 5)
+    local function mkCtrlBtn(txt, xOff, bgColor, hoverColor)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(0, 22, 0, 22)
+        b.Position = UDim2.new(1, xOff, 0, 6)
+        b.BackgroundColor3 = bgColor
+        b.BorderSizePixel = 0
+        b.Text = txt
+        b.TextColor3 = CLR.text
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 12
+        b.Parent = titleBar
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
+        b.MouseEnter:Connect(function()
+            Tween:Create(b, TweenInfo.new(0.15), { BackgroundColor3 = hoverColor }):Play()
+        end)
+        b.MouseLeave:Connect(function()
+            Tween:Create(b, TweenInfo.new(0.15), { BackgroundColor3 = bgColor }):Play()
+        end)
+        return b
+    end
 
-    local resizeBtn = Instance.new("TextButton")
-    resizeBtn.Name = "Resize"
-    resizeBtn.Size = UDim2.new(0, 22, 0, 22)
-    resizeBtn.Position = UDim2.new(1, -52, 0, 4)
-    resizeBtn.BackgroundColor3 = Color3.fromRGB(60, 90, 60)
-    resizeBtn.BorderSizePixel = 0
-    resizeBtn.Text = "–"
-    resizeBtn.TextColor3 = Color3.new(1, 1, 1)
-    resizeBtn.Font = Enum.Font.GothamBold
-    resizeBtn.TextSize = 14
-    resizeBtn.ZIndex = 3
-    resizeBtn.Parent = win
-    Instance.new("UICorner", resizeBtn).CornerRadius = UDim.new(0, 5)
+    local closeBtn = mkCtrlBtn("×", -30, CLR.red, Color3.fromRGB(240, 90, 100))
+    local minBtn = mkCtrlBtn("–", -56, Color3.fromRGB(60, 60, 75), Color3.fromRGB(90, 90, 110))
 
     --============================================================
-    -- CONTENT CONTAINER (hidden when minimized)
+    -- TAB BAR
     --============================================================
-    local container = Instance.new("Frame")
-    container.Name = "Container"
-    container.Size = UDim2.new(1, 0, 1, -30)
-    container.Position = UDim2.new(0, 0, 0, 30)
-    container.BackgroundTransparency = 1
-    container.Parent = win
-
     local tabBar = Instance.new("Frame")
     tabBar.Name = "TabBar"
-    tabBar.Size = UDim2.new(1, -16, 0, 28)
-    tabBar.Position = UDim2.new(0, 8, 0, 4)
+    tabBar.Size = UDim2.new(1, -16, 0, 30)
+    tabBar.Position = UDim2.new(0, 8, 0, 42)
     tabBar.BackgroundTransparency = 1
-    tabBar.Parent = container
+    tabBar.Parent = win
     local tLay = Instance.new("UIListLayout", tabBar)
     tLay.FillDirection = Enum.FillDirection.Horizontal
     tLay.Padding = UDim.new(0, 4)
 
+    --============================================================
+    -- CONTENT AREA
+    --============================================================
     local content = Instance.new("Frame")
     content.Name = "Content"
-    content.Size = UDim2.new(1, -16, 1, -80)
-    content.Position = UDim2.new(0, 8, 0, 38)
-    content.BackgroundColor3 = Color3.fromRGB(10, 10, 14)
+    content.Size = UDim2.new(1, -16, 1, -140)
+    content.Position = UDim2.new(0, 8, 0, 80)
+    content.BackgroundColor3 = CLR.bgPanel
     content.BorderSizePixel = 0
-    content.Parent = container
-    Instance.new("UICorner", content).CornerRadius = UDim.new(0, 6)
-
-    local bottomBar = Instance.new("TextLabel")
-    bottomBar.Name = "Status"
-    bottomBar.Size = UDim2.new(1, -16, 0, 34)
-    bottomBar.Position = UDim2.new(0, 8, 1, -40)
-    bottomBar.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
-    bottomBar.BorderSizePixel = 0
-    bottomBar.Text = "  ready"
-    bottomBar.TextColor3 = Color3.fromRGB(180, 200, 180)
-    bottomBar.TextXAlignment = Enum.TextXAlignment.Left
-    bottomBar.TextYAlignment = Enum.TextYAlignment.Top
-    bottomBar.Font = Enum.Font.Code
-    bottomBar.TextSize = 10
-    bottomBar.TextWrapped = true
-    bottomBar.Parent = container
-    Instance.new("UICorner", bottomBar).CornerRadius = UDim.new(0, 6)
+    content.Parent = win
+    Instance.new("UICorner", content).CornerRadius = UDim.new(0, 8)
 
     --============================================================
-    -- RESIZE HANDLER (safe)
+    -- STATUS BAR
     --============================================================
+    local statusBar = Instance.new("TextLabel")
+    statusBar.Name = "Status"
+    statusBar.Size = UDim2.new(1, -16, 0, 44)
+    statusBar.Position = UDim2.new(0, 8, 1, -52)
+    statusBar.BackgroundColor3 = CLR.bgPanel
+    statusBar.BorderSizePixel = 0
+    statusBar.Text = "  ready"
+    statusBar.TextColor3 = CLR.textDim
+    statusBar.TextXAlignment = Enum.TextXAlignment.Left
+    statusBar.TextYAlignment = Enum.TextYAlignment.Top
+    statusBar.Font = Enum.Font.Code
+    statusBar.TextSize = 10
+    statusBar.TextWrapped = true
+    statusBar.Parent = win
+    Instance.new("UICorner", statusBar).CornerRadius = UDim.new(0, 8)
+
+    --============================================================
+    -- MINIMIZED PILL (separate frame)
+    --============================================================
+    local pill = Instance.new("Frame")
+    pill.Name = "MinimizedPill"
+    pill.Size = UDim2.new(0, PILL_W, 0, PILL_H)
+    pill.Position = UDim2.new(0, 20, 0.5, -PILL_H/2)
+    pill.BackgroundColor3 = CLR.bg
+    pill.BorderSizePixel = 0
+    pill.Active = true
+    pill.Draggable = true
+    pill.Visible = false
+    pill.Parent = gui
+    Instance.new("UICorner", pill).CornerRadius = UDim.new(1, 0)
+
+    local pillStroke = Instance.new("UIStroke", pill)
+    pillStroke.Color = CLR.border
+    pillStroke.Thickness = 1.5
+
+    local pillDot = Instance.new("Frame")
+    pillDot.Size = UDim2.new(0, 8, 0, 8)
+    pillDot.Position = UDim2.new(0, 14, 0.5, -4)
+    pillDot.BackgroundColor3 = CLR.accent
+    pillDot.BorderSizePixel = 0
+    pillDot.Parent = pill
+    Instance.new("UICorner", pillDot).CornerRadius = UDim.new(1, 0)
+
+    local pillLbl = Instance.new("TextLabel")
+    pillLbl.Size = UDim2.new(1, -32, 1, 0)
+    pillLbl.Position = UDim2.new(0, 28, 0, 0)
+    pillLbl.BackgroundTransparency = 1
+    pillLbl.Text = "Dingus"
+    pillLbl.TextColor3 = CLR.text
+    pillLbl.TextXAlignment = Enum.TextXAlignment.Left
+    pillLbl.Font = Enum.Font.GothamBold
+    pillLbl.TextSize = 12
+    pillLbl.Parent = pill
+
+    -- Pill hover glow
+    local pillBtn = Instance.new("TextButton")
+    pillBtn.Size = UDim2.new(1, 0, 1, 0)
+    pillBtn.BackgroundTransparency = 1
+    pillBtn.Text = ""
+    pillBtn.Parent = pill
+    pillBtn.MouseEnter:Connect(function()
+        Tween:Create(pillStroke, TweenInfo.new(0.15), { Color = Color3.fromRGB(240, 120, 100) }):Play()
+        Tween:Create(pillDot, TweenInfo.new(0.15), { BackgroundColor3 = Color3.fromRGB(255, 120, 100) }):Play()
+    end)
+    pillBtn.MouseLeave:Connect(function()
+        Tween:Create(pillStroke, TweenInfo.new(0.15), { Color = CLR.border }):Play()
+        Tween:Create(pillDot, TweenInfo.new(0.15), { BackgroundColor3 = CLR.accent }):Play()
+    end)
+
+    --============================================================
+    -- MINIMIZE / RESTORE LOGIC
+    --============================================================
+    local TWEEN_IN = TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+    local TWEEN_OUT = TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+
+    local winPos = win.Position
     local minimized = false
 
     local function minimize()
         if minimized then return end
         minimized = true
-        -- Shrink window and hide container. No iteration over children.
-        win.Size = UDim2.new(0, MINI_W, 0, MINI_H)
-        container.Visible = false
-        resizeBtn.Text = "+"
-        resizeBtn.Position = UDim2.new(1, -52, 0, 4)
-        closeBtn.Position = UDim2.new(1, -26, 0, 4)
+
+        -- Save current window position
+        winPos = win.Position
+
+        -- Animate window out
+        local tOut = Tween:Create(win, TWEEN_OUT, {
+            Position = UDim2.new(winPos.X.Scale, winPos.X.Offset, winPos.Y.Scale, winPos.Y.Offset + 40),
+            BackgroundTransparency = 1,
+        })
+        tOut:Play()
+        tOut.Completed:Connect(function()
+            win.Visible = false
+            win.Position = winPos
+            win.BackgroundTransparency = 0
+        end)
+
+        -- Fade in pill after window starts moving
+        task.wait(0.15)
+        pill.Visible = true
+        pill.BackgroundTransparency = 1
+        pillStroke.Transparency = 1
+        pillDot.BackgroundTransparency = 1
+        pillLbl.TextTransparency = 1
+        Tween:Create(pill, TweenInfo.new(0.25), { BackgroundTransparency = 0 }):Play()
+        Tween:Create(pillStroke, TweenInfo.new(0.25), { Transparency = 0 }):Play()
+        Tween:Create(pillDot, TweenInfo.new(0.25), { BackgroundTransparency = 0 }):Play()
+        Tween:Create(pillLbl, TweenInfo.new(0.25), { TextTransparency = 0 }):Play()
     end
 
     local function restore()
         if not minimized then return end
         minimized = false
-        win.Size = UDim2.new(0, FULL_W, 0, FULL_H)
-        container.Visible = true
-        resizeBtn.Text = "–"
+
+        -- Fade out pill
+        Tween:Create(pill, TweenInfo.new(0.15), { BackgroundTransparency = 1 }):Play()
+        Tween:Create(pillStroke, TweenInfo.new(0.15), { Transparency = 1 }):Play()
+        Tween:Create(pillDot, TweenInfo.new(0.15), { BackgroundTransparency = 1 }):Play()
+        Tween:Create(pillLbl, TweenInfo.new(0.15), { TextTransparency = 1 }):Play()
+
+        task.wait(0.12)
+        pill.Visible = false
+
+        -- Show window with slide-in
+        win.Visible = true
+        win.Position = UDim2.new(winPos.X.Scale, winPos.X.Offset, winPos.Y.Scale, winPos.Y.Offset + 40)
+        win.BackgroundTransparency = 1
+        Tween:Create(win, TWEEN_IN, {
+            Position = winPos,
+            BackgroundTransparency = 0,
+        }):Play()
     end
 
-    resizeBtn.MouseButton1Click:Connect(function()
-        local ok, err = pcall(function()
-            if minimized then restore() else minimize() end
-        end)
-        if not ok then
-            print("[Dingus][gui] resize error: " .. tostring(err))
-        end
-    end)
+    minBtn.MouseButton1Click:Connect(minimize)
+    pillBtn.MouseButton1Click:Connect(restore)
 
     --============================================================
     -- TAB SYSTEM
@@ -177,44 +307,57 @@ function G.init(Ctx)
         p.Size = UDim2.new(1, 0, 1, 0)
         p.BackgroundTransparency = 1
         p.BorderSizePixel = 0
-        p.ScrollBarThickness = 6
+        p.ScrollBarThickness = 5
+        p.ScrollBarImageColor3 = CLR.accentDim
         p.CanvasSize = UDim2.new(0, 0, 0, 0)
         p.AutomaticCanvasSize = Enum.AutomaticSize.Y
         p.Visible = false
         p.Parent = content
         local lay = Instance.new("UIListLayout", p)
-        lay.Padding = UDim.new(0, 4)
+        lay.Padding = UDim.new(0, 5)
         lay.SortOrder = Enum.SortOrder.LayoutOrder
         local pad = Instance.new("UIPadding", p)
-        pad.PaddingTop = UDim.new(0, 6)
-        pad.PaddingLeft = UDim.new(0, 6)
-        pad.PaddingRight = UDim.new(0, 6)
-        pad.PaddingBottom = UDim.new(0, 6)
+        pad.PaddingTop = UDim.new(0, 8)
+        pad.PaddingLeft = UDim.new(0, 8)
+        pad.PaddingRight = UDim.new(0, 8)
+        pad.PaddingBottom = UDim.new(0, 8)
         pages[name] = p
         return p
     end
 
+    local activeTabButton = nil
+
     local function mkTab(name, order)
         local b = Instance.new("TextButton")
-        b.Size = UDim2.new(0, 88, 1, 0)
-        b.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+        b.Name = "Tab_" .. name
+        b.Size = UDim2.new(0, 86, 1, 0)
+        b.BackgroundColor3 = CLR.bgPanel
         b.BorderSizePixel = 0
         b.Text = name
-        b.TextColor3 = Color3.fromRGB(220, 220, 230)
+        b.TextColor3 = CLR.textDim
         b.Font = Enum.Font.GothamBold
         b.TextSize = 12
         b.LayoutOrder = order
         b.Parent = tabBar
-        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
         b.MouseButton1Click:Connect(function()
             for n, p in pairs(pages) do p.Visible = (n == name) end
             for _, o in ipairs(tabBar:GetChildren()) do
                 if o:IsA("TextButton") then
-                    o.BackgroundColor3 = (o == b)
-                        and Color3.fromRGB(200, 90, 70)
-                        or Color3.fromRGB(30, 30, 40)
+                    if o == b then
+                        Tween:Create(o, TweenInfo.new(0.15), {
+                            BackgroundColor3 = CLR.accent,
+                            TextColor3 = CLR.text,
+                        }):Play()
+                    else
+                        Tween:Create(o, TweenInfo.new(0.15), {
+                            BackgroundColor3 = CLR.bgPanel,
+                            TextColor3 = CLR.textDim,
+                        }):Play()
+                    end
                 end
             end
+            activeTabButton = b
         end)
         return b
     end
@@ -228,33 +371,33 @@ function G.init(Ctx)
         return counter[pn]
     end
 
-    local function mkToggle(page, pn, label, key)
+    local function mkToggle(page, pn, label, key, onChange)
         local row = Instance.new("Frame")
-        row.Size = UDim2.new(1, 0, 0, 28)
-        row.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+        row.Size = UDim2.new(1, 0, 0, 32)
+        row.BackgroundColor3 = CLR.bgRow
         row.BorderSizePixel = 0
         row.LayoutOrder = nextOrder(pn)
         row.Parent = page
-        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 5)
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
 
         local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, -70, 1, 0)
-        lbl.Position = UDim2.new(0, 10, 0, 0)
+        lbl.Size = UDim2.new(1, -80, 1, 0)
+        lbl.Position = UDim2.new(0, 12, 0, 0)
         lbl.BackgroundTransparency = 1
         lbl.Text = label
-        lbl.TextColor3 = Color3.fromRGB(225, 225, 235)
+        lbl.TextColor3 = CLR.text
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Font = Enum.Font.Gotham
         lbl.TextSize = 12
         lbl.Parent = row
 
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 50, 0, 20)
-        btn.Position = UDim2.new(1, -58, 0.5, -10)
-        btn.BackgroundColor3 = St[key] and Color3.fromRGB(70, 180, 100) or Color3.fromRGB(60, 60, 70)
+        btn.Size = UDim2.new(0, 54, 0, 22)
+        btn.Position = UDim2.new(1, -64, 0.5, -11)
+        btn.BackgroundColor3 = St[key] and CLR.green or Color3.fromRGB(60, 60, 72)
         btn.BorderSizePixel = 0
         btn.Text = St[key] and "ON" or "OFF"
-        btn.TextColor3 = Color3.new(1, 1, 1)
+        btn.TextColor3 = CLR.text
         btn.Font = Enum.Font.GothamBold
         btn.TextSize = 11
         btn.Parent = row
@@ -263,22 +406,40 @@ function G.init(Ctx)
         btn.MouseButton1Click:Connect(function()
             St[key] = not St[key]
             btn.Text = St[key] and "ON" or "OFF"
-            btn.BackgroundColor3 = St[key] and Color3.fromRGB(70, 180, 100) or Color3.fromRGB(60, 60, 70)
+            Tween:Create(btn, TweenInfo.new(0.15), {
+                BackgroundColor3 = St[key] and CLR.green or Color3.fromRGB(60, 60, 72),
+            }):Play()
+            if onChange then pcall(onChange, St[key]) end
         end)
     end
 
     local function mkButton(page, pn, label, cb, color)
         local b = Instance.new("TextButton")
-        b.Size = UDim2.new(1, 0, 0, 32)
-        b.BackgroundColor3 = color or Color3.fromRGB(60, 90, 140)
+        b.Size = UDim2.new(1, 0, 0, 34)
+        b.BackgroundColor3 = color or CLR.blue
         b.BorderSizePixel = 0
         b.Text = label
-        b.TextColor3 = Color3.new(1, 1, 1)
+        b.TextColor3 = CLR.text
         b.Font = Enum.Font.GothamBold
         b.TextSize = 12
         b.LayoutOrder = nextOrder(pn)
         b.Parent = page
-        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+
+        local baseColor = color or CLR.blue
+        b.MouseEnter:Connect(function()
+            Tween:Create(b, TweenInfo.new(0.15), {
+                BackgroundColor3 = Color3.new(
+                    math.min(baseColor.R + 0.1, 1),
+                    math.min(baseColor.G + 0.1, 1),
+                    math.min(baseColor.B + 0.1, 1)
+                ),
+            }):Play()
+        end)
+        b.MouseLeave:Connect(function()
+            Tween:Create(b, TweenInfo.new(0.15), { BackgroundColor3 = baseColor }):Play()
+        end)
+
         b.MouseButton1Click:Connect(function()
             local ok, err = pcall(cb)
             if not ok then
@@ -288,45 +449,55 @@ function G.init(Ctx)
         return b
     end
 
-    local function mkSlider(page, pn, label, minV, maxV, getter, setter)
+    local function mkSlider(page, pn, label, minV, maxV, getter, setter, fmt)
+        fmt = fmt or "%.1f"
         local row = Instance.new("Frame")
-        row.Size = UDim2.new(1, 0, 0, 44)
-        row.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+        row.Size = UDim2.new(1, 0, 0, 46)
+        row.BackgroundColor3 = CLR.bgRow
         row.BorderSizePixel = 0
         row.LayoutOrder = nextOrder(pn)
         row.Parent = page
-        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 5)
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
 
         local lbl = Instance.new("TextLabel")
         lbl.Size = UDim2.new(1, -20, 0, 16)
-        lbl.Position = UDim2.new(0, 10, 0, 4)
+        lbl.Position = UDim2.new(0, 12, 0, 6)
         lbl.BackgroundTransparency = 1
-        lbl.Text = label .. ": " .. string.format("%.1f", getter())
-        lbl.TextColor3 = Color3.fromRGB(225, 225, 235)
+        lbl.Text = label .. "  " .. string.format(fmt, getter())
+        lbl.TextColor3 = CLR.text
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Font = Enum.Font.Gotham
         lbl.TextSize = 12
         lbl.Parent = row
 
         local bar = Instance.new("Frame")
-        bar.Size = UDim2.new(1, -20, 0, 6)
-        bar.Position = UDim2.new(0, 10, 0, 26)
-        bar.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+        bar.Size = UDim2.new(1, -24, 0, 6)
+        bar.Position = UDim2.new(0, 12, 0, 28)
+        bar.BackgroundColor3 = CLR.bgSlider
         bar.BorderSizePixel = 0
         bar.Parent = row
-        Instance.new("UICorner", bar).CornerRadius = UDim.new(0, 3)
+        Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
 
         local fill = Instance.new("Frame")
         local pct = math.clamp((getter() - minV) / (maxV - minV), 0, 1)
         fill.Size = UDim2.new(pct, 0, 1, 0)
-        fill.BackgroundColor3 = Color3.fromRGB(200, 90, 70)
+        fill.BackgroundColor3 = CLR.accent
         fill.BorderSizePixel = 0
         fill.Parent = bar
-        Instance.new("UICorner", fill).CornerRadius = UDim.new(0, 3)
+        Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+        local knob = Instance.new("Frame")
+        knob.Size = UDim2.new(0, 14, 0, 14)
+        knob.Position = UDim2.new(pct, -7, 0.5, -7)
+        knob.BackgroundColor3 = CLR.text
+        knob.BorderSizePixel = 0
+        knob.ZIndex = 2
+        knob.Parent = bar
+        Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
 
         local hit = Instance.new("TextButton")
-        hit.Size = UDim2.new(1, -20, 0, 22)
-        hit.Position = UDim2.new(0, 10, 0, 20)
+        hit.Size = UDim2.new(1, -24, 0, 24)
+        hit.Position = UDim2.new(0, 12, 0, 20)
         hit.BackgroundTransparency = 1
         hit.Text = ""
         hit.Parent = row
@@ -343,16 +514,17 @@ function G.init(Ctx)
             end
         end)
 
-        game:GetService("UserInputService").InputChanged:Connect(function(i)
+        UIS.InputChanged:Connect(function(i)
             if drag and i.UserInputType == Enum.UserInputType.MouseMovement then
-                local mx = game:GetService("UserInputService"):GetMouseLocation().X
+                local mx = UIS:GetMouseLocation().X
                 local bx, bw = bar.AbsolutePosition.X, bar.AbsoluteSize.X
                 if bw > 0 then
                     local p = math.clamp((mx - bx) / bw, 0, 1)
                     local v = minV + (maxV - minV) * p
                     setter(v)
-                    lbl.Text = label .. ": " .. string.format("%.1f", v)
+                    lbl.Text = label .. "  " .. string.format(fmt, v)
                     fill.Size = UDim2.new(p, 0, 1, 0)
+                    knob.Position = UDim2.new(p, -7, 0.5, -7)
                 end
             end
         end)
@@ -361,10 +533,10 @@ function G.init(Ctx)
     local function mkInfo(page, pn, height)
         local lbl = Instance.new("TextLabel")
         lbl.Size = UDim2.new(1, 0, 0, height or 100)
-        lbl.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+        lbl.BackgroundColor3 = CLR.bgRow
         lbl.BorderSizePixel = 0
         lbl.Text = "  —"
-        lbl.TextColor3 = Color3.fromRGB(180, 200, 180)
+        lbl.TextColor3 = CLR.textDim
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.TextYAlignment = Enum.TextYAlignment.Top
         lbl.Font = Enum.Font.Code
@@ -372,30 +544,30 @@ function G.init(Ctx)
         lbl.TextWrapped = true
         lbl.LayoutOrder = nextOrder(pn)
         lbl.Parent = page
-        Instance.new("UICorner", lbl).CornerRadius = UDim.new(0, 5)
+        Instance.new("UICorner", lbl).CornerRadius = UDim.new(0, 6)
         return lbl
     end
 
     --============================================================
-    -- TAB CONTENT
+    -- TAB PAGES
     --============================================================
     local pMain = mkPage("Main")
     local mainInfo = mkInfo(pMain, "Main", 150)
     mkButton(pMain, "Main", "Toggle Combat", function()
         St.cbt = not St.cbt
         print("[Dingus] combat " .. (St.cbt and "ON" or "OFF"))
-    end, Color3.fromRGB(200, 90, 70))
+    end, CLR.accent)
     mkButton(pMain, "Main", "Toggle Horse Flight", function()
         if Ctx.Fly and Ctx.Fly.toggle then Ctx.Fly.toggle() end
-    end, Color3.fromRGB(90, 60, 140))
+    end, Color3.fromRGB(130, 80, 180))
     mkButton(pMain, "Main", "Force Boss Scan", function()
         St.lScn = 0
         local l = Ctx.Detect.scanBosses()
         print("[Dingus] scan: " .. #l .. " bosses")
-    end, Color3.fromRGB(60, 130, 200))
+    end, CLR.blue)
     mkButton(pMain, "Main", "Run Quest Cycle", function()
         if Ctx.Quest and Ctx.Quest.doCycle then Ctx.Quest.doCycle() end
-    end, Color3.fromRGB(140, 90, 60))
+    end, Color3.fromRGB(180, 120, 60))
     mkButton(pMain, "Main", "Clear Body Movers", function()
         local r = U.hrp()
         if r then
@@ -408,7 +580,7 @@ function G.init(Ctx)
             end
             print("[Dingus] cleared movers")
         end
-    end, Color3.fromRGB(120, 60, 60))
+    end, Color3.fromRGB(150, 80, 80))
 
     local pCombat = mkPage("Combat")
     local combatInfo = mkInfo(pCombat, "Combat", 130)
@@ -422,7 +594,7 @@ function G.init(Ctx)
         function(v) Cfg.AtkRange = v end)
     mkSlider(pCombat, "Combat", "Attack Interval", 0.30, 0.90,
         function() return St.aiI end,
-        function(v) St.aiI = v end)
+        function(v) St.aiI = v end, "%.2f")
     mkSlider(pCombat, "Combat", "Run Speed", 16, 48,
         function() return Cfg.RunSpeed end,
         function(v) Cfg.RunSpeed = v end)
@@ -434,10 +606,10 @@ function G.init(Ctx)
     local flyInfo = mkInfo(pFly, "Fly", 120)
     mkButton(pFly, "Fly", "Start Horse Flight", function()
         if Ctx.Fly then Ctx.Fly.start() end
-    end, Color3.fromRGB(90, 60, 140))
+    end, Color3.fromRGB(130, 80, 180))
     mkButton(pFly, "Fly", "Stop Flight", function()
         if Ctx.Fly then Ctx.Fly.stop() end
-    end, Color3.fromRGB(120, 60, 60))
+    end, CLR.red)
     mkSlider(pFly, "Fly", "Flight Speed", 8, 40,
         function() return St.FlySpeed or 22 end,
         function(v) St.FlySpeed = v end)
@@ -452,42 +624,42 @@ function G.init(Ctx)
             pcall(function() h:EquipTool(t) end)
             print("[Dingus] crow equipped")
         end
-    end, Color3.fromRGB(60, 130, 60))
+    end, CLR.green)
     mkButton(pCrow, "Crow", "Summon Click", function()
         U.m1()
-    end, Color3.fromRGB(60, 90, 140))
+    end, CLR.blue)
     mkButton(pCrow, "Crow", "Try Accept Menu", function()
         local m = Ctx.Scan.findCrowMenu()
         if m then
             pcall(function() m:Activate() end)
             print("[Dingus] menu activated")
         end
-    end, Color3.fromRGB(140, 90, 60))
+    end, Color3.fromRGB(180, 120, 60))
 
     local pConfig = mkPage("Config")
     local configInfo = mkInfo(pConfig, "Config", 150)
     mkButton(pConfig, "Config", "Save Config", function()
         local ok, result = Cfg.save()
         print("[Dingus][Config] save " .. (ok and "ok" or ("fail: " .. tostring(result))))
-    end, Color3.fromRGB(60, 130, 200))
+    end, CLR.blue)
     mkButton(pConfig, "Config", "Load Config", function()
         if not Cfg.exists() then print("[Dingus][Config] no file"); return end
         local ok, result = Cfg.load()
         print("[Dingus][Config] " .. tostring(result))
-    end, Color3.fromRGB(60, 130, 100))
+    end, CLR.green)
     mkButton(pConfig, "Config", "Reset Defaults", function()
         Cfg.reset()
         print("[Dingus][Config] reset")
-    end, Color3.fromRGB(140, 100, 60))
+    end, Color3.fromRGB(180, 130, 80))
     mkButton(pConfig, "Config", "Delete File", function()
         print("[Dingus][Config] delete: " .. tostring(Cfg.delete()))
-    end, Color3.fromRGB(140, 60, 60))
+    end, CLR.red)
     mkButton(pConfig, "Config", "Print Values", function()
         print(Cfg.pretty())
-    end, Color3.fromRGB(100, 100, 140))
+    end, Color3.fromRGB(110, 110, 150))
 
     --============================================================
-    -- TAB WIRING
+    -- TAB BUTTONS
     --============================================================
     local tbMain = mkTab("Main", 1)
     mkTab("Combat", 2)
@@ -496,7 +668,8 @@ function G.init(Ctx)
     mkTab("Config", 5)
 
     pMain.Visible = true
-    tbMain.BackgroundColor3 = Color3.fromRGB(200, 90, 70)
+    tbMain.BackgroundColor3 = CLR.accent
+    tbMain.TextColor3 = CLR.text
 
     --============================================================
     -- REFRESH LOOP
@@ -517,22 +690,20 @@ function G.init(Ctx)
                     "  state: %s · hp: %s\n" ..
                     "  target: %s @%.0f\n" ..
                     "  atk: %d/%d (%d%%)\n" ..
-                    "  kills: %d · retreats: %d\n" ..
-                    "  fly: %s · mounted: %s\n" ..
-                    "  quest: %s · level: %d",
+                    "  kills: %d · retreats: %d · fly: %s\n" ..
+                    "  quest: %s · lv %d",
                     St.cbtS, hp,
                     St.tgt and St.tgt.ch.Name or "none", St.tgt and St.tgt.d or 0,
                     St.aHi, St.aAt, hitRate,
-                    St.bKll, St.rtrC,
-                    tostring(St.FlyActive), tostring(St.FlyMounted),
+                    St.bKll, St.rtrC, St.FlyActive and "ON" or "OFF",
                     tostring(St.questTarget or "—"), St.playerLevel or 0)
                 if cache.main ~= s1 then cache.main = s1; mainInfo.Text = s1 end
 
                 local s2 = string.format(
                     "  atk range: %.1f · interval: %.2f\n" ..
                     "  runspeed: %.0f · retreat hp: %.0f%%\n" ..
-                    "  auto skill: %s · equip: %s\n" ..
-                    "  retreat: %s · stun: %s · guard: %s",
+                    "  skill: %s · equip: %s\n" ..
+                    "  retreat: %s · stun: %s · spoof: %s",
                     Cfg.AtkRange, St.aiI,
                     Cfg.RunSpeed, Cfg.RetreatHP * 100,
                     tostring(St.skl), tostring(St.eqp),
@@ -540,7 +711,9 @@ function G.init(Ctx)
                 if cache.combat ~= s2 then cache.combat = s2; combatInfo.Text = s2 end
 
                 local s3 = string.format(
-                    "  active: %s\n  mounted: %s\n  speed: %.0f studs/s\n  noclip: %s",
+                    "  active: %s · mounted: %s\n" ..
+                    "  speed: %.0f studs/s\n" ..
+                    "  noclip: %s",
                     tostring(St.FlyActive),
                     tostring(St.FlyMounted),
                     St.FlySpeed or 22,
@@ -548,13 +721,17 @@ function G.init(Ctx)
                 if cache.fly ~= s3 then cache.fly = s3; flyInfo.Text = s3 end
 
                 local s4 = string.format(
-                    "  crow tool: %s\n  perched: %s · accepted: %d\n  auto: %s",
+                    "  crow tool: %s\n" ..
+                    "  perched: %s · accepted: %d\n" ..
+                    "  auto: %s",
                     St.crT and St.crT.Name or "not found",
                     tostring(St.cPrch), St.cQs, tostring(St.crw))
                 if cache.crow ~= s4 then cache.crow = s4; crowInfo.Text = s4 end
 
                 local s5 = string.format(
-                    "  file: %s\n  exists: %s (%d bytes)\n  exec: %s · fps: %.0f",
+                    "  file: %s\n" ..
+                    "  exists: %s (%d bytes)\n" ..
+                    "  exec: %s · fps: %.0f",
                     Cfg.ConfigFile,
                     tostring(Cfg.exists()), Cfg.fileSize(),
                     tostring(identifyexecutor and identifyexecutor() or "?"),
@@ -562,12 +739,22 @@ function G.init(Ctx)
                 if cache.config ~= s5 then cache.config = s5; configInfo.Text = s5 end
 
                 local bar = string.format(
-                    "  fps: %.0f · state: %s · fly: %s · hp: %s",
+                    "  fps %.0f  ·  %s  ·  fly %s  ·  hp %s",
                     St.fps or 60, St.cbtS,
                     St.FlyActive and "ON" or "OFF", hp)
-                if cache.bar ~= bar then cache.bar = bar; bottomBar.Text = bar end
+                if cache.bar ~= bar then cache.bar = bar; statusBar.Text = bar end
             end
             task.wait(0.4)
+        end
+    end)
+
+    --============================================================
+    -- HOTKEY (RightShift toggles minimize)
+    --============================================================
+    UIS.InputBegan:Connect(function(input, gp)
+        if gp then return end
+        if input.KeyCode == Enum.KeyCode.RightShift then
+            if minimized then restore() else minimize() end
         end
     end)
 
@@ -580,6 +767,8 @@ function G.init(Ctx)
 
     G.gui = gui
     G.win = win
+    G.minimize = minimize
+    G.restore = restore
 end
 
 return G
