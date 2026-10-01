@@ -1,18 +1,9 @@
---[[
-    Dingus-Slayer · optimizers.lua v25
-    Reversible optimization. Cached originals. Batched with yields.
-    Dynamic particle handling for spawns after optimization runs.
-]]--
-
 local O = {}
 
 function O.init(Ctx)
     local U = Ctx.Util
     local Cfg = Ctx.Cfg
 
-    --============================================================
-    -- STATE
-    --============================================================
     O.Stats = {
         particlesKilled = 0,
         partsHidden = 0,
@@ -25,23 +16,19 @@ function O.init(Ctx)
         enabled = false,
     }
 
-    -- Cached original values — restored on disable
     O.Cache = {
         lighting = {},
         postEffects = {},
         terrain = {},
-        particles = {},       -- instance → original Enabled
-        parts = {},           -- instance → original LocalTransparencyModifier
-        lights = {},          -- instance → original Enabled
-        sounds = {},          -- instance → original Volume
+        particles = {},
+        parts = {},
+        lights = {},
+        sounds = {},
         atmosphere = {},
     }
 
     O.DynamicConnections = {}
 
-    --============================================================
-    -- LIGHTING
-    --============================================================
     local LIGHTING_KEYS = {
         "Ambient", "OutdoorAmbient", "Brightness",
         "GlobalShadows", "FogEnd", "FogStart", "FogColor",
@@ -77,9 +64,6 @@ function O.init(Ctx)
         end
     end
 
-    --============================================================
-    -- POST-EFFECTS
-    --============================================================
     local function disablePostEffects()
         local L = game:GetService("Lighting")
         for _, c in ipairs(L:GetChildren()) do
@@ -103,12 +87,8 @@ function O.init(Ctx)
         O.Cache.postEffects = {}
     end
 
-    --============================================================
-    -- TERRAIN
-    --============================================================
     local function flattenTerrain()
-        local ws = workspace
-        local terrain = ws:FindFirstChildOfClass("Terrain")
+        local terrain = workspace:FindFirstChildOfClass("Terrain")
         if not terrain then return end
         local keys = { "WaterWaveSize", "WaterWaveSpeed", "WaterReflectance", "WaterTransparency" }
         for i = 1, #keys do
@@ -125,27 +105,17 @@ function O.init(Ctx)
     end
 
     local function restoreTerrain()
-        local ws = workspace
-        local terrain = ws:FindFirstChildOfClass("Terrain")
+        local terrain = workspace:FindFirstChildOfClass("Terrain")
         if not terrain then return end
         for k, v in pairs(O.Cache.terrain) do
             pcall(function() terrain[k] = v end)
         end
     end
 
-    --============================================================
-    -- PARTICLE / VISUAL KILL (batched + dynamic)
-    --============================================================
     local KILL_CLASSES = {
-        ParticleEmitter = true,
-        Beam = true,
-        Trail = true,
-        Fire = true,
-        Smoke = true,
-        Sparkles = true,
-        PointLight = true,
-        SpotLight = true,
-        SurfaceLight = true,
+        ParticleEmitter = true, Beam = true, Trail = true,
+        Fire = true, Smoke = true, Sparkles = true,
+        PointLight = true, SpotLight = true, SurfaceLight = true,
     }
 
     local function killInstance(inst)
@@ -177,26 +147,20 @@ function O.init(Ctx)
         end
     end
 
-    -- Batched walker: yields every N instances to keep FPS up
     local function walkAndKill(root, maxDepth, yieldEvery)
         yieldEvery = yieldEvery or 2000
         maxDepth = maxDepth or 6
         local stack = { { root, 0 } }
         local iter = 0
-
         while #stack > 0 do
             local item = table.remove(stack)
             local inst, d = item[1], item[2]
             if inst and d <= maxDepth then
                 pcall(killInstance, inst)
-
                 local ok, kids = pcall(function() return inst:GetChildren() end)
                 if ok and kids then
-                    for i = 1, #kids do
-                        table.insert(stack, { kids[i], d + 1 })
-                    end
+                    for i = 1, #kids do table.insert(stack, { kids[i], d + 1 }) end
                 end
-
                 iter = iter + 1
                 if iter % yieldEvery == 0 then task.wait() end
             end
@@ -205,61 +169,77 @@ function O.init(Ctx)
 
     local function restoreParticles()
         for inst, _ in pairs(O.Cache.particles) do
-            if inst and inst.Parent then
-                pcall(function() inst.Enabled = true end)
-            end
+            if inst and inst.Parent then pcall(function() inst.Enabled = true end) end
         end
         O.Cache.particles = {}
     end
 
     local function restoreLights()
         for inst, _ in pairs(O.Cache.lights) do
-            if inst and inst.Parent then
-                pcall(function() inst.Enabled = true end)
-            end
+            if inst and inst.Parent then pcall(function() inst.Enabled = true end) end
         end
         O.Cache.lights = {}
     end
 
     local function restoreSounds()
         for inst, vol in pairs(O.Cache.sounds) do
-            if inst and inst.Parent then
-                pcall(function() inst.Volume = vol end)
-            end
+            if inst and inst.Parent then pcall(function() inst.Volume = vol end) end
         end
         O.Cache.sounds = {}
     end
 
-    --============================================================
-    -- DYNAMIC CLEANUP
-    -- Handles particles/lights that spawn AFTER optimization ran.
-    --============================================================
+    -- M4 fix: batched queue, no task.defer per instance
+    local pendingKills = {}
+    local pendingDrain = false
+
+    local function drainPending()
+        if pendingDrain then return end
+        pendingDrain = true
+        task.spawn(function()
+            while #pendingKills > 0 do
+                local n = math.min(#pendingKills, 50)
+                local batch = table.move
+                    and table.move(pendingKills, 1, n, 1, {})
+                    or (function()
+                        local b = {}
+                        for i = 1, n do b[i] = table.remove(pendingKills, 1) end
+                        return b
+                    end)()
+                if table.move then
+                    -- remove first n
+                    for _ = 1, n do table.remove(pendingKills, 1) end
+                end
+                for _, inst in ipairs(batch) do
+                    if inst and inst.Parent then
+                        pcall(killInstance, inst)
+                        O.Stats.dynamicCleanups = O.Stats.dynamicCleanups + 1
+                    end
+                end
+                task.wait(0.1)
+            end
+            pendingDrain = false
+        end)
+    end
+
     local function installDynamicCleanup()
         if #O.DynamicConnections > 0 then return end
 
-        -- Watch workspace for new particles/lights
         local ws = workspace
         local conn1 = ws.DescendantAdded:Connect(function(inst)
             if not O.Stats.enabled then return end
-            local cls = inst.ClassName
-            if KILL_CLASSES[cls] then
-                task.defer(function()
-                    pcall(killInstance, inst)
-                    O.Stats.dynamicCleanups = O.Stats.dynamicCleanups + 1
-                end)
+            if KILL_CLASSES[inst.ClassName] then
+                table.insert(pendingKills, inst)
+                drainPending()
             end
         end)
         table.insert(O.DynamicConnections, conn1)
 
-        -- Watch Lighting for new PostEffects
         local L = game:GetService("Lighting")
         local conn2 = L.ChildAdded:Connect(function(inst)
             if not O.Stats.enabled then return end
             if inst:IsA("PostEffect") then
-                task.defer(function()
-                    pcall(function() inst.Enabled = false end)
-                    O.Cache.postEffects[inst] = true
-                end)
+                table.insert(pendingKills, inst)
+                drainPending()
             end
         end)
         table.insert(O.DynamicConnections, conn2)
@@ -272,9 +252,6 @@ function O.init(Ctx)
         O.DynamicConnections = {}
     end
 
-    --============================================================
-    -- MEMORY MANAGEMENT
-    --============================================================
     local function gc()
         local now = U.clock()
         if now - O.Stats.lastGc < 45 then return end
@@ -286,25 +263,18 @@ function O.init(Ctx)
         local now = U.clock()
         if now - O.Stats.lastMemoryCheck < 60 then return nil end
         O.Stats.lastMemoryCheck = now
-
         local ok, kb = pcall(function() return collectgarbage("count") end)
         if not ok then return nil end
-        return math.floor(kb / 1024 * 10) / 10  -- MB
+        return math.floor(kb / 1024 * 10) / 10
     end
 
-    --============================================================
-    -- PUBLIC API
-    --============================================================
     function O.enable()
         if O.Stats.enabled then return end
         O.Stats.enabled = true
-
         cacheLighting()
         applyLighting()
         disablePostEffects()
         flattenTerrain()
-
-        -- Background batched walk — doesn't block boot
         task.spawn(function()
             task.wait(0.5)
             pcall(walkAndKill, workspace, 6, 2000)
@@ -315,14 +285,12 @@ function O.init(Ctx)
                 O.Stats.particlesKilled, O.Stats.lightsDisabled,
                 O.Stats.postEffectsDisabled, O.Stats.soundsMuted))
         end)
-
         installDynamicCleanup()
     end
 
     function O.disable()
         if not O.Stats.enabled then return end
         O.Stats.enabled = false
-
         uninstallDynamicCleanup()
         restoreLighting()
         restorePostEffects()
@@ -330,12 +298,10 @@ function O.init(Ctx)
         restoreParticles()
         restoreLights()
         restoreSounds()
-
         print("[Dingus][Opt] disabled — originals restored")
     end
 
     function O.warmWorkspace()
-        -- Light walk to prime spatial caches — does not modify anything
         local count = 0
         local stack = { { workspace, 0 } }
         local iter = 0
@@ -346,9 +312,7 @@ function O.init(Ctx)
                 count = count + 1
                 local ok, kids = pcall(function() return inst:GetChildren() end)
                 if ok and kids then
-                    for i = 1, #kids do
-                        table.insert(stack, { kids[i], d + 1 })
-                    end
+                    for i = 1, #kids do table.insert(stack, { kids[i], d + 1 }) end
                 end
                 iter = iter + 1
                 if iter % 2000 == 0 then task.wait() end
@@ -358,28 +322,17 @@ function O.init(Ctx)
     end
 
     function O.stripLighting()
-        -- One-shot flat lighting for immediate FPS win
         local L = game:GetService("Lighting")
         cacheLighting()
         applyLighting()
         disablePostEffects()
     end
 
-    function O.gc()
-        gc()
-    end
+    function O.gc() gc() end
+    function O.memory() return memoryReport() end
 
-    function O.memory()
-        return memoryReport()
-    end
-
-    --============================================================
-    -- CLEANUP HOOK
-    --============================================================
     Ctx.Cleanup = Ctx.Cleanup or {}
-    table.insert(Ctx.Cleanup, function()
-        O.disable()
-    end)
+    table.insert(Ctx.Cleanup, function() O.disable() end)
 
     print("[Dingus][optimizers] initialized · reversible · dynamic cleanup")
 end
