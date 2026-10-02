@@ -1,48 +1,31 @@
 --[[
-    Dingus-Slayer · lists.lua v6
-    Endgame bosses only. Region-grouped. Per-boss selection state.
-
-    Removed: mother bear, nomay bandit, muichiro, inosuke, rengoku,
-             renpeke, akeza, swampy, zoku, zuko, zanegutsu, kuuchie,
-             kaden, sabito, sanemi, yahaba, susamaru, shiron, giyu,
-             slasher, nezuko, trainee, subordinate, white terror,
-             high demon, profound demon.
+    Dingus-Slayer · lists.lua v7
+    Corrected endgame boss roster using in-game display names.
+    Two Reapers. Sumari/Yahari/Datai/Akazo/Domae/Enru are the
+    display names, not the wiki canonical names.
 ]]--
 
 local L = {}
 
---============================================================
--- BOSS REGIONS
--- Grouped for the GUI selector. Flat list is derived below.
---============================================================
 L.bossRegions = {
     {
-        name = "Hidden Mist",
-        bosses = { "obanai", "obari", "gyomei", "shinobu", "tengen", "fujiko" },
-    },
-    {
         name = "Bamboo Grove",
-        bosses = { "sumari", "yahari", "hoyuzo", "nezura" },
+        bosses = { "sumari", "yahari" },
     },
     {
-        name = "Demon Domain",
-        bosses = { "daki", "gyutaro", "doma", "akaza" },
+        name = "Hidden Mist",
+        bosses = { "reaper", "gyutai", "domae" },
     },
     {
         name = "Nightfall",
-        bosses = { "zentaro", "tengai", "reaper", "enmu" },
+        bosses = { "datai", "akazo" },
     },
     {
-        name = "Frozen Wilds",
-        bosses = { "yeti", "kaiden" },
-    },
-    {
-        name = "Renamed",
-        bosses = { "enru", "datai", "akazo" },
+        name = "Deep Caves",
+        bosses = { "nezura", "enru" },
     },
 }
 
--- Flat list derived from regions
 L.bosses = {}
 for _, region in ipairs(L.bossRegions) do
     for _, b in ipairs(region.bosses) do
@@ -50,9 +33,8 @@ for _, region in ipairs(L.bossRegions) do
     end
 end
 
---============================================================
--- SELECTION STATE
---============================================================
+-- "Reaper" appears twice in-world (Bamboo Grove + Hidden Mist).
+-- Same name string, no disambiguation — isBoss returns true for both.
 L.selectedBosses = {}
 for _, b in ipairs(L.bosses) do
     L.selectedBosses[b] = true
@@ -81,32 +63,20 @@ function L.enabledCount()
     return n, #L.bosses
 end
 
---============================================================
--- WEAPONS
---============================================================
 L.weapons = {
     "katana", "sword", "blade", "saber", "sabre",
     "cutlass", "rapier", "nodachi", "wakizashi", "tachi",
     "scythe", "sickles", "sickle", "spear", "tanto",
     "gauntlet", "gauntlets", "claws", "claw",
     "wagasa", "cleaver", "cleavers", "axe", "mace",
-    "war fans",
-    "shotgun", "gun",
+    "war fans", "shotgun", "gun",
     "nightfall", "firstlight", "damascus",
     "enryu", "shinkage", "tengoku",
-    "volcanic", "tornadic",
-    "metal", "skull", "polar", "devourer",
-    "bone",
-    "champion",
-    "green",
-    "butterfly",
+    "volcanic", "tornadic", "metal", "skull", "polar", "devourer",
+    "bone", "champion", "green", "butterfly",
     "insect", "flame", "serpent", "thunder", "water", "wind", "sound",
-    "beast",
-    "regular", "fancy",
-    "ocean wave", "reverb",
-    "blood",
-    "seismic",
-    "bladed",
+    "beast", "regular", "fancy", "ocean wave", "reverb",
+    "blood", "seismic", "bladed",
 }
 
 L.nonWeapons = {
@@ -127,9 +97,6 @@ L.mobKeywords = {}
 L.questKeywords = {}
 L.crowKeywords = { "crow", "kasugai" }
 
---============================================================
--- MATCHING
---============================================================
 local function matchWord(haystack, needle)
     local s, e = string.find(haystack, needle, 1, true)
     if not s then return false end
