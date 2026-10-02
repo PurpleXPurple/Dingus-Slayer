@@ -26,6 +26,7 @@ function A.init(Ctx)
     St.lastComboTime = 0
     St.comboIndex = 0
     St.swapPending = false
+    St.flyFailLogged = false
 
     local SK_KEYS = { "Z", "X", "C", "V", "B" }
     local SK_CDS  = { 1.2, 2.0, 2.8, 3.6, 6.0 }
@@ -86,7 +87,6 @@ function A.init(Ctx)
         return out
     end
 
-    -- H2: async weapon swap, no scheduler stall
     local function equipWeapon()
         if St.swapPending then return end
         local now = U.clock()
@@ -198,6 +198,64 @@ function A.init(Ctx)
         end)
     end
 
+    --============================================================
+    -- FLY TRANSITION (critical fix)
+    -- Attempts to engage fly. Returns true only when the fly module
+    -- reports itself active. Otherwise returns false and the caller
+    -- falls through to ground chase.
+    --
+    -- Guards:
+    --   - Ctx.Fly may be missing entirely (module failed to load)
+    --   - Ctx.Fly.start may be nil (init never ran)
+    --   - Ctx.Fly.start may raise (bad state, broken dep)
+    --   - Ctx.Fly.start may return true but leave .active == false
+    --     (makeMovers() silently failed)
+    -- Only .active == true counts as success.
+    --============================================================
+    local function tryEngageFly()
+        if not Ctx.Fly then return false end
+        if Ctx.Fly.active then return true end
+        if type(Ctx.Fly.start) ~= "function" then return false end
+
+        local ok, err = pcall(Ctx.Fly.start)
+        if not ok then
+            if not St.flyFailLogged then
+                St.flyFailLogged = true
+                print("[Dingus][Atk] fly start raised: " .. tostring(err))
+            end
+            return false
+        end
+
+        -- Verify the module actually entered the active state.
+        -- pcall success means no error, not that start succeeded.
+        if not Ctx.Fly.active then
+            if not St.flyFailLogged then
+                St.flyFailLogged = true
+                print("[Dingus][Atk] fly start returned without activating")
+            end
+            return false
+        end
+
+        St.flyFailLogged = false
+        return true
+    end
+
+    local function tryDisengageFly()
+        if not Ctx.Fly or not Ctx.Fly.active then return end
+        if type(Ctx.Fly.stop) ~= "function" then return end
+        pcall(Ctx.Fly.stop)
+    end
+
+    local function groundChase(r, tPos)
+        local h = U.hum()
+        if not h then return end
+        local flat = Vector3.new(tPos.Position.X - r.Position.X, 0,
+                                tPos.Position.Z - r.Position.Z)
+        if flat.Magnitude < 0.1 then return end
+        h.WalkSpeed = Cfg.RunSpeed
+        h:Move(flat.Unit)
+    end
+
     local function movementTick(dt)
         if not St.cbt then return end
         if St.cbtS == "RETREAT" then return end
@@ -261,13 +319,12 @@ function A.init(Ctx)
 
     local retreatRunning = false
 
-    -- H1: bounded retreat with early exits
     local function startRetreat(from)
         if retreatRunning then return end
         retreatRunning = true
         St.rtrC = (St.rtrC or 0) + 1
         St.cbtS = "RETREAT"
-        if Ctx.Fly and Ctx.Fly.stop then Ctx.Fly.stop() end
+        tryDisengageFly()
         if Ctx.Spoof and Ctx.Spoof.surfaceUp then pcall(Ctx.Spoof.surfaceUp) end
 
         task.spawn(function()
@@ -333,7 +390,7 @@ function A.init(Ctx)
     function A.combatTick()
         if not St.cbt then
             St.cbtS = "IDLE"
-            if Ctx.Fly and Ctx.Fly.active then Ctx.Fly.stop() end
+            tryDisengageFly()
             return
         end
 
@@ -342,7 +399,7 @@ function A.init(Ctx)
         if not h or not r then St.cbtS = "NO_CHAR"; return end
         if h.Health <= 0 then
             St.cbtS = "DEAD"
-            if Ctx.Fly and Ctx.Fly.active then Ctx.Fly.stop() end
+            tryDisengageFly()
             return
         end
 
@@ -372,13 +429,13 @@ function A.init(Ctx)
                 St.bKll = (St.bKll or 0) + 1
                 print(string.format("[Dingus] killed %s (%d)", St.tgt.ch.Name, St.bKll))
                 St.tgt = nil
-                if Ctx.Fly and Ctx.Fly.active then Ctx.Fly.stop() end
+                tryDisengageFly()
                 if D.invalidate then D.invalidate() end
             end
             acquireTarget()
             if not St.tgt then
                 St.cbtS = "IDLE"
-                if Ctx.Fly and Ctx.Fly.active then Ctx.Fly.stop() end
+                tryDisengageFly()
                 return
             end
         end
@@ -390,13 +447,24 @@ function A.init(Ctx)
         local dist = U.xzDist(r.Position, tPos.Position)
         t.d = dist
 
+        --============================================================
+        -- LONG RANGE — fly if we can, otherwise ground chase.
+        -- St.cbtS is set to "FLY" only after fly is confirmed active.
+        --============================================================
         if dist > Cfg.AtkRange + 4 then
-            St.cbtS = "FLY"
-            if Ctx.Fly and not Ctx.Fly.active and Ctx.Fly.start then
-                Ctx.Fly.start()
+            if tryEngageFly() then
+                St.cbtS = "FLY"
+                if St.skl and now - St.lSkl > 2.0 then
+                    St.lSkl = now
+                    fireRotation()
+                end
+                return
             end
-            if Ctx.Fly and Ctx.Fly.active then return end
+
+            -- Fly unavailable or failed to start. Ground chase.
+            St.cbtS = "APPROACH"
             faceTarget(r, tPos.Position)
+            groundChase(r, tPos)
             if St.skl and now - St.lSkl > 2.0 then
                 St.lSkl = now
                 fireRotation()
@@ -404,9 +472,13 @@ function A.init(Ctx)
             return
         end
 
+        --============================================================
+        -- IN RANGE — disengage fly if it was on.
+        --============================================================
         if Ctx.Fly and Ctx.Fly.active then
-            Ctx.Fly.stop()
-            task.wait(0.15)
+            tryDisengageFly()
+            -- No blocking wait — the movers are destroyed synchronously
+            -- by F.stop. One Heartbeat later, ground movement takes over.
         end
 
         local blocking = D.isEnemyBlocking(t)
@@ -471,7 +543,7 @@ function A.init(Ctx)
 
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function()
-        if Ctx.Fly and Ctx.Fly.stop then Ctx.Fly.stop() end
+        tryDisengageFly()
     end)
 
     print("[Dingus][attack] initialized")
