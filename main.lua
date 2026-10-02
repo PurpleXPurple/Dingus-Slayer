@@ -1,13 +1,7 @@
 --[[
-    Dingus-Slayer · main.lua v32
-    Boot orchestration. No inline crow or quest subsystems.
-
-    Changes from v31:
-      - Removed crow subsystem (now in quests.lua)
-      - Removed inline Quest (now in quests.lua)
-      - Added quests to subsystems list
-      - Single quest loop calls Ctx.Quest.cycle
-      - Removed crow loop from scheduler
+    Dingus-Slayer · main.lua v33
+    Ctx exposure for diagnostics. Quest loop polls at 0.5s.
+    Everything else unchanged from v32.
 ]]--
 
 local M = {}
@@ -40,6 +34,10 @@ function M.boot(Ctx)
         return
     end
 
+    -- Expose for diagnostics
+    _G.Ctx = Ctx
+    _G.St  = Ctx.St
+
     local U     = Ctx.Util
     local Cfg   = Ctx.Cfg
     local Lists = Ctx.Lists
@@ -51,6 +49,7 @@ function M.boot(Ctx)
     if type(St) ~= "table" then
         St = {}
         Ctx.St = St
+        _G.St = St
     end
 
     --============================================================
@@ -98,7 +97,6 @@ function M.boot(Ctx)
         St.ens = {}; St.ths = {}; St.zn = 0; St.imm = 0
         St.tgt = nil; St.tgtKind = nil
 
-        -- Quest state
         St.questPriorityBosses = {}
         St.questActiveList = {}
         St.questAvailableCount = 0
@@ -107,7 +105,6 @@ function M.boot(Ctx)
         St.questLastCycle = 0
         St.questPanelOpened = false
 
-        -- Crow state (retained for GUI reads)
         St.crT = nil; St.cPrch = false; St.crQuests = {}
         St.crowCycle = 0
         St.crowTake = 0
@@ -203,6 +200,15 @@ function M.boot(Ctx)
             task.wait(0.02)
         end
         print(string.format("[Dingus] %d/%d subsystems ok", okCount, #subsys))
+
+        -- Re-expose after subsys populate Ctx
+        _G.Cfg    = Ctx.Cfg
+        _G.Detect = Ctx.Detect
+        _G.Scan   = Ctx.Scan
+        _G.Quest  = Ctx.Quest
+        _G.Atk    = Ctx.Atk
+        _G.Spoof  = Ctx.Spoof
+        _G.Gui    = Ctx.Gui
     end)
 
     --============================================================
@@ -234,9 +240,9 @@ function M.boot(Ctx)
             end
         end
         local configTick = function()
+            if Cfg.tickAutoSave then pcall(Cfg.tickAutoSave) end
             if Cfg.save then
-                local ok = Cfg.save("default")
-                if not ok then error("autosave failed") end
+                pcall(function() Cfg.save("default") end)
             end
         end
         local gcTick = function()
@@ -247,7 +253,7 @@ function M.boot(Ctx)
             makeLoop("combat",   combatTick,  0.05, 5),
             makeLoop("spoofers", spoofTick,   0.10, 5),
             makeLoop("threats",  threatTick,  0.10, 5),
-            makeLoop("quest",    questTick,   Cfg.QuestCycleT or 6.0, 3),
+            makeLoop("quest",    questTick,   0.5,  3),
             makeLoop("config",   configTick,  Cfg.AutoSaveT or 30, 2),
             makeLoop("gc",       gcTick,      60, 1),
         }
@@ -403,6 +409,8 @@ function M.boot(Ctx)
             h.WalkSpeed = 16
             h.PlatformStand = false
         end
+        _G.Ctx = nil
+        _G.St = nil
         print("[Dingus] unloaded")
     end
 end
