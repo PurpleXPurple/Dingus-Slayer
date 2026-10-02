@@ -1,3 +1,13 @@
+--[[
+    Dingus-Slayer · attack.lua v4
+    Self-contained config. Fly watchdog. Equip diagnostics.
+    F-key probe. Auto-block. Everything declared inline.
+
+    Config defaults are set at init if not already present in Cfg.
+    Add any of these to config.lua's PERSIST list to make them
+    persist across sessions. Otherwise they reset each boot.
+]]--
+
 local A = {}
 
 function A.init(Ctx)
@@ -8,8 +18,47 @@ function A.init(Ctx)
     local L = Ctx.Lists
     local RunService = game:GetService("RunService")
 
+    --============================================================
+    -- INLINE CONFIG DEFAULTS
+    --============================================================
+    -- Combat tuning
+    Cfg.AtkRange       = Cfg.AtkRange       or 8
+    Cfg.AtkInterval    = Cfg.AtkInterval    or 0.55
+    Cfg.AtkIntMin      = Cfg.AtkIntMin      or 0.35
+    Cfg.AtkIntMax      = Cfg.AtkIntMax      or 0.75
+    Cfg.StunAtkInt     = Cfg.StunAtkInt     or 0.28
+    Cfg.HitWindow      = Cfg.HitWindow      or 12
+    Cfg.RunSpeed       = Cfg.RunSpeed       or 32
+
+    -- Retreat
+    Cfg.RetreatHP      = Cfg.RetreatHP      or 0.35
+    Cfg.RetreatDelay   = Cfg.RetreatDelay   or 4.0
+    Cfg.RetreatClearHP = Cfg.RetreatClearHP or 0.65
+
+    -- Skills (6 slots, F at index 1)
+    Cfg.SkillKeys      = Cfg.SkillKeys      or { "F", "Z", "X", "C", "V", "B" }
+    Cfg.SkillCooldowns = Cfg.SkillCooldowns or { 0.5, 1.2, 2.0, 2.8, 3.6, 6.0 }
+    Cfg.RotationOrder  = Cfg.RotationOrder  or { 2, 3, 4, 5, 6 }
+
+    -- F-key behavior
+    Cfg.FKeyMode       = Cfg.FKeyMode       or "auto"
+    Cfg.AutoBlock      = Cfg.AutoBlock      ~= false
+    Cfg.BlockHoldTTL   = Cfg.BlockHoldTTL   or 0.6
+    Cfg.BlockProbeWait = Cfg.BlockProbeWait or 0.15
+
+    -- Fly watchdog
+    Cfg.FlyWatchdogT   = Cfg.FlyWatchdogT   or 3.0
+    Cfg.FlyWatchdogD   = Cfg.FlyWatchdogD   or 5
+    Cfg.FlyCooldownT   = Cfg.FlyCooldownT   or 5.0
+
+    -- Equip
+    Cfg.EquipDebugN    = Cfg.EquipDebugN    or 5
+
+    --============================================================
+    -- STATE
+    --============================================================
     St.rHt = {}
-    St.skCd = { 0, 0, 0, 0, 0, 0 }        -- v3: 6 entries
+    St.skCd = { 0, 0, 0, 0, 0, 0 }
     St.aiI = Cfg.AtkInterval
     St.lAtk = 0
     St.lSkl = 0
@@ -26,17 +75,29 @@ function A.init(Ctx)
     St.lastComboTime = 0
     St.comboIndex = 0
     St.swapPending = false
-    St.flyFailLogged = false
 
-    -- v3 F-key state
-    St.fIsBlock       = false
-    St.fModeResolved  = false
-    St.blocking       = false
+    -- Fly coordination
+    St.flyFailLogged   = false
+    St.flyEnterT       = 0
+    St.flyEnterDist    = 0
+    St.flyCooldownUntil = 0
+    St.flyWatchdogLogged = false
+
+    -- Equip diagnostics
+    St.equipDebugLeft = Cfg.EquipDebugN
+
+    -- F-key state
+    St.fIsBlock      = false
+    St.fModeResolved = false
+    St.blocking      = false
     St.blockHoldUntil = 0
 
-    local SK_KEYS  = Cfg.SkillKeys or { "F", "Z", "X", "C", "V", "B" }
-    local SK_CDS   = Cfg.SkillCooldowns or { 0.5, 1.2, 2.0, 2.8, 3.6, 6.0 }
-    local ROTATION = Cfg.RotationOrder or { 2, 3, 4, 5, 6 }
+    --============================================================
+    -- CONSTANTS FROM CONFIG
+    --============================================================
+    local SK_KEYS  = Cfg.SkillKeys
+    local SK_CDS   = Cfg.SkillCooldowns
+    local ROTATION = Cfg.RotationOrder
 
     local COMBO_AIR       = { "m1", "m2", "m1", "m2", "m1" }
     local COMBO_SPECIAL_A = { "m2", "m2", "m1", "m2", "m1" }
@@ -73,24 +134,20 @@ function A.init(Ctx)
         St.blocking = false
         St.blockHoldUntil = 0
         St.fModeResolved = false
+        St.flyEnterT = 0
+        St.flyEnterDist = 0
+        St.flyWatchdogLogged = false
     end)
 
     --============================================================
     -- F-KEY PROBE
-    -- Runs once at boot (deferred). Decides whether F is block or
-    -- skill. Detection signals, in priority order:
-    --   1. Character/Humanoid attribute "IsBlocking" set during tap
-    --   2. Animation track named block/guard/parry during tap
-    --   3. Block bar value drop (SHCS.Blocking or similar)
-    --   4. WalkSpeed clamped during tap
-    -- If none fire, defaults to "skill".
     --============================================================
     local function readBlockAttribute()
         local c = U.Lp.Character
         if not c then return false end
-        local h = U.hum()
         local ok1, v1 = pcall(function() return c:GetAttribute("IsBlocking") end)
         if ok1 and v1 == true then return true end
+        local h = U.hum()
         if h then
             local ok2, v2 = pcall(function() return h:GetAttribute("IsBlocking") end)
             if ok2 and v2 == true then return true end
@@ -129,23 +186,19 @@ function A.init(Ctx)
     local function probeFKey()
         local h = U.hum()
         if not h or h.Health <= 0 then return nil end
-        if St.cbt then return nil end  -- defer if combat active
+        if St.cbt then return nil end
 
-        -- Baseline WalkSpeed for signal 4
         local baseWS = h.WalkSpeed
 
         U.keyDown("F")
-        local waitT = Cfg.BlockProbeWait or 0.15
-        task.wait(waitT)
+        task.wait(Cfg.BlockProbeWait)
 
         local isBlock = false
         if readBlockAttribute() then isBlock = true end
         if not isBlock and readBlockAnim() then isBlock = true end
         if not isBlock then
             local h2 = U.hum()
-            if h2 and h2.WalkSpeed < baseWS - 4 then
-                isBlock = true
-            end
+            if h2 and h2.WalkSpeed < baseWS - 4 then isBlock = true end
         end
 
         U.keyUp("F")
@@ -170,7 +223,7 @@ function A.init(Ctx)
     end
 
     --============================================================
-    -- WEAPON EQUIP
+    -- TOOL HELPERS
     --============================================================
     local function equippedTool()
         local c = U.Lp.Character
@@ -197,6 +250,9 @@ function A.init(Ctx)
         return out
     end
 
+    --============================================================
+    -- EQUIP WEAPON (with diagnostics)
+    --============================================================
     local function equipWeapon()
         if St.swapPending then return end
         local now = U.clock()
@@ -205,16 +261,45 @@ function A.init(Ctx)
 
         local h = U.hum(); if not h then return end
         local current = equippedTool()
+        local debugThis = St.equipDebugLeft > 0
+        if debugThis then
+            St.equipDebugLeft = St.equipDebugLeft - 1
+            print(string.format("[Dingus][Equip] current=%s",
+                current and current.Name or "nil"))
+        end
+
         if current and L.isWeapon(current.Name) then
             St.eq = current.Name
+            if debugThis then
+                print(string.format(
+                    "[Dingus][Equip] '%s' recognized as weapon — no swap",
+                    current.Name))
+            end
             return
         end
 
+        local inv = inventoryTools()
+        if debugThis then
+            local names = {}
+            for i, t in ipairs(inv) do
+                if i > 10 then break end
+                names[#names+1] = t.Name
+            end
+            print(string.format("[Dingus][Equip] inventory (%d): %s",
+                #inv, table.concat(names, ", ")))
+        end
+
         local target = nil
-        for _, t in ipairs(inventoryTools()) do
+        for _, t in ipairs(inv) do
             if L.isWeapon(t.Name) then target = t; break end
         end
-        if not target then return end
+
+        if not target then
+            if debugThis then
+                print("[Dingus][Equip] no weapon matched")
+            end
+            return
+        end
 
         St.swapPending = true
         task.spawn(function()
@@ -245,7 +330,6 @@ function A.init(Ctx)
 
     local function fireRotation()
         for _, i in ipairs(ROTATION) do
-            -- Skip F if we've determined it's block.
             if not (St.fIsBlock and SK_KEYS[i] == "F") then
                 if fireSkill(i) then return true end
             end
@@ -262,8 +346,6 @@ function A.init(Ctx)
         St.aAt = (St.aAt or 0) + 1
         local hpBefore = t.hm.Health
 
-        -- Release block before striking. Holding F while clicking M1
-        -- usually cancels the attack in most action games.
         if St.blocking then releaseBlock() end
 
         local now = U.clock()
@@ -305,7 +387,9 @@ function A.init(Ctx)
     local function currentInterval()
         if #St.rHt < 5 then return St.aiI end
         local hits = 0
-        for i = 1, #St.rHt do if St.rHt[i] then hits = hits + 1 end end
+        for i = 1, #St.rHt do
+            if St.rHt[i] then hits = hits + 1 end
+        end
         local rate = hits / #St.rHt
         if rate > 0.7 then
             St.aiI = math.max(Cfg.AtkIntMin, St.aiI - 0.02)
@@ -443,7 +527,9 @@ function A.init(Ctx)
         St.cbtS = "RETREAT"
         releaseBlock()
         tryDisengageFly()
-        if Ctx.Spoof and Ctx.Spoof.surfaceUp then pcall(Ctx.Spoof.surfaceUp) end
+        if Ctx.Spoof and Ctx.Spoof.surfaceUp then
+            pcall(Ctx.Spoof.surfaceUp)
+        end
 
         task.spawn(function()
             U.tap("Q"); task.wait(0.25)
@@ -510,14 +596,13 @@ function A.init(Ctx)
     end
 
     --============================================================
-    -- F-KEY RESOLUTION (once, deferred)
+    -- F-MODE RESOLUTION
     --============================================================
     local function resolveFMode()
         if St.fModeResolved then return end
         local mode = Cfg.FKeyMode or "auto"
 
         if mode == "auto" then
-            -- Wait for stable character + no combat
             local waited = 0
             while (not U.hrp() or St.cbt) and waited < 15 do
                 task.wait(0.5)
@@ -535,23 +620,23 @@ function A.init(Ctx)
                 St.fIsBlock = true
                 Cfg.RotationOrder = { 2, 3, 4, 5, 6 }
                 ROTATION = Cfg.RotationOrder
-                print("[Dingus][Atk] F-mode = BLOCK (probe: attribute/anim/ws)")
+                print("[Dingus][Atk] F-mode = BLOCK")
             else
                 St.fIsBlock = false
                 Cfg.RotationOrder = { 2, 3, 1, 4, 5, 6 }
                 ROTATION = Cfg.RotationOrder
-                print("[Dingus][Atk] F-mode = SKILL (probe: no block signal)")
+                print("[Dingus][Atk] F-mode = SKILL")
             end
         elseif mode == "block" then
             St.fIsBlock = true
             Cfg.RotationOrder = { 2, 3, 4, 5, 6 }
             ROTATION = Cfg.RotationOrder
-            print("[Dingus][Atk] F-mode = BLOCK (config override)")
+            print("[Dingus][Atk] F-mode = BLOCK (config)")
         elseif mode == "skill" then
             St.fIsBlock = false
             Cfg.RotationOrder = { 2, 3, 1, 4, 5, 6 }
             ROTATION = Cfg.RotationOrder
-            print("[Dingus][Atk] F-mode = SKILL (config override)")
+            print("[Dingus][Atk] F-mode = SKILL (config)")
         end
 
         St.fModeResolved = true
@@ -592,11 +677,17 @@ function A.init(Ctx)
         St.lHp = h.Health
         St.lHpT = now
 
-        if now - St.lBrt > 2.5 then St.lBrt = now; U.tap("L") end
+        if now - St.lBrt > 2.5 then
+            St.lBrt = now
+            U.tap("L")
+        end
 
         if St.rtr and hpFrac < Cfg.RetreatHP and not retreatRunning then
             local nearest = St.ths and St.ths[1]
-            if nearest then startRetreat(nearest.rp.Position); return end
+            if nearest then
+                startRetreat(nearest.rp.Position)
+                return
+            end
         end
         if retreatRunning then return end
 
@@ -628,18 +719,52 @@ function A.init(Ctx)
         t.d = dist
 
         --========================================================
-        -- LONG RANGE
+        -- LONG RANGE · fly or chase, watchdogged
         --========================================================
         if dist > Cfg.AtkRange + 4 then
-            if tryEngageFly() then
+            -- Watchdog check while flying
+            if St.cbtS == "FLY" then
+                if St.flyEnterT == 0 then
+                    St.flyEnterT = now
+                    St.flyEnterDist = dist
+                end
+                local elapsed = now - St.flyEnterT
+                local progress = St.flyEnterDist - dist
+                if elapsed > Cfg.FlyWatchdogT
+                   and progress < Cfg.FlyWatchdogD then
+                    if not St.flyWatchdogLogged then
+                        St.flyWatchdogLogged = true
+                        print(string.format(
+                            "[Dingus][Atk] fly watchdog: %.1fs, %.0f studs — forcing ground",
+                            elapsed, progress))
+                    end
+                    tryDisengageFly()
+                    St.flyCooldownUntil = now + Cfg.FlyCooldownT
+                    St.flyEnterT = 0
+                    St.flyEnterDist = 0
+                end
+            else
+                St.flyEnterT = 0
+                St.flyEnterDist = 0
+                St.flyWatchdogLogged = false
+            end
+
+            -- Try fly if not in cooldown
+            if now >= St.flyCooldownUntil and tryEngageFly() then
                 St.cbtS = "FLY"
-                releaseBlock()  -- no block while flying
+                releaseBlock()
+                if St.flyEnterT == 0 then
+                    St.flyEnterT = now
+                    St.flyEnterDist = dist
+                end
                 if St.skl and now - St.lSkl > 2.0 then
                     St.lSkl = now
                     fireRotation()
                 end
                 return
             end
+
+            -- Ground chase (fly unavailable or on cooldown)
             St.cbtS = "APPROACH"
             releaseBlock()
             faceTarget(r, tPos.Position)
@@ -651,9 +776,11 @@ function A.init(Ctx)
             return
         end
 
-        --========================================================
-        -- IN RANGE
-        --========================================================
+        -- In range — clear watchdog state
+        St.flyEnterT = 0
+        St.flyEnterDist = 0
+        St.flyWatchdogLogged = false
+
         if Ctx.Fly and Ctx.Fly.active then
             tryDisengageFly()
         end
@@ -664,21 +791,19 @@ function A.init(Ctx)
         faceTarget(r, tPos.Position)
 
         --========================================================
-        -- AUTO-BLOCK (v3)
-        -- Only active when F is block and AutoBlock is on.
-        -- Hold F when threat is imminent and we aren't attacking.
+        -- AUTO-BLOCK
         --========================================================
         local shouldBlock = false
         if St.fIsBlock and Cfg.AutoBlock then
             local threatNow = (St.imm or 0) > 0
             if threatNow then
-                St.blockHoldUntil = now + (Cfg.BlockHoldTTL or 0.6)
+                St.blockHoldUntil = now + Cfg.BlockHoldTTL
             end
             shouldBlock = threatNow or (now < (St.blockHoldUntil or 0))
         end
 
         --========================================================
-        -- STUN PUNISH
+        -- PUNISH / BREAK_BLOCK / ATTACK
         --========================================================
         if stunned and St.stunPun then
             St.cbtS = "PUNISH"
@@ -694,9 +819,6 @@ function A.init(Ctx)
             return
         end
 
-        --========================================================
-        -- ENEMY BLOCKING · BREAK
-        --========================================================
         if blocking then
             St.cbtS = "BREAK_BLOCK"
             releaseBlock()
@@ -711,12 +833,8 @@ function A.init(Ctx)
             return
         end
 
-        --========================================================
-        -- NORMAL ATTACK · BLOCK HELD WHEN NOT ATTACKING
-        --========================================================
         St.cbtS = "ATTACK"
 
-        -- If we should block and aren't ready to attack, hold F.
         if shouldBlock and (now - St.lAtk < currentInterval() * 0.8) then
             holdBlock()
         else
@@ -741,7 +859,8 @@ function A.init(Ctx)
         local list = D.scanBosses()
         print(string.format("[Dingus] force scan: %d bosses", #list))
         for i = 1, math.min(#list, 5) do
-            print(string.format("  · %s @%.0f studs", list[i].ch.Name, list[i].d))
+            print(string.format("  · %s @%.0f studs",
+                list[i].ch.Name, list[i].d))
         end
     end
 
@@ -754,13 +873,22 @@ function A.init(Ctx)
         end
     end
 
-    -- Expose F-mode for GUI/debug
     function A.fModeInfo()
         return {
             resolved = St.fModeResolved,
-            isBlock = St.fIsBlock,
+            isBlock  = St.fIsBlock,
             blocking = St.blocking,
             rotation = Cfg.RotationOrder,
+        }
+    end
+
+    function A.flyDebugInfo()
+        local now = U.clock()
+        return {
+            enterT     = St.flyEnterT,
+            enterDist  = St.flyEnterDist,
+            cooldown   = math.max(0, St.flyCooldownUntil - now),
+            watchdog   = St.flyWatchdogLogged,
         }
     end
 
@@ -770,7 +898,7 @@ function A.init(Ctx)
         tryDisengageFly()
     end)
 
-    print("[Dingus][attack] v3 initialized")
+    print("[Dingus][attack] v4 initialized")
 end
 
 return A
