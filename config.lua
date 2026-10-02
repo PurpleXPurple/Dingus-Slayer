@@ -1,7 +1,16 @@
+--[[
+    Dingus-Slayer · config.lua v3
+    Extended PERSIST to cover keys introduced by module refactors:
+      spoofers v3 · fly v2 · scanners v3
+    gsp default flipped to false per audit (spoof was net-negative).
+    No schema change — v2 files load clean.
+]]--
+
 local Cfg = {}
 
-Cfg.VERSION = 2
+Cfg.VERSION = 3
 
+-- COMBAT
 Cfg.AtkRange       = 8
 Cfg.AtkInterval    = 0.55
 Cfg.AtkIntMin      = 0.35
@@ -9,18 +18,22 @@ Cfg.AtkIntMax      = 0.75
 Cfg.StunAtkInt     = 0.28
 Cfg.HitWindow      = 12
 
+-- MOVEMENT
 Cfg.RunSpeed       = 32
 Cfg.CloseInSpeed   = 6
 Cfg.MaxMoveTick    = 8
 
+-- RETREAT
 Cfg.RetreatHP      = 0.35
 Cfg.RetreatDelay   = 4.0
 Cfg.RetreatClearHP = 0.65
 
+-- SCANNING
 Cfg.ScanTTL        = 1.2
 Cfg.CrowCheckT     = 1.5
 Cfg.QuestCycleT    = 5.0
 
+-- HOVER-BEHIND (fly.lua hover geometry)
 Cfg.HoverEnabled   = true
 Cfg.HoverDistance  = 8
 Cfg.HoverHeight    = 2
@@ -29,32 +42,67 @@ Cfg.HoverD         = 900
 Cfg.HoverTTL       = 0.05
 Cfg.HoverRecalcT   = 0.15
 
+-- UNDERGROUND (legacy; spoofers v3 no longer uses)
 Cfg.UGDepth        = 22
 Cfg.UGTrigHP       = 0.55
 Cfg.UGMaxT         = 6
 Cfg.UGClearT       = 1.6
 
+-- SKILLS
 Cfg.SkillKeys      = { "Z", "X", "C", "V", "B" }
 Cfg.SkillCooldowns = { 1.2, 2.0, 2.8, 3.6, 6.0 }
 Cfg.RotationOrder  = { 2, 1, 3, 4, 5 }
 
+-- PULL
 Cfg.PullRange      = 45
 Cfg.MaxPull        = 12
 
+-- FLY (fly.lua v2)
+Cfg.FlySpeed       = 85
+Cfg.FlySpeedBoost  = 40
+Cfg.FlyJitter      = 3
+Cfg.FlyJitterHz    = 1.7
+Cfg.FlyHeight      = 6
+Cfg.FlyMaxForce    = 1e5
+Cfg.FlyP           = 4000
+Cfg.FlyD           = 1200
+Cfg.FlyArriveDist  = 10
+Cfg.FlyMinSpeed    = 40
+Cfg.FlyParentHead  = false   -- parent BodyMovers to Head vs HRP
+Cfg.FlyDetachCam   = false   -- reset camera subject on stop
+Cfg.FlyVerbose     = false   -- gate 0.5s telemetry print
+
+-- SPOOFERS (spoofers v3)
+Cfg.SpoofSpeedMult = 1.25
+Cfg.SpoofJumpMult  = 1.15
+Cfg.SpoofWriteHz   = 5
+Cfg.SpoofAntiKnock = false
+Cfg.SpoofVerbose   = false
+
+-- SCANNERS (scanners v3)
+Cfg.CrowMenuCooldown = 30
+Cfg.CrowScanMinGap   = 0.3
+Cfg.CrowModelTTL     = 2.0
+
+-- PERSISTENCE
 Cfg.ConfigFile     = "dingus_config.json"
 Cfg.AutoSaveT      = 30
 
+-- gsp flipped to false per audit: spoof is net-negative in
+-- FilteredEnabled games. Enable manually if you want it.
 Cfg.DefaultToggles = {
     combat  = false,
     skl     = true,
     eqp     = true,
     rtr     = true,
-    gsp     = true,
+    gsp     = false,
     crw     = true,
     stunPun = true,
     hover   = true,
 }
 
+-- PERSIST: every key that round-trips to disk. Tables excluded
+-- (SkillKeys/Cooldowns/RotationOrder are structural).
 local PERSIST = {
     "AtkRange", "AtkInterval", "AtkIntMin", "AtkIntMax",
     "StunAtkInt", "HitWindow",
@@ -64,6 +112,13 @@ local PERSIST = {
     "HoverEnabled", "HoverDistance", "HoverHeight", "HoverP", "HoverD",
     "UGDepth", "UGTrigHP", "UGMaxT", "UGClearT",
     "PullRange", "MaxPull", "AutoSaveT",
+    "FlySpeed", "FlySpeedBoost", "FlyJitter", "FlyJitterHz",
+    "FlyHeight", "FlyMaxForce", "FlyP", "FlyD",
+    "FlyArriveDist", "FlyMinSpeed",
+    "FlyParentHead", "FlyDetachCam", "FlyVerbose",
+    "SpoofSpeedMult", "SpoofJumpMult", "SpoofWriteHz",
+    "SpoofAntiKnock", "SpoofVerbose",
+    "CrowMenuCooldown", "CrowScanMinGap", "CrowModelTTL",
 }
 
 local DEFAULTS = {}
@@ -168,9 +223,19 @@ function Cfg.pretty()
     local lines = { "=== Current Config ===" }
     for _, k in ipairs(PERSIST) do
         local v = Cfg[k]
-        local vs = type(v) == "number" and string.format("%.3f", v) or tostring(v)
-        vs = vs:gsub("%.?0+$", "")
-        lines[#lines+1] = string.format("  %-16s = %s", k, vs)
+        local vs
+        if type(v) == "number" then
+            vs = string.format("%.3f", v):gsub("%.?0+$", "")
+        elseif type(v) == "boolean" then
+            vs = tostring(v)
+        elseif type(v) == "table" then
+            local parts = {}
+            for i, item in ipairs(v) do parts[i] = tostring(item) end
+            vs = "{" .. table.concat(parts, ", ") .. "}"
+        else
+            vs = tostring(v)
+        end
+        lines[#lines+1] = string.format("  %-18s = %s", k, vs)
     end
     return table.concat(lines, "\n")
 end
