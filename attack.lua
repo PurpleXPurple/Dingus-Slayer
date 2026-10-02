@@ -1,8 +1,7 @@
 --[[
-    Dingus-Slayer · attack.lua v19
-    Calls Chest.collectAtBoss with the corpse position on kill.
-    Blocks target acquisition during loot cycle.
-    Aborts loot cycle on retreat.
+    Dingus-Slayer · attack.lua v20
+    Watchdogged retreat + loot cycle. S.retreating instead of local.
+    All other v19 behavior retained.
 ]]--
 
 local A = {}
@@ -50,6 +49,8 @@ function A.init(Ctx)
     F.TelegraphWindow = F.TelegraphWindow or 0.45
     F.M1MaxHz = F.M1MaxHz or 10
     F.WeaponHotbarOrder = F.WeaponHotbarOrder or { "3","4","1","5" }
+    F.WatchdogRetreatMax = F.WatchdogRetreatMax or 6
+    F.WatchdogLootMax = F.WatchdogLootMax or 20
 
     S.rHt = {}
     S.gcdUntil = 0
@@ -74,7 +75,10 @@ function A.init(Ctx)
     S.comboFires, S.comboRotations = 0, 0
     S.breathFrac, S.partySize = 1.0, 1
     S.lootCycleActive = false
+    S.lootCycleStart = 0
     S.lootCycleBossName = nil
+    S.retreating = false
+    S.retreatStart = 0
 
     local SK = F.SkillKeys
     local SKC = #SK
@@ -160,8 +164,9 @@ function A.init(Ctx)
         task.wait(1); scrub()
         S.blocking = false; S.blockHoldUntil = 0
         S.fModeResolved = false; S.comboTargetName = nil; S.eqKey = nil
-        S.lootCycleActive = false
-        if Ctx.Chest then Ctx.Chest.abort() end
+        S.lootCycleActive = false; S.lootCycleStart = 0
+        S.retreating = false; S.retreatStart = 0
+        if Ctx.Chest and Ctx.Chest.abort then pcall(Ctx.Chest.abort) end
         resetCombo()
     end)
 
@@ -298,8 +303,6 @@ function A.init(Ctx)
                 S.eq = info or "weapon"
                 S.eqKey = H.slotOf(info)
                 S.equipFailCount = 0
-                print(string.format("[Dingus][Atk] equipped %s (slot %s)",
-                    tostring(info), tostring(S.eqKey)))
             else
                 S.equipFailCount = (S.equipFailCount or 0) + 1
                 if S.equipFailCount >= 3 then
@@ -526,20 +529,19 @@ function A.init(Ctx)
         detectHold()
     end)
 
-    local retreating = false
     local function retreat(from, reason)
-        if retreating then return end
-        retreating = true
+        if S.retreating then return end
+        S.retreating = true
+        S.retreatStart = U.clock()
         S.rtrC = (S.rtrC or 0) + 1
         S.cbtS = "RETREAT"; blockRel()
-        -- Abort any in-progress loot cycle
         if Ctx.Chest and Ctx.Chest.abort then pcall(Ctx.Chest.abort) end
         S.lootCycleActive = false
         print(string.format("[Dingus][Atk] retreat (%s)", tostring(reason or "hp")))
         task.spawn(function()
             U.tap("Q"); task.wait(0.25)
             local r, h = U.hrp(), U.hum()
-            if not r or not h then retreating = false; S.cbtS = "IDLE"; return end
+            if not r or not h then S.retreating = false; S.cbtS = "IDLE"; return end
             local away = r.Position - from
             local flat = Vector3.new(away.X, 0, away.Z)
             if flat.Magnitude < 0.5 then flat = Vector3.new(1,0,0) end
@@ -556,18 +558,18 @@ function A.init(Ctx)
                 if U.clock() > cap then break end
                 h:Move(flat.Unit); task.wait(0.05)
             end
-            retreating = false; S.tgt = nil
+            S.retreating = false
+            S.retreatStart = 0
+            S.tgt = nil
             if D.invalidate then D.invalidate() end
         end)
     end
 
-    --============================================================
-    -- LOOT CYCLE SPAWNER
-    --============================================================
     local function spawnBossLoot(bossPos, bossName)
         if not Ctx.Chest or not Ctx.Chest.collectAtBoss then return end
         if not F.ChestEnabled or not F.ChestOnKill then return end
         S.lootCycleActive = true
+        S.lootCycleStart = U.clock()
         S.lootCycleBossName = bossName
         task.spawn(function()
             local ok, err = pcall(Ctx.Chest.collectAtBoss, bossPos, bossName)
@@ -575,21 +577,18 @@ function A.init(Ctx)
                 print("[Dingus][Atk] loot cycle error: " .. tostring(err))
             end
             S.lootCycleActive = false
+            S.lootCycleStart = 0
             S.lootCycleBossName = nil
-            -- Force target re-acquisition on next tick
             S.tgt = nil
             if D.invalidate then D.invalidate() end
         end)
     end
 
-    --============================================================
-    -- COMBAT TICK
-    --============================================================
     function A.combatTick()
         if not S.cbt then
-            S.cbtS = "IDLE"; blockRel()
-            return
+            S.cbtS = "IDLE"; blockRel(); return
         end
+
         local h, r = U.hum(), U.hrp()
         if not h or not r then S.cbtS = "NO_CHAR"; return end
         if h.Health <= 0 then S.cbtS = "DEAD"; blockRel(); return end
@@ -597,9 +596,33 @@ function A.init(Ctx)
         local now = U.clock()
         local hpFrac = h.Health / h.MaxHealth
 
-        -- Critical retreat always runs, even during loot cycle
+        -- Watchdog: retreat
+        if S.retreating then
+            if S.retreatStart > 0 and now - S.retreatStart > F.WatchdogRetreatMax then
+                warn("[Dingus][Atk] retreat watchdog fired")
+                S.retreating = false
+                S.retreatStart = 0
+            else
+                return
+            end
+        end
+
+        -- Watchdog: loot cycle
+        if S.lootCycleActive then
+            if S.lootCycleStart > 0 and now - S.lootCycleStart > F.WatchdogLootMax then
+                warn("[Dingus][Atk] loot cycle watchdog fired")
+                if Ctx.Chest and Ctx.Chest.abort then pcall(Ctx.Chest.abort) end
+                S.lootCycleActive = false
+                S.lootCycleStart = 0
+            else
+                S.cbtS = "LOOT"
+                blockRel()
+                return
+            end
+        end
+
         S.critical = hpFrac < F.CriticalHP
-        if S.critical and not retreating then
+        if S.critical then
             local n = S.ths and S.ths[1]
             local from = n and n.rp.Position
                 or (S.tgt and S.tgt.rp and S.tgt.rp.Position)
@@ -607,20 +630,11 @@ function A.init(Ctx)
             retreat(from, "critical"); return
         end
 
-        S.emergency = (not S.critical) and hpFrac < F.EmergencyHP
+        S.emergency = hpFrac < F.EmergencyHP
 
-        -- Regular retreat also interrupts loot
-        if not S.emergency and S.rtr and hpFrac < F.RetreatHP and not retreating then
+        if not S.emergency and S.rtr and hpFrac < F.RetreatHP then
             local n = S.ths and S.ths[1]
             if n then retreat(n.rp.Position, "hp"); return end
-        end
-        if retreating then return end
-
-        -- Loot cycle blocks all other behavior
-        if S.lootCycleActive then
-            S.cbtS = "LOOT"
-            blockRel()
-            return
         end
 
         equipWeapon()
@@ -641,7 +655,6 @@ function A.init(Ctx)
 
         if now - S.lBrt > 2.5 then S.lBrt = now; U.tap("L") end
 
-        -- Target management
         if not S.tgt or not S.tgt.ch.Parent or S.tgt.hm.Health <= 0 then
             if S.tgt then
                 local bossPos = S.tgt.rp and S.tgt.rp.Position
@@ -652,14 +665,12 @@ function A.init(Ctx)
                 local bossName = S.tgt.ch.Name
                 S.kll = (S.kll or 0) + 1
                 S.bKll = (S.bKll or 0) + 1
-                print(string.format("[Dingus] killed %s (%d)",
-                    bossName, S.bKll))
+                print(string.format("[Dingus] killed %s (%d)", bossName, S.bKll))
                 S.tgt = nil; S.comboTargetName = nil
                 resetCombo(); blockRel()
                 if D.invalidate then D.invalidate() end
                 spawnBossLoot(bossPos, bossName)
             end
-            -- Do NOT acquire new target during loot cycle
             if S.lootCycleActive then return end
             acquire()
             if not S.tgt then S.cbtS = "IDLE"; blockRel(); return end
@@ -737,9 +748,6 @@ function A.init(Ctx)
         fireCombo(t, hpFrac, now)
     end
 
-    --============================================================
-    -- PUBLIC
-    --============================================================
     function A.forceScan()
         if D.invalidate then D.invalidate() end
         local l = D.scanBosses(nil, true)
@@ -757,7 +765,7 @@ function A.init(Ctx)
     end
 
     function A.fModeInfo()
-        return { resolved = S.fModeResolved, isBlock = S.fIsBlock, blocking = S.blocking }
+        return { resolved=S.fModeResolved, isBlock=S.fIsBlock, blocking=S.blocking }
     end
 
     function A.comboInfo()
@@ -765,9 +773,9 @@ function A.init(Ctx)
         local n = {}
         if o then for _, idx in ipairs(o) do table.insert(n, SK[idx] or tostring(idx)) end end
         return {
-            orders = #S.comboOrders, currentOrderIdx = S.comboOrderIdx,
-            currentPos = S.comboPos, currentOrder = table.concat(n, " → "),
-            rotations = S.comboRotations, totalFires = S.comboFires or 0,
+            orders=#S.comboOrders, currentOrderIdx=S.comboOrderIdx,
+            currentPos=S.comboPos, currentOrder=table.concat(n, " → "),
+            rotations=S.comboRotations, totalFires=S.comboFires or 0,
         }
     end
 
@@ -783,16 +791,16 @@ function A.init(Ctx)
             holder = Ctx.Hotbar.isLocked() or "free"
         end
         return {
-            teleports = S.teleCount or 0, dodges = S.dodgeCount or 0,
-            gcdHits = S.gcdHits or 0, gcdMisses = S.gcdMisses or 0,
-            comboFires = S.comboFires or 0, comboRotations = S.comboRotations or 0,
-            holdFires = S.holdFires or 0, instantFires = S.instantFires or 0,
-            holdSkills = S.holdSkills, emergency = S.emergency,
-            critical = S.critical, blocking = S.blocking,
-            breathFrac = S.breathFrac or 1.0, partySize = S.partySize or 1,
-            lootActive = S.lootCycleActive,
-            lootBoss = S.lootCycleBossName,
-            equipped = S.eq, equipKey = S.eqKey, hotbarHolder = holder,
+            teleports=S.teleCount or 0, dodges=S.dodgeCount or 0,
+            gcdHits=S.gcdHits or 0, gcdMisses=S.gcdMisses or 0,
+            comboFires=S.comboFires or 0, comboRotations=S.comboRotations or 0,
+            holdFires=S.holdFires or 0, instantFires=S.instantFires or 0,
+            emergency=S.emergency, critical=S.critical, blocking=S.blocking,
+            retreating=S.retreating, retreatAge=S.retreatStart > 0 and (U.clock() - S.retreatStart) or 0,
+            lootActive=S.lootCycleActive,
+            lootAge=S.lootCycleStart > 0 and (U.clock() - S.lootCycleStart) or 0,
+            breathFrac=S.breathFrac or 1.0, partySize=S.partySize or 1,
+            equipped=S.eq, equipKey=S.eqKey, hotbarHolder=holder,
         }
     end
 
@@ -816,6 +824,7 @@ function A.init(Ctx)
     function A.abortLoot()
         if Ctx.Chest and Ctx.Chest.abort then pcall(Ctx.Chest.abort) end
         S.lootCycleActive = false
+        S.lootCycleStart = 0
     end
 
     Ctx.Cleanup = Ctx.Cleanup or {}
@@ -824,7 +833,7 @@ function A.init(Ctx)
         if Ctx.Chest and Ctx.Chest.abort then pcall(Ctx.Chest.abort) end
     end)
 
-    print("[Dingus][attack] v19 initialized · boss-anchored loot cycle")
+    print("[Dingus][attack] v20 initialized · watchdogged")
 end
 
 return A
