@@ -1,7 +1,7 @@
 --[[
-    Dingus-Slayer · attack.lua v20
-    Watchdogged retreat + loot cycle. S.retreating instead of local.
-    All other v19 behavior retained.
+    Dingus-Slayer · attack.lua v21
+    Fixes retreat loop. Adds state logging. Wraps tick body.
+    All v20 features retained.
 ]]--
 
 local A = {}
@@ -9,6 +9,9 @@ local A = {}
 function A.init(Ctx)
     local U, F, S, D, L = Ctx.Util, Ctx.Cfg, Ctx.St, Ctx.Detect, Ctx.Lists
 
+    --============================================================
+    -- CONFIG · retreat rewritten defaults
+    --============================================================
     F.AtkRange = F.AtkRange or 8
     F.AtkInterval = F.AtkInterval or 0.38
     F.AtkIntMin = F.AtkIntMin or 0.22
@@ -16,19 +19,25 @@ function A.init(Ctx)
     F.StunAtkInt = F.StunAtkInt or 0.20
     F.HitWindow = F.HitWindow or 15
     F.RunSpeed = F.RunSpeed or 16
-    F.RetreatHP = F.RetreatHP or 0.55
-    F.CriticalHP = F.CriticalHP or 0.15
-    F.RetreatDelay = F.RetreatDelay or 2.5
-    F.RetreatClearHP = F.RetreatClearHP or 0.75
+
+    -- Retreat rewrite — sensible thresholds + cooldown
+    F.RetreatHP = F.RetreatHP or 0.30        -- was 0.55 → too aggressive
+    F.CriticalHP = F.CriticalHP or 0.12      -- was 0.15
+    F.RetreatDelay = F.RetreatDelay or 2.0   -- was 2.5
+    F.RetreatClearHP = F.RetreatClearHP or 0.55  -- was 0.75 → unreachable
+    F.RetreatCooldown = F.RetreatCooldown or 8.0 -- NEW
+
     F.SkillKeys = F.SkillKeys or { "F","Z","X","C","V","B" }
     F.SkillUnlocked = F.SkillUnlocked or { true,true,true,true,true,true }
     F.GCDWindow = F.GCDWindow or 1.10
     F.ComboOrderCount = F.ComboOrderCount or 4
     F.ComboReshuffleN = F.ComboReshuffleN or 3
+
     F.DetectHoldSkills = F.DetectHoldSkills ~= false
     F.HoldProbeDuration = F.HoldProbeDuration or 1.30
     F.HoldCastDuration = F.HoldCastDuration or 1.20
     F.HoldOverride = F.HoldOverride or {}
+
     F.AutoBlockOnDamage = F.AutoBlockOnDamage ~= false
     F.BlockReactionWindow = F.BlockReactionWindow or 1.50
     F.BlockGraceRelease = F.BlockGraceRelease or 0.35
@@ -38,6 +47,7 @@ function A.init(Ctx)
     F.AutoBlock = F.AutoBlock ~= false
     F.BlockHoldTTL = F.BlockHoldTTL or 0.4
     F.BlockProbeWait = F.BlockProbeWait or 0.15
+
     F.TeleportCd = F.TeleportCd or 0.22
     F.TeleportStrike = F.TeleportStrike or 4.5
     F.TeleportHeight = F.TeleportHeight or 3
@@ -51,7 +61,11 @@ function A.init(Ctx)
     F.WeaponHotbarOrder = F.WeaponHotbarOrder or { "3","4","1","5" }
     F.WatchdogRetreatMax = F.WatchdogRetreatMax or 6
     F.WatchdogLootMax = F.WatchdogLootMax or 20
+    F.AtkVerbose = F.AtkVerbose ~= false
 
+    --============================================================
+    -- STATE
+    --============================================================
     S.rHt = {}
     S.gcdUntil = 0
     S.aiI = F.AtkInterval
@@ -79,10 +93,47 @@ function A.init(Ctx)
     S.lootCycleBossName = nil
     S.retreating = false
     S.retreatStart = 0
+    S.retreatCooldownUntil = 0
+    S.retreatCount = 0
+    S.lastHpReading = 0
+    S.lastHpRising = false
+
+    -- state logging
+    S._lastLoggedState = nil
+    S._lastLoggedTarget = nil
+    S._lastLoggedNoBoss = 0
 
     local SK = F.SkillKeys
     local SKC = #SK
 
+    --============================================================
+    -- LOGGER · only prints on state change
+    --============================================================
+    local function slog(msg)
+        if F.AtkVerbose then
+            print("[Dingus][Atk] " .. msg)
+        end
+    end
+
+    local function logStateChange(newState)
+        if S._lastLoggedState == newState then return end
+        S._lastLoggedState = newState
+        print(string.format("[Dingus][Atk] state → %s", tostring(newState)))
+    end
+
+    local function logTargetChange(name)
+        if S._lastLoggedTarget == name then return end
+        S._lastLoggedTarget = name
+        if name then
+            print(string.format("[Dingus][Atk] target → %s", tostring(name)))
+        else
+            print("[Dingus][Atk] target → (none)")
+        end
+    end
+
+    --============================================================
+    -- COMBO ENGINE
+    --============================================================
     local function buildPerm()
         local pool = {}
         for i = 1, SKC do
@@ -146,6 +197,9 @@ function A.init(Ctx)
         end
     end
 
+    --============================================================
+    -- MOVER SCRUB
+    --============================================================
     local function scrub()
         local r = U.hrp(); if not r then return end
         for _, c in ipairs(r:GetChildren()) do
@@ -166,10 +220,15 @@ function A.init(Ctx)
         S.fModeResolved = false; S.comboTargetName = nil; S.eqKey = nil
         S.lootCycleActive = false; S.lootCycleStart = 0
         S.retreating = false; S.retreatStart = 0
+        S.retreatCooldownUntil = 0
+        S._lastLoggedState = nil; S._lastLoggedTarget = nil
         if Ctx.Chest and Ctx.Chest.abort then pcall(Ctx.Chest.abort) end
         resetCombo()
     end)
 
+    --============================================================
+    -- ANIM READER
+    --============================================================
     local function readAtkAnim()
         local h = U.hum(); if not h then return false end
         local an = h:FindFirstChildOfClass("Animator"); if not an then return false end
@@ -238,6 +297,9 @@ function A.init(Ctx)
         S.blocking = false; U.keyUp("F")
     end
 
+    --============================================================
+    -- TOOL
+    --============================================================
     local function eqTool()
         local c = U.Lp.Character; if not c then return nil end
         for _, t in ipairs(c:GetChildren()) do
@@ -314,6 +376,9 @@ function A.init(Ctx)
         end)
     end
 
+    --============================================================
+    -- SKILL FIRING
+    --============================================================
     local function gcdReady(t) return t >= S.gcdUntil end
 
     local function fireSkill(idx, t)
@@ -325,10 +390,14 @@ function A.init(Ctx)
         if S.holdSkills[idx] then
             S.holdFires = S.holdFires + 1
             task.spawn(function()
-                U.keyDown(k); task.wait(F.HoldCastDuration); U.keyUp(k)
+                local ok = pcall(function()
+                    U.keyDown(k); task.wait(F.HoldCastDuration)
+                end)
+                pcall(function() U.keyUp(k) end) -- always release
             end)
         else
-            S.instantFires = S.instantFires + 1; U.tap(k)
+            S.instantFires = S.instantFires + 1
+            pcall(function() U.tap(k) end)
         end
         S.gcdUntil = t + F.GCDWindow
         S.gcdHits = S.gcdHits + 1
@@ -351,6 +420,9 @@ function A.init(Ctx)
         advanceCombo()
     end
 
+    --============================================================
+    -- MOVEMENT
+    --============================================================
     local function safeCF(dest, look)
         local dx = look.X - dest.X
         local dz = look.Z - dest.Z
@@ -413,6 +485,9 @@ function A.init(Ctx)
         S.lDodge = now; S.dodgeCount = S.dodgeCount + 1; U.tap("Q"); return true
     end
 
+    --============================================================
+    -- STRIKE
+    --============================================================
     local function chain(count)
         count = count or F.ComboBurst
         local gap = math.max(F.ComboGap, 1 / F.M1MaxHz)
@@ -476,6 +551,9 @@ function A.init(Ctx)
         return (ok and c) or 1
     end
 
+    --============================================================
+    -- TARGET
+    --============================================================
     local function acquire()
         local t, k = D.pickTarget()
         S.tgt, S.tgtKind = t, k
@@ -483,11 +561,16 @@ function A.init(Ctx)
             if S.comboTargetName ~= t.ch.Name then
                 S.comboTargetName = t.ch.Name; resetCombo()
             end
-            print(string.format("[Dingus] target %s (%s) @%.0f", t.ch.Name, k, t.d))
+            logTargetChange(t.ch.Name)
+        else
+            logTargetChange(nil)
         end
         return t
     end
 
+    --============================================================
+    -- F-MODE
+    --============================================================
     local function resolveF()
         if S.fModeResolved then return end
         local mode = F.FKeyMode or "auto"
@@ -529,25 +612,42 @@ function A.init(Ctx)
         detectHold()
     end)
 
+    --============================================================
+    -- RETREAT · rewritten
+    --============================================================
     local function retreat(from, reason)
         if S.retreating then return end
+        if U.clock() < S.retreatCooldownUntil then return end
+
         S.retreating = true
         S.retreatStart = U.clock()
+        S.retreatCount = (S.retreatCount or 0) + 1
         S.rtrC = (S.rtrC or 0) + 1
-        S.cbtS = "RETREAT"; blockRel()
+        S.cbtS = "RETREAT"
+        logStateChange("RETREAT")
+        blockRel()
         if Ctx.Chest and Ctx.Chest.abort then pcall(Ctx.Chest.abort) end
         S.lootCycleActive = false
-        print(string.format("[Dingus][Atk] retreat (%s)", tostring(reason or "hp")))
+
+        print(string.format("[Dingus][Atk] retreat #%d (%s) — hp %.0f%%",
+            S.retreatCount, tostring(reason or "hp"),
+            (U.hum() and U.hum().Health / U.hum().MaxHealth * 100) or 0))
+
         task.spawn(function()
-            U.tap("Q"); task.wait(0.25)
+            pcall(function() U.tap("Q") end); task.wait(0.25)
             local r, h = U.hrp(), U.hum()
-            if not r or not h then S.retreating = false; S.cbtS = "IDLE"; return end
+            if not r or not h then
+                S.retreating = false
+                S.retreatStart = 0
+                S.cbtS = "IDLE"
+                return
+            end
             local away = r.Position - from
             local flat = Vector3.new(away.X, 0, away.Z)
             if flat.Magnitude < 0.5 then flat = Vector3.new(1,0,0) end
             h.WalkSpeed = F.RunSpeed
             local st = U.clock()
-            local cap = st + 3.5
+            local cap = st + F.RetreatDelay + 1.0
             local lhp = h.Health
             local ldt = st
             while U.clock() < st + F.RetreatDelay do
@@ -556,15 +656,22 @@ function A.init(Ctx)
                 if hh.Health < lhp then lhp = hh.Health; ldt = U.clock() end
                 if U.clock() - ldt > 1.5 and U.clock() > st + 0.8 then break end
                 if U.clock() > cap then break end
-                h:Move(flat.Unit); task.wait(0.05)
+                pcall(function() h:Move(flat.Unit) end)
+                task.wait(0.05)
             end
             S.retreating = false
             S.retreatStart = 0
+            S.retreatCooldownUntil = U.clock() + (F.RetreatCooldown or 8.0)
             S.tgt = nil
             if D.invalidate then D.invalidate() end
+            print(string.format("[Dingus][Atk] retreat done — cooldown %.1fs",
+                F.RetreatCooldown or 8.0))
         end)
     end
 
+    --============================================================
+    -- LOOT CYCLE
+    --============================================================
     local function spawnBossLoot(bossPos, bossName)
         if not Ctx.Chest or not Ctx.Chest.collectAtBoss then return end
         if not F.ChestEnabled or not F.ChestOnKill then return end
@@ -584,30 +691,46 @@ function A.init(Ctx)
         end)
     end
 
-    function A.combatTick()
+    --============================================================
+    -- COMBAT TICK
+    --============================================================
+    local function combatTickInner()
         if not S.cbt then
-            S.cbtS = "IDLE"; blockRel(); return
+            S.cbtS = "IDLE"
+            logStateChange("IDLE")
+            blockRel()
+            return
         end
 
         local h, r = U.hum(), U.hrp()
-        if not h or not r then S.cbtS = "NO_CHAR"; return end
-        if h.Health <= 0 then S.cbtS = "DEAD"; blockRel(); return end
+        if not h or not r then
+            S.cbtS = "NO_CHAR"
+            logStateChange("NO_CHAR")
+            return
+        end
+        if h.Health <= 0 then
+            S.cbtS = "DEAD"
+            logStateChange("DEAD")
+            blockRel()
+            return
+        end
 
         local now = U.clock()
         local hpFrac = h.Health / h.MaxHealth
 
-        -- Watchdog: retreat
+        -- retreat watchdog
         if S.retreating then
             if S.retreatStart > 0 and now - S.retreatStart > F.WatchdogRetreatMax then
                 warn("[Dingus][Atk] retreat watchdog fired")
                 S.retreating = false
                 S.retreatStart = 0
+                S.retreatCooldownUntil = now + (F.RetreatCooldown or 8.0)
             else
                 return
             end
         end
 
-        -- Watchdog: loot cycle
+        -- loot watchdog
         if S.lootCycleActive then
             if S.lootCycleStart > 0 and now - S.lootCycleStart > F.WatchdogLootMax then
                 warn("[Dingus][Atk] loot cycle watchdog fired")
@@ -616,25 +739,36 @@ function A.init(Ctx)
                 S.lootCycleStart = 0
             else
                 S.cbtS = "LOOT"
+                logStateChange("LOOT")
                 blockRel()
                 return
             end
         end
 
+        -- critical retreat
         S.critical = hpFrac < F.CriticalHP
         if S.critical then
-            local n = S.ths and S.ths[1]
-            local from = n and n.rp.Position
-                or (S.tgt and S.tgt.rp and S.tgt.rp.Position)
-                or r.Position
-            retreat(from, "critical"); return
+            if now >= S.retreatCooldownUntil then
+                local n = S.ths and S.ths[1]
+                local from = n and n.rp.Position
+                    or (S.tgt and S.tgt.rp and S.tgt.rp.Position)
+                    or r.Position
+                retreat(from, "critical")
+                return
+            end
         end
 
         S.emergency = hpFrac < F.EmergencyHP
 
+        -- regular retreat
         if not S.emergency and S.rtr and hpFrac < F.RetreatHP then
-            local n = S.ths and S.ths[1]
-            if n then retreat(n.rp.Position, "hp"); return end
+            if now >= S.retreatCooldownUntil then
+                local n = S.ths and S.ths[1]
+                if n then
+                    retreat(n.rp.Position, "hp")
+                    return
+                end
+            end
         end
 
         equipWeapon()
@@ -655,6 +789,7 @@ function A.init(Ctx)
 
         if now - S.lBrt > 2.5 then S.lBrt = now; U.tap("L") end
 
+        -- target management
         if not S.tgt or not S.tgt.ch.Parent or S.tgt.hm.Health <= 0 then
             if S.tgt then
                 local bossPos = S.tgt.rp and S.tgt.rp.Position
@@ -667,13 +802,27 @@ function A.init(Ctx)
                 S.bKll = (S.bKll or 0) + 1
                 print(string.format("[Dingus] killed %s (%d)", bossName, S.bKll))
                 S.tgt = nil; S.comboTargetName = nil
+                logTargetChange(nil)
                 resetCombo(); blockRel()
                 if D.invalidate then D.invalidate() end
                 spawnBossLoot(bossPos, bossName)
             end
             if S.lootCycleActive then return end
             acquire()
-            if not S.tgt then S.cbtS = "IDLE"; blockRel(); return end
+            if not S.tgt then
+                S.cbtS = "IDLE"
+                logStateChange("IDLE")
+                blockRel()
+                -- Log once every 10s why we're idle
+                if now - (S._lastLoggedNoBoss or 0) > 10 then
+                    S._lastLoggedNoBoss = now
+                    local st = D.stats and D.stats() or {}
+                    print(string.format(
+                        "[Dingus][Atk] no target · detect: bosses=%d mobs=%d humans=%d",
+                        st.bosses or 0, st.mobs or 0, st.humans or 0))
+                end
+                return
+            end
         end
 
         local t = S.tgt
@@ -694,9 +843,12 @@ function A.init(Ctx)
         end
 
         if dist > F.AtkRange then
-            S.cbtS = "TELEPORT"; blockRel()
+            S.cbtS = "TELEPORT"
+            logStateChange("TELEPORT")
+            blockRel()
             teleport(t, tPos, myPos)
-            fireCombo(t, hpFrac, now); return
+            fireCombo(t, hpFrac, now)
+            return
         end
 
         inRange(t, tPos, myPos, now)
@@ -720,34 +872,59 @@ function A.init(Ctx)
             local canDodge = (now - S.lDodge) > F.DodgeCooldown
             local tele = tst < F.TelegraphWindow
             if (imm or atk) and canDodge and tele then
-                S.cbtS = "DODGE"; blockRel(); dodge(now); return
+                S.cbtS = "DODGE"
+                logStateChange("DODGE")
+                blockRel(); dodge(now); return
             end
         end
 
         if forceBlock then
-            S.cbtS = "BLOCK"; blockHold()
+            S.cbtS = "BLOCK"
+            logStateChange("BLOCK")
+            blockHold()
             fireCombo(t, hpFrac, now); return
         end
 
         if stunned and S.stunPun then
-            S.cbtS = "PUNISH"; blockRel()
+            S.cbtS = "PUNISH"
+            logStateChange("PUNISH")
+            blockRel()
             if now - S.lAtk >= F.StunAtkInt then S.lAtk = now; strike(t, now) end
             fireCombo(t, hpFrac, now); return
         end
 
         if blocking then
-            S.cbtS = "BREAK"; blockRel()
+            S.cbtS = "BREAK"
+            logStateChange("BREAK")
+            blockRel()
             fireCombo(t, hpFrac, now)
             if now - S.lAtk > S.aiI * 1.2 then S.lAtk = now; strike(t, now) end
             return
         end
 
         S.cbtS = S.emergency and "EMERGENCY" or "STRIKE"
+        logStateChange(S.cbtS)
         blockRel()
         if now - S.lAtk >= interval() then S.lAtk = now; strike(t, now) end
         fireCombo(t, hpFrac, now)
     end
 
+    function A.combatTick()
+        local ok, err = pcall(combatTickInner)
+        if not ok then
+            -- log first occurrence only
+            if not S._tickErrLogged then
+                S._tickErrLogged = true
+                warn("[Dingus][Atk] tick error: " .. tostring(err))
+            end
+        else
+            S._tickErrLogged = false
+        end
+    end
+
+    --============================================================
+    -- PUBLIC
+    --============================================================
     function A.forceScan()
         if D.invalidate then D.invalidate() end
         local l = D.scanBosses(nil, true)
@@ -791,12 +968,16 @@ function A.init(Ctx)
             holder = Ctx.Hotbar.isLocked() or "free"
         end
         return {
+            state=S.cbtS,
             teleports=S.teleCount or 0, dodges=S.dodgeCount or 0,
             gcdHits=S.gcdHits or 0, gcdMisses=S.gcdMisses or 0,
             comboFires=S.comboFires or 0, comboRotations=S.comboRotations or 0,
             holdFires=S.holdFires or 0, instantFires=S.instantFires or 0,
             emergency=S.emergency, critical=S.critical, blocking=S.blocking,
-            retreating=S.retreating, retreatAge=S.retreatStart > 0 and (U.clock() - S.retreatStart) or 0,
+            retreating=S.retreating,
+            retreatCount=S.retreatCount or 0,
+            retreatAge=S.retreatStart > 0 and (U.clock() - S.retreatStart) or 0,
+            retreatCdMax=math.max(0, S.retreatCooldownUntil - U.clock()),
             lootActive=S.lootCycleActive,
             lootAge=S.lootCycleStart > 0 and (U.clock() - S.lootCycleStart) or 0,
             breathFrac=S.breathFrac or 1.0, partySize=S.partySize or 1,
@@ -827,13 +1008,22 @@ function A.init(Ctx)
         S.lootCycleStart = 0
     end
 
+    function A.forceStopRetreat()
+        S.retreating = false
+        S.retreatStart = 0
+        S.retreatCooldownUntil = U.clock() + 1
+        S.tgt = nil
+    end
+
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function()
         blockRel()
         if Ctx.Chest and Ctx.Chest.abort then pcall(Ctx.Chest.abort) end
     end)
 
-    print("[Dingus][attack] v20 initialized · watchdogged")
+    print(string.format(
+        "[Dingus][attack] v21 initialized · retreatHP=%.0f%% retreatCD=%.1fs",
+        (F.RetreatHP or 0.30) * 100, F.RetreatCooldown or 8.0))
 end
 
 return A
