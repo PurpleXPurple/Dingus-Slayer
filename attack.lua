@@ -1,18 +1,13 @@
 --[[
-    Dingus-Slayer · attack.lua v7
-    Post-v0.140 combat. Global cooldown. Chained M1/M2. Punish windows.
+    Dingus-Slayer · attack.lua v8
+    Combat v8. Adds:
+      - Per-skill hold detection (channels > 1s become hold-cast)
+      - Damage-triggered auto-block (holds F until boss idles)
+      - Emergency mode: sub-30% HP spams every skill on GCD
+      - World Events chest collection (T-key verify, skip failed)
 
-    Addresses /audit:
-      C1  Global cooldown tracking (St.gcdUntil) replaces per-skill array
-      C2  St.skCd array removed
-      C3  Alternating M1/M2 in chain (matches game's combo FSM)
-      H1  Skill unlock mask (Cfg.SkillUnlocked)
-      H2  AtkInterval lowered to 0.38
-      H3  Party-size aware aggression
-      H4  Teleport priority over dodge out-of-range
-      M1  Breath meter read (if available)
-      M2  Single CFrame write per tick
-      M3  Punish window detection
+    Retains from v7: GCD tracking, chained M1/M2, teleport chase,
+    party scaling, safe CFrame, watchdog, punish windows.
 ]]--
 
 local A = {}
@@ -30,30 +25,53 @@ function A.init(Ctx)
     --============================================================
     Cfg.AtkRange       = Cfg.AtkRange       or 8
     Cfg.AtkInterval    = Cfg.AtkInterval    or 0.38
-    Cfg.AtkIntMin      = Cfg.AtkIntMin      or 0.25
+    Cfg.AtkIntMin      = Cfg.AtkIntMin      or 0.22
     Cfg.AtkIntMax      = Cfg.AtkIntMax      or 0.65
-    Cfg.StunAtkInt     = Cfg.StunAtkInt     or 0.22
+    Cfg.StunAtkInt     = Cfg.StunAtkInt     or 0.20
     Cfg.HitWindow      = Cfg.HitWindow      or 15
     Cfg.RunSpeed       = Cfg.RunSpeed       or 16
 
-    Cfg.RetreatHP      = Cfg.RetreatHP      or 0.35
-    Cfg.RetreatDelay   = Cfg.RetreatDelay   or 3.0
-    Cfg.RetreatClearHP = Cfg.RetreatClearHP or 0.65
+    Cfg.RetreatHP      = Cfg.RetreatHP      or 0.20
+    Cfg.RetreatDelay   = Cfg.RetreatDelay   or 2.5
+    Cfg.RetreatClearHP = Cfg.RetreatClearHP or 0.55
 
     Cfg.SkillKeys      = Cfg.SkillKeys      or { "F", "Z", "X", "C", "V", "B" }
     Cfg.SkillUnlocked  = Cfg.SkillUnlocked  or { true, true, true, true, true, true }
     Cfg.RotationOrder  = Cfg.RotationOrder  or { 2, 3, 4, 5, 6 }
 
-    -- Global cooldown: single shared timer for all skills (v0.140)
-    Cfg.GCDWindow      = Cfg.GCDWindow      or 1.30
+    Cfg.GCDWindow      = Cfg.GCDWindow      or 1.10
+
+    -- Hold-cast detection
+    Cfg.DetectHoldSkills    = Cfg.DetectHoldSkills    ~= false
+    Cfg.HoldProbeDuration   = Cfg.HoldProbeDuration   or 1.30
+    Cfg.HoldCastDuration    = Cfg.HoldCastDuration    or 1.20
+    Cfg.HoldOverride        = Cfg.HoldOverride        or {}
+
+    -- Auto-block on damage
+    Cfg.AutoBlockOnDamage   = Cfg.AutoBlockOnDamage   ~= false
+    Cfg.BlockReactionWindow = Cfg.BlockReactionWindow or 1.50
+    Cfg.BlockGraceRelease   = Cfg.BlockGraceRelease   or 0.35
+
+    -- Emergency low-HP
+    Cfg.EmergencyHP         = Cfg.EmergencyHP         or 0.30
+    Cfg.EmergencyInterval   = Cfg.EmergencyInterval   or 0.15
+
+    -- Chests
+    Cfg.ChestEnabled        = Cfg.ChestEnabled        ~= false
+    Cfg.ChestRange          = Cfg.ChestRange          or 14
+    Cfg.ChestVerifyDelay    = Cfg.ChestVerifyDelay    or 0.55
+    Cfg.ChestSkipDuration   = Cfg.ChestSkipDuration   or 45
+    Cfg.ChestKeywords       = Cfg.ChestKeywords       or {
+        "chest", "common chest", "demon chest", "ice chest",
+        "lost chest", "ouwigahara chest", "rare chest",
+        "sealed chest", "snow chest", "world events chest",
+    }
 
     Cfg.FKeyMode       = Cfg.FKeyMode       or "auto"
     Cfg.AutoBlock      = Cfg.AutoBlock      ~= false
-    Cfg.BlockHoldTTL   = Cfg.BlockHoldTTL   or 0.4
-    Cfg.BlockProbeWait = Cfg.BlockProbeWait or 0.15
 
     Cfg.TeleportCd         = Cfg.TeleportCd         or 0.22
-    Cfg.TeleportStrike      = Cfg.TeleportStrike      or 4.5
+    Cfg.TeleportStrike     = Cfg.TeleportStrike     or 4.5
     Cfg.TeleportHeight     = Cfg.TeleportHeight     or 3
     Cfg.TeleportJitter     = Cfg.TeleportJitter     or 2
     Cfg.TeleportWalkBlend  = Cfg.TeleportWalkBlend  or 0.6
@@ -61,12 +79,9 @@ function A.init(Ctx)
     Cfg.ComboBurst         = Cfg.ComboBurst         or 4
     Cfg.ComboGap           = Cfg.ComboGap           or 0.11
 
-    Cfg.DodgeCooldown      = Cfg.DodgeCooldown      or 0.7
+    Cfg.DodgeCooldown      = Cfg.DodgeCooldown      or 0.65
     Cfg.InRangeChaseT      = Cfg.InRangeChaseT      or 0.22
-    Cfg.UltimateHPGate     = Cfg.UltimateHPGate     or 0.40
     Cfg.TelegraphWindow    = Cfg.TelegraphWindow    or 0.45
-    Cfg.WalkBlendInterval  = Cfg.WalkBlendInterval  or 8.0
-    Cfg.BlockBlendInterval = Cfg.BlockBlendInterval or 15.0
     Cfg.M1MaxHz            = Cfg.M1MaxHz            or 10
 
     --============================================================
@@ -76,17 +91,10 @@ function A.init(Ctx)
     St.gcdUntil = 0
     St.aiI = Cfg.AtkInterval
 
-    St.lAtk = 0
-    St.lSkl = 0
-    St.lEqp = 0
-    St.lBrt = 0
-    St.lDodge = 0
-    St.lTele = 0
-    St.lInRangeChase = 0
-    St.lThreat = 0
-    St.lWalkBlend = 0
-    St.lBlockBlend = 0
-    St.lTelemetryPrint = 0
+    St.lAtk = 0; St.lSkl = 0; St.lEqp = 0; St.lBrt = 0
+    St.lDodge = 0; St.lTele = 0; St.lInRangeChase = 0
+    St.lStateRefresh = 0
+    St.lChestScan = 0
 
     St.eq = "none"
     St.cbtS = "IDLE"
@@ -98,12 +106,35 @@ function A.init(Ctx)
     St.fModeResolved = false
     St.blocking = false
     St.blockHoldUntil = 0
+    St.blockHeldSince = 0
+
+    -- Hold-skill detection
+    St.holdSkills = {}        -- [idx] = true (hold) / false (instant) / nil (unknown)
+    St.holdDetected = false
+    St.holdDetecting = false
+
+    -- Damage-triggered block
+    St.lastHp = 0
+    St.lastHpTime = 0
+    St.damageBlockUntil = 0
+    St.bossIdleSince = 0
+
+    -- Emergency
+    St.emergency = false
+
+    -- Chests
+    St.chestFails = {}        -- [chestInstance] = expiryClock
+    St.chestCollected = 0
+    St.chestSkipped = 0
+    St.chestTarget = nil
 
     St.teleCount = 0
     St.teleFail = 0
     St.dodgeCount = 0
     St.gcdHits = 0
     St.gcdMisses = 0
+    St.holdFires = 0
+    St.instantFires = 0
 
     St.breathFrac = 1.0
     St.partySize = 1
@@ -125,10 +156,7 @@ function A.init(Ctx)
             end
         end
         local h = U.hum()
-        if h then
-            h.PlatformStand = false
-            h.AutoRotate = true
-        end
+        if h then h.PlatformStand = false; h.AutoRotate = true end
     end
     scrubMovers()
     U.Lp.CharacterAdded:Connect(function()
@@ -142,49 +170,94 @@ function A.init(Ctx)
     end)
 
     --============================================================
-    -- BREATH METER READER
+    -- ANIMATION READER
     --============================================================
-    -- Attempts to read the breath resource from common paths.
-    -- Returns a 0-1 fraction. Returns nil on failure.
-    local function readBreath()
-        local c = U.Lp.Character
-        if not c then return nil end
+    local function readAttackAnim()
         local h = U.hum()
-        if h then
-            local ok, att = pcall(function() return h:GetAttribute("Breath") end)
-            if ok and type(att) == "number" then
-                local maxOk, mx = pcall(function() return h:GetAttribute("MaxBreath") end)
-                if maxOk and type(mx) == "number" and mx > 0 then
-                    return att / mx
+        if not h then return false end
+        local an = h:FindFirstChildOfClass("Animator")
+        if not an then return false end
+        local ok, tracks = pcall(function() return an:GetPlayingAnimationTracks() end)
+        if not ok or not tracks then return false end
+        for i = 1, #tracks do
+            local t = tracks[i]
+            local okP, isPlaying = pcall(function() return t.IsPlaying end)
+            if okP and isPlaying then
+                local okW, w = pcall(function() return t.WeightCurrent end)
+                if okW and w > 0.3 then
+                    local okN, nm = pcall(function() return t.Name end)
+                    if okN and nm then
+                        local l = string.lower(nm)
+                        if not string.find(l, "idle", 1, true)
+                            and not string.find(l, "walk", 1, true)
+                            and not string.find(l, "run", 1, true)
+                            and not string.find(l, "crouch", 1, true)
+                            and not string.find(l, "fall", 1, true) then
+                            return true
+                        end
+                    end
                 end
             end
         end
-        -- Fallback: search ReplicatedStorage Player_Service for a Breath value
-        local rs = game:GetService("ReplicatedStorage")
-        local ps = rs:FindFirstChild("Player_Service")
-        local data = ps and ps:FindFirstChild("Data")
-        local me = data and data:FindFirstChild(U.Lp.Name)
-        local slots = me and me:FindFirstChild("slots")
-        if slots then
-            for _, slot in ipairs(slots:GetChildren()) do
-                local stats = slot:FindFirstChild("Stats")
-                local br = stats and stats:FindFirstChild("Breath")
-                local mx = stats and stats:FindFirstChild("MaxBreath")
-                if br and mx and br.Value and mx.Value and mx.Value > 0 then
-                    return br.Value / mx.Value
-                end
-            end
-        end
-        return nil
+        return false
     end
 
     --============================================================
-    -- PARTY SIZE
+    -- HOLD-SKILL DETECTION
+    -- One-time probe per skill. Sends keyDown, waits, checks if the
+    -- character is still channeling at the end of the probe window.
+    -- If yes → hold-cast. If no → instant.
+    -- Runs while no target is engaged. Cached in config.
     --============================================================
-    local function readPartySize()
-        local plr = game:GetService("Players")
-        local ok, count = pcall(function() return #plr:GetPlayers() end)
-        return (ok and count) or 1
+    local function holdProbeOne(idx)
+        -- Skip if overridden
+        local override = Cfg.HoldOverride[idx]
+        if override ~= nil then return override end
+        -- Skip F if it's block
+        if St.fIsBlock and SK_KEYS[idx] == "F" then return false end
+        -- Skip locked
+        if not Cfg.SkillUnlocked[idx] then return false end
+
+        local h = U.hum()
+        if not h or h.Health <= 0 then return false end
+
+        -- Put on GCD temporarily so we don't double-fire
+        local prevGcd = St.gcdUntil
+        St.gcdUntil = U.clock() + Cfg.GCDWindow
+
+        local k = SK_KEYS[idx]
+        U.keyDown(k)
+        task.wait(Cfg.HoldProbeDuration)
+        local stillChannelling = readAttackAnim()
+        U.keyUp(k)
+        task.wait(0.15)
+
+        -- Restore or extend
+        if St.gcdUntil < prevGcd then St.gcdUntil = prevGcd end
+
+        return stillChannelling
+    end
+
+    local function detectHoldSkills()
+        if St.holdDetected or St.holdDetecting then return end
+        St.holdDetecting = true
+
+        print("[Dingus][Atk] probing hold-cast skills...")
+        local hold = {}
+        local instant = {}
+        for i = 1, #SK_KEYS do
+            local isHold = holdProbeOne(i)
+            St.holdSkills[i] = isHold
+            if isHold then table.insert(hold, i)
+            else table.insert(instant, i) end
+            task.wait(0.3)
+        end
+
+        print(string.format("[Dingus][Atk] hold-skills: [%s] · instant: [%s]",
+            table.concat(hold, ","), table.concat(instant, ",")))
+
+        St.holdDetected = true
+        St.holdDetecting = false
     end
 
     --============================================================
@@ -193,12 +266,14 @@ function A.init(Ctx)
     local function holdBlock()
         if St.blocking then return end
         St.blocking = true
+        St.blockHeldSince = U.clock()
         U.keyDown("F")
     end
 
     local function releaseBlock()
         if not St.blocking then return end
         St.blocking = false
+        St.blockHeldSince = 0
         U.keyUp("F")
     end
 
@@ -265,7 +340,7 @@ function A.init(Ctx)
     end
 
     --============================================================
-    -- GCD GATED SKILL
+    -- SKILL FIRING · tap or hold based on detection
     --============================================================
     local function gcdReady(now)
         return now >= St.gcdUntil
@@ -279,12 +354,29 @@ function A.init(Ctx)
         if not Cfg.SkillUnlocked[idx] then return false end
         if St.fIsBlock and SK_KEYS[idx] == "F" then return false end
 
-        -- Breath gate
-        if St.breathFrac and St.breathFrac < 0.15 then
+        -- Breath gate (skip in emergency)
+        if not St.emergency
+           and St.breathFrac and St.breathFrac < 0.12 then
             return false
         end
 
-        U.tap(SK_KEYS[idx])
+        local k = SK_KEYS[idx]
+        local isHold = St.holdSkills[idx]
+
+        if isHold then
+            -- Channel: keyDown, wait, keyUp in background
+            St.holdFires = St.holdFires + 1
+            task.spawn(function()
+                U.keyDown(k)
+                task.wait(Cfg.HoldCastDuration)
+                U.keyUp(k)
+            end)
+        else
+            -- Instant: tap
+            St.instantFires = St.instantFires + 1
+            U.tap(k)
+        end
+
         St.gcdUntil = now + Cfg.GCDWindow
         St.gcdHits = St.gcdHits + 1
         St.skC = (St.skC or 0) + 1
@@ -292,44 +384,32 @@ function A.init(Ctx)
     end
 
     --============================================================
-    -- PUNISH-WINDOW DETECTION
+    -- PUNISH
     --============================================================
-    -- A punish window opens when:
-    --   1. Boss just finished a heavy attack animation (recovery)
-    --   2. Boss is in a stagger state
-    --   3. Boss just whiffed its own skill
-    -- We approximate from the threat counter and stun flag.
     local function inPunishWindow(t)
         if not t then return false end
         if D.isEnemyStunned and D.isEnemyStunned(t) then return true end
-        -- After a threat spike subsides, there's usually a 1.5s recovery
         local now = U.clock()
         if St.threatPeak and now - St.threatPeak < 1.5 then return true end
         return false
     end
 
     --============================================================
-    -- SKILL ROTATION (GCD-aware, ultimate gated)
+    -- ROTATION · emergency overrides ultimate gating
     --============================================================
     local function fireRotation(t, hpFrac, now)
         if not St.skl then return end
         if not gcdReady(now) then return end
 
+        local emergency = St.emergency
         local stunned = t and D.isEnemyStunned and D.isEnemyStunned(t)
         local punish = inPunishWindow(t)
-        local bossLow = hpFrac and hpFrac < Cfg.UltimateHPGate
         local notThreatened = (St.imm or 0) == 0
 
         for _, idx in ipairs(Cfg.RotationOrder) do
             local isUlt = idx >= 5
-            if not isUlt then
-                -- Non-ultimate: fire if unlocked and gcd free
+            if not isUlt or emergency or stunned or punish or notThreatened then
                 if fireSkill(idx, now) then return true end
-            else
-                -- Ultimate gated
-                if stunned or punish or bossLow or notThreatened then
-                    if fireSkill(idx, now) then return true end
-                end
             end
         end
         return false
@@ -357,7 +437,6 @@ function A.init(Ctx)
     local function teleportChase(t, tPos, myPos)
         local r = U.hrp()
         if not r then return false end
-
         local now = U.clock()
         if now - St.lTele < Cfg.TeleportCd then return false end
         St.lTele = now
@@ -371,7 +450,6 @@ function A.init(Ctx)
         flatApproach = flatApproach.Unit
         local side = Vector3.new(-flatApproach.Z, 0, flatApproach.X)
 
-        -- Slow-drifting bias so teleport landings aren't statistically identical
         local bias = math.sin(now * 0.3) * 2
         local jx = (math.random() - 0.5) * Cfg.TeleportJitter
         local jz = (math.random() - 0.5) * Cfg.TeleportJitter
@@ -394,21 +472,17 @@ function A.init(Ctx)
 
         pcall(function()
             r.AssemblyLinearVelocity = Vector3.new(
-                (math.random() - 0.5) * 3,
-                -4 - math.random() * 3,
-                (math.random() - 0.5) * 3
-            )
+                (math.random() - 0.5) * 3, -4 - math.random() * 3,
+                (math.random() - 0.5) * 3)
         end)
 
-        -- Walk blend
         if math.random() < Cfg.TeleportWalkBlend then
             local h = U.hum()
             if h then
                 pcall(function()
                     h:Move(Vector3.new(
                         (math.random() - 0.5) * 2, 0,
-                        (math.random() - 0.5) * 2
-                    ))
+                        (math.random() - 0.5) * 2))
                 end)
             end
         end
@@ -417,13 +491,9 @@ function A.init(Ctx)
         return true
     end
 
-    --============================================================
-    -- IN-RANGE CHASE
-    --============================================================
     local function inRangeChase(t, tPos, myPos, now)
         if now - St.lInRangeChase < Cfg.InRangeChaseT then return end
         St.lInRangeChase = now
-
         local r = U.hrp()
         if not r then return end
 
@@ -453,9 +523,6 @@ function A.init(Ctx)
         end
     end
 
-    --============================================================
-    -- DODGE
-    --============================================================
     local function tryDodge(now)
         if now - St.lDodge < Cfg.DodgeCooldown then return false end
         St.lDodge = now
@@ -469,22 +536,12 @@ function A.init(Ctx)
     --============================================================
     local function doChainedStrike(count)
         count = count or Cfg.ComboBurst
-        local gap = Cfg.ComboGap
-
+        local gap = math.max(Cfg.ComboGap, 1 / Cfg.M1MaxHz)
         if St.blocking then releaseBlock() end
-
         task.spawn(function()
-            -- Enforce max M1 Hz by spacing accordingly
-            local minGap = 1 / Cfg.M1MaxHz
-            local effectiveGap = math.max(gap, minGap)
             for i = 1, count do
-                -- Alternate: odd = M1, even = M2
-                if i % 2 == 0 then
-                    U.m2()
-                else
-                    U.m1()
-                end
-                if i < count then task.wait(effectiveGap) end
+                if i % 2 == 0 then U.m2() else U.m1() end
+                if i < count then task.wait(gap) end
             end
         end)
     end
@@ -500,6 +557,7 @@ function A.init(Ctx)
         St.comboIndex = St.comboIndex + 1
 
         local chain = Cfg.ComboBurst
+        if St.emergency then chain = chain + 2 end
         if St.comboIndex % 4 == 0 then chain = chain + 1 end
 
         doChainedStrike(chain)
@@ -519,21 +577,164 @@ function A.init(Ctx)
     end
 
     local function currentInterval()
+        if St.emergency then return Cfg.EmergencyInterval end
         if #St.rHt < 5 then return St.aiI end
         local hits = 0
         for i = 1, #St.rHt do if St.rHt[i] then hits = hits + 1 end end
         local rate = hits / #St.rHt
-        -- Party scaling: more players = tighter interval to compensate
         local partyAdj = 1.0
         if St.partySize >= 3 then partyAdj = 0.85
         elseif St.partySize == 2 then partyAdj = 0.92 end
 
-        if rate > 0.7 then
-            St.aiI = math.max(Cfg.AtkIntMin, St.aiI - 0.03)
-        elseif rate < 0.3 then
-            St.aiI = math.min(Cfg.AtkIntMax, St.aiI + 0.03)
-        end
+        if rate > 0.7 then St.aiI = math.max(Cfg.AtkIntMin, St.aiI - 0.03)
+        elseif rate < 0.3 then St.aiI = math.min(Cfg.AtkIntMax, St.aiI + 0.03) end
         return St.aiI * partyAdj
+    end
+
+    --============================================================
+    -- BREATH / PARTY
+    --============================================================
+    local function readBreath()
+        local h = U.hum()
+        if h then
+            local ok, att = pcall(function() return h:GetAttribute("Breath") end)
+            if ok and type(att) == "number" then
+                local maxOk, mx = pcall(function() return h:GetAttribute("MaxBreath") end)
+                if maxOk and type(mx) == "number" and mx > 0 then
+                    return att / mx
+                end
+            end
+        end
+        local rs = game:GetService("ReplicatedStorage")
+        local ps = rs:FindFirstChild("Player_Service")
+        local data = ps and ps:FindFirstChild("Data")
+        local me = data and data:FindFirstChild(U.Lp.Name)
+        local slots = me and me:FindFirstChild("slots")
+        if slots then
+            for _, slot in ipairs(slots:GetChildren()) do
+                local stats = slot:FindFirstChild("Stats")
+                local br = stats and stats:FindFirstChild("Breath")
+                local mx = stats and stats:FindFirstChild("MaxBreath")
+                if br and mx and br.Value and mx.Value and mx.Value > 0 then
+                    return br.Value / mx.Value
+                end
+            end
+        end
+        return nil
+    end
+
+    local function readPartySize()
+        local plr = game:GetService("Players")
+        local ok, count = pcall(function() return #plr:GetPlayers() end)
+        return (ok and count) or 1
+    end
+
+    --============================================================
+    -- CHEST COLLECTION
+    --============================================================
+    local function isChestName(nm)
+        if not nm then return false end
+        local l = string.lower(nm)
+        for i = 1, #Cfg.ChestKeywords do
+            if string.find(l, Cfg.ChestKeywords[i], 1, true) then return true end
+        end
+        return false
+    end
+
+    local function isChestModel(inst)
+        if not inst then return false end
+        if not (inst:IsA("Model") or inst:IsA("Part") or inst:IsA("MeshPart")) then
+            return false
+        end
+        return isChestName(inst.Name)
+    end
+
+    local function findNearestChest(myPos, range)
+        local found, foundDist = nil, range
+        local ws = workspace
+        for _, inst in ipairs(ws:GetChildren()) do
+            if isChestModel(inst) then
+                local p = inst:IsA("BasePart") and inst.Position
+                    or (inst.PrimaryPart and inst.PrimaryPart.Position)
+                    or (inst:FindFirstChild("HumanoidRootPart") and
+                        inst.HumanoidRootPart.Position)
+                if p then
+                    local d = (p - myPos).Magnitude
+                    if d < foundDist then
+                        found = inst
+                        foundDist = d
+                    end
+                end
+            end
+        end
+        return found, foundDist
+    end
+
+    local function chestIsSkipped(chest, now)
+        local expiry = St.chestFails[chest]
+        if expiry and now < expiry then return true end
+        if expiry and now >= expiry then
+            St.chestFails[chest] = nil
+        end
+        return false
+    end
+
+    local function tryCollectChest(now)
+        if not Cfg.ChestEnabled then return false end
+        if now - St.lChestScan < 1.5 then return false end
+        St.lChestScan = now
+
+        local r = U.hrp()
+        if not r then return false end
+
+        local chest = findNearestChest(r.Position, Cfg.ChestRange)
+        if not chest then return false end
+        if chestIsSkipped(chest, now) then return false end
+
+        -- Ensure in range (walk/teleport to it)
+        local chestPos = chest:IsA("BasePart") and chest.Position
+            or (chest.PrimaryPart and chest.PrimaryPart.Position)
+            or r.Position
+        local dist = (chestPos - r.Position).Magnitude
+        if dist > 8 then
+            local approach = chestPos - r.Position
+            local flat = Vector3.new(approach.X, 0, approach.Z)
+            if flat.Magnitude > 0.1 then
+                local dest = r.Position + flat.Unit * math.max(0, dist - 5)
+                dest = Vector3.new(dest.X, r.Position.Y, dest.Z)
+                local cf = safeCFrame(dest, chestPos)
+                pcall(function() r.CFrame = cf end)
+            end
+        end
+
+        St.chestTarget = chest
+        St.cbtS = "CHEST"
+
+        -- Press T
+        U.tap("T")
+        task.wait(Cfg.ChestVerifyDelay)
+
+        -- Verify: chest destroyed or no longer in workspace
+        local stillThere = false
+        pcall(function()
+            stillThere = chest and chest.Parent ~= nil
+        end)
+
+        if not stillThere then
+            St.chestCollected = St.chestCollected + 1
+            print(string.format("[Dingus][Chest] collected %s · total %d",
+                chest and chest.Name or "?", St.chestCollected))
+            St.chestTarget = nil
+            return true
+        else
+            -- Locked or unreachable — mark failed for skip duration
+            St.chestFails[chest] = now + Cfg.ChestSkipDuration
+            St.chestSkipped = St.chestSkipped + 1
+            print(string.format("[Dingus][Chest] skipped %s (needs key or unreachable)",
+                chest and chest.Name or "?"))
+            St.chestTarget = nil
+            return false
+        end
     end
 
     --============================================================
@@ -558,7 +759,6 @@ function A.init(Ctx)
     local function resolveFMode()
         if St.fModeResolved then return end
         local mode = Cfg.FKeyMode or "auto"
-
         if mode == "auto" then
             local waited = 0
             while (not U.hrp() or St.cbt) and waited < 15 do
@@ -570,21 +770,14 @@ function A.init(Ctx)
                 print("[Dingus][Atk] F-mode deferred — skill")
                 return
             end
-            -- Probe
-            local h = U.hum()
-            if h then
-                local baseWS = h.WalkSpeed
+            local c = U.Lp.Character
+            if c then
                 U.keyDown("F")
-                task.wait(Cfg.BlockProbeWait)
-                local isBlock = false
-                local c = U.Lp.Character
-                if c then
-                    local ok1, v1 = pcall(function() return c:GetAttribute("IsBlocking") end)
-                    if ok1 and v1 == true then isBlock = true end
-                end
+                task.wait(0.15)
+                local ok1, v1 = pcall(function() return c:GetAttribute("IsBlocking") end)
                 U.keyUp("F")
                 task.wait(0.05)
-                if isBlock then
+                if ok1 and v1 == true then
                     St.fIsBlock = true
                     print("[Dingus][Atk] F-mode = BLOCK")
                 else
@@ -595,7 +788,7 @@ function A.init(Ctx)
         elseif mode == "block" then
             St.fIsBlock = true
             print("[Dingus][Atk] F-mode = BLOCK (config)")
-        elseif mode == "skill" then
+        else
             St.fIsBlock = false
             print("[Dingus][Atk] F-mode = SKILL (config)")
         end
@@ -604,211 +797,26 @@ function A.init(Ctx)
     task.spawn(resolveFMode)
 
     --============================================================
-    -- COMBAT TICK
+    -- HOLD PROBE (runs after F-mode resolves, before combat)
     --============================================================
-    function A.combatTick()
-        if not St.cbt then
-            St.cbtS = "IDLE"
-            releaseBlock()
+    task.spawn(function()
+        if not Cfg.DetectHoldSkills then return end
+        -- Wait for F-mode
+        local waited = 0
+        while not St.fModeResolved and waited < 20 do
+            task.wait(0.25); waited = waited + 0.25
+        end
+        -- Wait for a stable character with no combat
+        waited = 0
+        while (not U.hrp() or St.cbt) and waited < 30 do
+            task.wait(0.5); waited = waited + 0.5
+        end
+        if St.cbt then
+            print("[Dingus][Atk] hold-probe skipped (combat active)")
             return
         end
-
-        local h = U.hum()
-        local r = U.hrp()
-        if not h or not r then St.cbtS = "NO_CHAR"; return end
-        if h.Health <= 0 then
-            St.cbtS = "DEAD"
-            releaseBlock()
-            return
-        end
-
-        local now = U.clock()
-        local hpFrac = h.Health / h.MaxHealth
-
-        equipWeapon()
-        U.groundState()
-
-        -- Refresh periodic state
-        if now - (St.lStateRefresh or 0) > 2.0 then
-            St.lStateRefresh = now
-            St.breathFrac = readBreath() or 1.0
-            St.partySize = readPartySize()
-        end
-
-        if h.Health < (St.lHp or 0) and now - (St.lHpT or 0) > 0.05 then
-            St.lDmg = now
-        end
-        St.lHp = h.Health
-        St.lHpT = now
-
-        if now - St.lBrt > 2.5 then
-            St.lBrt = now
-            U.tap("L")
-        end
-
-        -- Retreat
-        if St.rtr and hpFrac < Cfg.RetreatHP and not retreatRunning then
-            local nearest = St.ths and St.ths[1]
-            if nearest then startRetreat(nearest.rp.Position); return end
-        end
-        if retreatRunning then return end
-
-        -- Target
-        if not St.tgt or not St.tgt.ch.Parent or St.tgt.hm.Health <= 0 then
-            if St.tgt then
-                St.kll = (St.kll or 0) + 1
-                St.bKll = (St.bKll or 0) + 1
-                print(string.format("[Dingus] killed %s (%d)",
-                    St.tgt.ch.Name, St.bKll))
-                St.tgt = nil
-                St.comboIndex = 0
-                St.comboTargetName = nil
-                releaseBlock()
-                if D.invalidate then D.invalidate() end
-            end
-            acquireTarget()
-            if not St.tgt then
-                St.cbtS = "IDLE"
-                releaseBlock()
-                return
-            end
-        end
-
-        local t = St.tgt
-        local tPos = t.ch:FindFirstChild("HumanoidRootPart")
-        if not tPos then St.tgt = nil; return end
-
-        local myPos = r.Position
-        local dist = U.xzDist(myPos, tPos.Position)
-        t.d = dist
-
-        -- Threat tracking
-        local imminent = (St.imm or 0) > 0
-        local bossAttacking = false
-        if D.isEnemyAttacking then
-            bossAttacking = D.isEnemyAttacking(t)
-        end
-        if (imminent or bossAttacking) then
-            St.threatPeak = now
-        end
-
-        --========================================================
-        -- LONG RANGE · teleport first, dodge only if in-range
-        --========================================================
-        if dist > Cfg.AtkRange then
-            St.cbtS = "TELEPORT"
-            releaseBlock()
-            teleportChase(t, tPos, myPos)
-            fireRotation(t, hpFrac, now)
-            return
-        end
-
-        --========================================================
-        -- IN RANGE
-        --========================================================
-        inRangeChase(t, tPos, myPos, now)
-
-        local blocking = D.isEnemyBlocking(t)
-        local stunned = D.isEnemyStunned(t)
-        local timeSinceThreat = now - (St.threatPeak or 0)
-
-        --========================================================
-        -- TELEGRAPH REACTION
-        --========================================================
-        local canDodge = (now - St.lDodge) > Cfg.DodgeCooldown
-        local telegraphWindow = timeSinceThreat < Cfg.TelegraphWindow
-
-        if (imminent or bossAttacking) and canDodge and telegraphWindow then
-            St.cbtS = "DODGE"
-            releaseBlock()
-            tryDodge(now)
-            return
-        end
-
-        --========================================================
-        -- AUTO-BLOCK
-        --========================================================
-        local shouldBlock = false
-        if St.fIsBlock and Cfg.AutoBlock then
-            local threatNow = imminent or bossAttacking
-            if threatNow then
-                St.blockHoldUntil = now + Cfg.BlockHoldTTL
-            end
-            shouldBlock = threatNow or (now < (St.blockHoldUntil or 0))
-        end
-
-        --========================================================
-        -- PUNISH / BREAK / ATTACK
-        --========================================================
-        if stunned and St.stunPun then
-            St.cbtS = "PUNISH"
-            releaseBlock()
-            if now - St.lAtk >= Cfg.StunAtkInt then
-                St.lAtk = now
-                strike(t, now)
-            end
-            fireRotation(t, hpFrac, now)
-            return
-        end
-
-        if blocking then
-            St.cbtS = "BREAK"
-            releaseBlock()
-            fireRotation(t, hpFrac, now)
-            if now - St.lAtk > St.aiI * 1.2 then
-                St.lAtk = now
-                strike(t, now)
-            end
-            return
-        end
-
-        St.cbtS = "STRIKE"
-
-        if shouldBlock and (now - St.lAtk < currentInterval() * 0.7) then
-            St.cbtS = "BLOCK"
-            holdBlock()
-            fireRotation(t, hpFrac, now)
-        else
-            releaseBlock()
-            if now - St.lAtk >= currentInterval() then
-                St.lAtk = now
-                strike(t, now)
-            end
-            fireRotation(t, hpFrac, now)
-        end
-
-        --========================================================
-        -- ANTI-DETECTION BLEND
-        --========================================================
-        if now - St.lWalkBlend > Cfg.WalkBlendInterval then
-            St.lWalkBlend = now
-            local hh = U.hum()
-            if hh then
-                pcall(function()
-                    hh:Move(Vector3.new(
-                        (math.random() - 0.5) * 4, 0,
-                        (math.random() - 0.5) * 4
-                    ))
-                end)
-                task.spawn(function()
-                    task.wait(0.3)
-                    local hh2 = U.hum()
-                    if hh2 then pcall(function() hh2:Move(Vector3.zero) end) end
-                end)
-            end
-        end
-
-        if now - St.lBlockBlend > Cfg.BlockBlendInterval and not shouldBlock then
-            St.lBlockBlend = now
-            if not St.blocking then
-                holdBlock()
-                task.spawn(function()
-                    task.wait(0.2)
-                    releaseBlock()
-                end)
-            end
-        end
-    end
+        detectHoldSkills()
+    end)
 
     --============================================================
     -- RETREAT
@@ -846,9 +854,7 @@ function A.init(Ctx)
                     lastHp = hh.Health
                     lastDamageT = U.clock()
                 end
-                if U.clock() - lastDamageT > 1.2 and U.clock() > startT + 0.6 then
-                    break
-                end
+                if U.clock() - lastDamageT > 1.2 and U.clock() > startT + 0.6 then break end
                 if U.clock() > hardCap then break end
                 h:Move(flat.Unit)
                 task.wait(0.05)
@@ -858,6 +864,231 @@ function A.init(Ctx)
             St.tgt = nil
             if D.invalidate then D.invalidate() end
         end)
+    end
+
+    --============================================================
+    -- COMBAT TICK
+    --============================================================
+    function A.combatTick()
+        if not St.cbt then
+            St.cbtS = "IDLE"
+            releaseBlock()
+            -- Try chest collection while idle
+            if Cfg.ChestEnabled then
+                pcall(tryCollectChest, U.clock())
+            end
+            return
+        end
+
+        local h = U.hum()
+        local r = U.hrp()
+        if not h or not r then St.cbtS = "NO_CHAR"; return end
+        if h.Health <= 0 then
+            St.cbtS = "DEAD"
+            releaseBlock()
+            return
+        end
+
+        local now = U.clock()
+        local hpFrac = h.Health / h.MaxHealth
+
+        -- Emergency mode: low HP → spam
+        St.emergency = hpFrac < Cfg.EmergencyHP
+
+        equipWeapon()
+        U.groundState()
+
+        -- Periodic refresh
+        if now - St.lStateRefresh > 2.0 then
+            St.lStateRefresh = now
+            St.breathFrac = readBreath() or 1.0
+            St.partySize = readPartySize()
+        end
+
+        -- Damage detection → auto-block
+        if St.lastHp > 0 and h.Health < St.lastHp - 0.5 then
+            -- Took damage. Trigger a block hold.
+            if St.fIsBlock and Cfg.AutoBlockOnDamage then
+                St.damageBlockUntil = now + Cfg.BlockReactionWindow
+            end
+        end
+        St.lastHp = h.Health
+        St.lastHpTime = now
+
+        if now - St.lBrt > 2.5 then
+            St.lBrt = now
+            U.tap("L")
+        end
+
+        -- Retreat (disabled in emergency)
+        if not St.emergency
+           and St.rtr and hpFrac < Cfg.RetreatHP
+           and not retreatRunning then
+            local nearest = St.ths and St.ths[1]
+            if nearest then startRetreat(nearest.rp.Position); return end
+        end
+        if retreatRunning then return end
+
+        -- Target
+        if not St.tgt or not St.tgt.ch.Parent or St.tgt.hm.Health <= 0 then
+            if St.tgt then
+                St.kll = (St.kll or 0) + 1
+                St.bKll = (St.bKll or 0) + 1
+                print(string.format("[Dingus] killed %s (%d)",
+                    St.tgt.ch.Name, St.bKll))
+                St.tgt = nil
+                St.comboIndex = 0
+                St.comboTargetName = nil
+                releaseBlock()
+                -- Just killed a boss → try chest
+                if Cfg.ChestEnabled then
+                    pcall(tryCollectChest, now)
+                end
+                if D.invalidate then D.invalidate() end
+            end
+
+            -- Before acquiring a new target, try a chest once
+            if Cfg.ChestEnabled and not St.tgt then
+                local chestTried = pcall(tryCollectChest, now)
+                if chestTried and St.chestTarget then
+                    return
+                end
+            end
+
+            acquireTarget()
+            if not St.tgt then
+                St.cbtS = "IDLE"
+                releaseBlock()
+                return
+            end
+        end
+
+        local t = St.tgt
+        local tPos = t.ch:FindFirstChild("HumanoidRootPart")
+        if not tPos then St.tgt = nil; return end
+
+        local myPos = r.Position
+        local dist = U.xzDist(myPos, tPos.Position)
+        t.d = dist
+
+        -- Threat tracking
+        local imminent = (St.imm or 0) > 0
+        local bossAttacking = false
+        if D.isEnemyAttacking then
+            bossAttacking = D.isEnemyAttacking(t)
+        end
+
+        -- If boss not attacking, start idle timer
+        if not (imminent or bossAttacking) then
+            if St.bossIdleSince == 0 then
+                St.bossIdleSince = now
+            end
+        else
+            St.bossIdleSince = 0
+            St.threatPeak = now
+        end
+
+        --========================================================
+        -- LONG RANGE
+        --========================================================
+        if dist > Cfg.AtkRange then
+            St.cbtS = "TELEPORT"
+            releaseBlock()
+            teleportChase(t, tPos, myPos)
+            fireRotation(t, hpFrac, now)
+            return
+        end
+
+        --========================================================
+        -- IN RANGE
+        --========================================================
+        inRangeChase(t, tPos, myPos, now)
+
+        local blocking = D.isEnemyBlocking(t)
+        local stunned = D.isEnemyStunned(t)
+        local timeSinceThreat = now - (St.threatPeak or 0)
+
+        --========================================================
+        -- AUTO-BLOCK (damage-triggered + reactive)
+        -- Holds F while damageBlockUntil is in the future, unless
+        -- the boss has been idle for the grace period.
+        --========================================================
+        local forceBlock = false
+        if St.fIsBlock and Cfg.AutoBlockOnDamage then
+            if now < St.damageBlockUntil then
+                -- Boss still a threat
+                if bossAttacking or imminent then
+                    forceBlock = true
+                    St.blockHoldUntil = now + Cfg.BlockHoldTTL
+                else
+                    -- Boss idle for long enough → release
+                    local idleDur = St.bossIdleSince > 0 and (now - St.bossIdleSince) or 0
+                    if idleDur < Cfg.BlockGraceRelease then
+                        forceBlock = true
+                    end
+                end
+            end
+        end
+
+        -- Emergency mode never blocks
+        if St.emergency then forceBlock = false end
+
+        --========================================================
+        -- TELEGRAPH DODGE (skip in emergency)
+        --========================================================
+        if not St.emergency then
+            local canDodge = (now - St.lDodge) > Cfg.DodgeCooldown
+            local telegraph = timeSinceThreat < Cfg.TelegraphWindow
+            if (imminent or bossAttacking) and canDodge and telegraph then
+                St.cbtS = "DODGE"
+                releaseBlock()
+                tryDodge(now)
+                return
+            end
+        end
+
+        --========================================================
+        -- PUNISH · BREAK · STRIKE
+        --========================================================
+        if forceBlock then
+            St.cbtS = "BLOCK"
+            holdBlock()
+            -- Fire rotation while blocking if skills are ready
+            fireRotation(t, hpFrac, now)
+            return
+        end
+
+        if stunned and St.stunPun then
+            St.cbtS = "PUNISH"
+            releaseBlock()
+            if now - St.lAtk >= Cfg.StunAtkInt then
+                St.lAtk = now
+                strike(t, now)
+            end
+            fireRotation(t, hpFrac, now)
+            return
+        end
+
+        if blocking then
+            St.cbtS = "BREAK"
+            releaseBlock()
+            fireRotation(t, hpFrac, now)
+            if now - St.lAtk > St.aiI * 1.2 then
+                St.lAtk = now
+                strike(t, now)
+            end
+            return
+        end
+
+        St.cbtS = St.emergency and "EMERGENCY" or "STRIKE"
+
+        -- Normal strike
+        releaseBlock()
+        if now - St.lAtk >= currentInterval() then
+            St.lAtk = now
+            strike(t, now)
+        end
+        fireRotation(t, hpFrac, now)
     end
 
     --============================================================
@@ -875,8 +1106,9 @@ function A.init(Ctx)
         local tPos = St.tgt.ch:FindFirstChild("HumanoidRootPart")
         if r and tPos then
             local dest = tPos.Position + Vector3.new(0, 3, 0)
-            local cf = safeCFrame(dest, tPos.Position)
-            pcall(function() r.CFrame = cf end)
+            pcall(function()
+                r.CFrame = safeCFrame(dest, tPos.Position)
+            end)
         end
     end
 
@@ -896,18 +1128,29 @@ function A.init(Ctx)
             gcdHits     = St.gcdHits or 0,
             gcdMisses   = St.gcdMisses or 0,
             gcdReady    = U.clock() >= St.gcdUntil,
-            gcdRemaining = math.max(0, St.gcdUntil - U.clock()),
-            comboIndex  = St.comboIndex or 0,
-            comboTarget = St.comboTargetName,
+            holdFires   = St.holdFires or 0,
+            instantFires = St.instantFires or 0,
+            holdSkills  = St.holdSkills,
+            emergency   = St.emergency,
+            blocking    = St.blocking,
             breathFrac  = St.breathFrac or 1.0,
             partySize   = St.partySize or 1,
+            chestsCollected = St.chestCollected or 0,
+            chestsSkipped   = St.chestSkipped or 0,
         }
+    end
+
+    function A.reprobeHoldSkills()
+        St.holdDetected = false
+        St.holdDetecting = false
+        St.holdSkills = {}
+        detectHoldSkills()
     end
 
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function() releaseBlock() end)
 
-    print("[Dingus][attack] v7 initialized · GCD-aware · chained M1/M2")
+    print("[Dingus][attack] v8 initialized · hold-detect · damage-block · emergency · chests")
 end
 
 return A
