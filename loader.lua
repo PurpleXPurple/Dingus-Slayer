@@ -51,6 +51,7 @@ local MANIFEST = {
     { name = "detect",     slots = { "Detect", "D" } },
     { name = "scanners",   slots = { "Scan", "Scanner", "Scanners" } },
     { name = "spoofers",   slots = { "Spoof", "Spoofer", "Spoofers" } },
+    { name = "quests",     slots = { "Quest", "Quests", "Q" } },
     { name = "attack",     slots = { "Atk", "Attack" } },
     { name = "optimizers", slots = { "Opt", "Optimizer", "Optimizers" } },
     { name = "gui",        slots = { "Gui", "GUI" } },
