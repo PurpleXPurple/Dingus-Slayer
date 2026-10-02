@@ -1,7 +1,6 @@
 --[[
-    Dingus-Slayer · attack.lua v10
-    Custom-hotbar aware. Mesh-based tool detection. Deep chest walk.
-    Passive chest tick. Critical HP retreat. Priority filter retained.
+    Dingus-Slayer · attack.lua v11
+    Hotbar mutex integration. Critical HP retreat. Chest passive tick.
 ]]--
 
 local A = {}
@@ -14,9 +13,6 @@ function A.init(Ctx)
     local L = Ctx.Lists
     local RunService = game:GetService("RunService")
 
-    --============================================================
-    -- CONFIG
-    --============================================================
     Cfg.AtkRange       = Cfg.AtkRange       or 8
     Cfg.AtkInterval    = Cfg.AtkInterval    or 0.38
     Cfg.AtkIntMin      = Cfg.AtkIntMin      or 0.22
@@ -81,9 +77,6 @@ function A.init(Ctx)
 
     Cfg.WeaponHotbarOrder  = Cfg.WeaponHotbarOrder  or { "3", "4", "1", "5" }
 
-    --============================================================
-    -- STATE
-    --============================================================
     St.rHt = {}
     St.gcdUntil = 0
     St.aiI = Cfg.AtkInterval
@@ -133,9 +126,6 @@ function A.init(Ctx)
 
     local SK_KEYS = Cfg.SkillKeys
 
-    --============================================================
-    -- MOVER SCRUB
-    --============================================================
     local function scrubMovers()
         local r = U.hrp()
         if not r then return end
@@ -161,9 +151,6 @@ function A.init(Ctx)
         St.comboTargetName = nil
     end)
 
-    --============================================================
-    -- ANIMATION READER
-    --============================================================
     local function readAttackAnim()
         local h = U.hum()
         if not h then return false end
@@ -194,9 +181,6 @@ function A.init(Ctx)
         return false
     end
 
-    --============================================================
-    -- HOLD-SKILL DETECTION
-    --============================================================
     local function holdProbeOne(idx)
         local override = Cfg.HoldOverride[idx]
         if override ~= nil then return override end
@@ -238,9 +222,6 @@ function A.init(Ctx)
         St.holdDetecting = false
     end
 
-    --============================================================
-    -- BLOCK
-    --============================================================
     local function holdBlock()
         if St.blocking then return end
         St.blocking = true
@@ -253,19 +234,12 @@ function A.init(Ctx)
         U.keyUp("F")
     end
 
-    --============================================================
-    -- TOOL · Roblox Tool OR custom hotbar mesh
-    --============================================================
     local function equippedTool()
         local c = U.Lp.Character
         if not c then return nil end
-
-        -- Roblox Tool
         for _, t in ipairs(c:GetChildren()) do
             if t:IsA("Tool") and not L.isCrow(t.Name) then return t end
         end
-
-        -- Custom mesh attached to hand
         for _, handName in ipairs({"RightHand", "LeftHand"}) do
             local hand = c:FindFirstChild(handName)
             if hand then
@@ -280,7 +254,6 @@ function A.init(Ctx)
                 end
             end
         end
-
         return nil
     end
 
@@ -303,6 +276,15 @@ function A.init(Ctx)
 
     local function equipWeapon()
         if St.swapPending then return end
+
+        if Ctx.Quest and Ctx.Quest.stats then
+            local qs = Ctx.Quest.stats()
+            if qs.panelOpen then return end
+        end
+
+        local H = Ctx.Hotbar
+        if H and H.isLocked() then return end
+
         local now = U.clock()
         if now - St.lEqp < 1.5 then return end
         St.lEqp = now
@@ -314,7 +296,6 @@ function A.init(Ctx)
             return
         end
 
-        -- Roblox Tool path first
         for _, t in ipairs(inventoryTools()) do
             if L.isWeapon(t.Name) then
                 St.swapPending = true
@@ -328,28 +309,31 @@ function A.init(Ctx)
             end
         end
 
-        -- Custom hotbar: tap weapon slots in order, verify mesh appears
         St.swapPending = true
         task.spawn(function()
+            if not H or not H.acquire("attack-weapon", 3.0) then
+                St.swapPending = false
+                return
+            end
             for _, k in ipairs(Cfg.WeaponHotbarOrder or {"3"}) do
                 pcall(function() U.tap(k) end)
                 task.wait(0.4)
                 local eq = equippedTool()
-                if eq then
+                if eq and not L.isCrow(eq.Name) then
                     St.eq = eq.Name
-                    St.swapPending = false
-                    print(string.format("[Dingus][Atk] weapon via hotbar '%s': %s",
+                    print(string.format(
+                        "[Dingus][Atk] weapon via hotbar '%s': %s",
                         k, eq.Name))
+                    H.release("attack-weapon")
+                    St.swapPending = false
                     return
                 end
             end
+            H.release("attack-weapon")
             St.swapPending = false
         end)
     end
 
-    --============================================================
-    -- SKILL FIRING
-    --============================================================
     local function gcdReady(now) return now >= St.gcdUntil end
 
     local function fireSkill(idx, now)
@@ -411,9 +395,6 @@ function A.init(Ctx)
         return false
     end
 
-    --============================================================
-    -- SAFE CFrame
-    --============================================================
     local function safeCFrame(dest, lookAtPos)
         local dx = lookAtPos.X - dest.X
         local dz = lookAtPos.Z - dest.Z
@@ -427,9 +408,6 @@ function A.init(Ctx)
         return CFrame.new(dest)
     end
 
-    --============================================================
-    -- TELEPORT CHASE
-    --============================================================
     local function teleportChase(t, tPos, myPos)
         local r = U.hrp()
         if not r then return false end
@@ -527,9 +505,6 @@ function A.init(Ctx)
         return true
     end
 
-    --============================================================
-    -- CHAINED STRIKE
-    --============================================================
     local function doChainedStrike(count)
         count = count or Cfg.ComboBurst
         local gap = math.max(Cfg.ComboGap, 1 / Cfg.M1MaxHz)
@@ -587,9 +562,6 @@ function A.init(Ctx)
         return St.aiI * partyAdj
     end
 
-    --============================================================
-    -- BREATH / PARTY
-    --============================================================
     local function readBreath()
         local h = U.hum()
         if h then
@@ -610,9 +582,6 @@ function A.init(Ctx)
         return (ok and count) or 1
     end
 
-    --============================================================
-    -- CHEST COLLECTION · deep walk
-    --============================================================
     local function isChestName(nm)
         if not nm then return false end
         local l = string.lower(nm)
@@ -691,7 +660,6 @@ function A.init(Ctx)
         end
 
         St.chestTarget = chest
-        local prevState = St.cbtS
         St.cbtS = "CHEST"
 
         U.tap("T")
@@ -711,16 +679,13 @@ function A.init(Ctx)
         else
             St.chestFails[chest] = now + Cfg.ChestSkipDuration
             St.chestSkipped = St.chestSkipped + 1
-            print(string.format("[Dingus][Chest] skipped %s (needs key or locked)",
+            print(string.format("[Dingus][Chest] skipped %s",
                 chest and chest.Name or "?"))
             St.chestTarget = nil
             return false
         end
     end
 
-    --============================================================
-    -- TARGET ACQUISITION
-    --============================================================
     local function acquireTarget()
         local tgt, kind = D.pickTarget()
         St.tgt = tgt
@@ -734,9 +699,6 @@ function A.init(Ctx)
         return tgt
     end
 
-    --============================================================
-    -- F-MODE
-    --============================================================
     local function resolveFMode()
         if St.fModeResolved then return end
         local mode = Cfg.FKeyMode or "auto"
@@ -777,9 +739,6 @@ function A.init(Ctx)
     end
     task.spawn(resolveFMode)
 
-    --============================================================
-    -- HOLD PROBE
-    --============================================================
     task.spawn(function()
         if not Cfg.DetectHoldSkills then return end
         local waited = 0
@@ -797,9 +756,6 @@ function A.init(Ctx)
         detectHoldSkills()
     end)
 
-    --============================================================
-    -- RETREAT
-    --============================================================
     local retreatRunning = false
 
     local function startRetreat(from, reason)
@@ -847,9 +803,6 @@ function A.init(Ctx)
         end)
     end
 
-    --============================================================
-    -- COMBAT TICK
-    --============================================================
     function A.combatTick()
         if not St.cbt then
             St.cbtS = "IDLE"
@@ -872,7 +825,6 @@ function A.init(Ctx)
         local now = U.clock()
         local hpFrac = h.Health / h.MaxHealth
 
-        -- Critical threshold: retreat even mid-fight
         St.critical = hpFrac < Cfg.CriticalHP
         if St.critical and not retreatRunning then
             local nearest = St.ths and St.ths[1]
@@ -883,7 +835,6 @@ function A.init(Ctx)
             return
         end
 
-        -- Emergency below 30% but above critical
         St.emergency = (not St.critical) and hpFrac < Cfg.EmergencyHP
 
         equipWeapon()
@@ -908,7 +859,6 @@ function A.init(Ctx)
             U.tap("L")
         end
 
-        -- Retreat at threshold
         if not St.emergency
            and St.rtr and hpFrac < Cfg.RetreatHP
            and not retreatRunning then
@@ -917,7 +867,6 @@ function A.init(Ctx)
         end
         if retreatRunning then return end
 
-        -- Passive chest tick (no threat within ChestSafeRadius)
         if Cfg.ChestEnabled
            and (now - St.lChestPassive) > Cfg.ChestPassiveT then
             St.lChestPassive = now
@@ -935,7 +884,6 @@ function A.init(Ctx)
             end
         end
 
-        -- Target
         if not St.tgt or not St.tgt.ch.Parent or St.tgt.hm.Health <= 0 then
             if St.tgt then
                 St.kll = (St.kll or 0) + 1
@@ -988,7 +936,6 @@ function A.init(Ctx)
             St.threatPeak = now
         end
 
-        -- Long range → teleport
         if dist > Cfg.AtkRange then
             St.cbtS = "TELEPORT"
             releaseBlock()
@@ -997,7 +944,6 @@ function A.init(Ctx)
             return
         end
 
-        -- In range
         inRangeChase(t, tPos, myPos, now)
 
         local blocking = D.isEnemyBlocking(t)
@@ -1020,7 +966,6 @@ function A.init(Ctx)
         end
         if St.emergency then forceBlock = false end
 
-        -- Dodge on telegraph
         if not St.emergency then
             local canDodge = (now - St.lDodge) > Cfg.DodgeCooldown
             local telegraph = timeSinceThreat < Cfg.TelegraphWindow
@@ -1070,9 +1015,6 @@ function A.init(Ctx)
         fireRotation(t, hpFrac, now)
     end
 
-    --============================================================
-    -- PUBLIC
-    --============================================================
     function A.forceScan()
         if D.invalidate then D.invalidate() end
         local list = D.scanBosses(nil, true)
@@ -1100,6 +1042,10 @@ function A.init(Ctx)
     end
 
     function A.telemetry()
+        local holder = "no-module"
+        if Ctx.Hotbar and Ctx.Hotbar.isLocked then
+            holder = Ctx.Hotbar.isLocked() or "free"
+        end
         return {
             teleports   = St.teleCount or 0,
             teleFails   = St.teleFail or 0,
@@ -1118,6 +1064,7 @@ function A.init(Ctx)
             chestsCollected = St.chestCollected or 0,
             chestsSkipped   = St.chestSkipped or 0,
             equipped    = St.eq,
+            hotbarHolder = holder,
         }
     end
 
@@ -1135,7 +1082,7 @@ function A.init(Ctx)
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function() releaseBlock() end)
 
-    print("[Dingus][attack] v10 initialized · hotbar-aware · critical-retreat")
+    print("[Dingus][attack] v11 initialized")
 end
 
 return A
