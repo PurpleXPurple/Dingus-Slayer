@@ -1,33 +1,55 @@
--- Dingus-Slayer · main.lua v38
--- Faction added to subsystem init order.
+-- Dingus-Slayer · main.lua v39
+-- GUI removed from init order. Loader owns GUI lifecycle.
+-- Heartbeat guard hardened. Fast init loop.
 
 local M = {}
 
 local function buildLoops(C, F)
     return {
         { id = "combat",   interval = 0.05, weight = 0.35, priority = 1,
-          fn = function() if C.Atk and C.Atk.combatTick then pcall(C.Atk.combatTick) end end },
+          fn = function()
+              if C.Atk and C.Atk.combatTick then pcall(C.Atk.combatTick) end
+          end },
         { id = "threats",  interval = 0.10, weight = 0.15, priority = 1,
-          fn = function() if C.Detect and C.Detect.updateThreats then pcall(C.Detect.updateThreats) end end },
+          fn = function()
+              if C.Detect and C.Detect.updateThreats then
+                  pcall(C.Detect.updateThreats)
+              end
+          end },
         { id = "fly",      interval = 0.05, weight = 0.10, priority = 1,
-          fn = function() if C.Fly and C.Fly.tick then pcall(C.Fly.tick) end end },
+          fn = function()
+              if C.Fly and C.Fly.tick then pcall(C.Fly.tick) end
+          end },
         { id = "spoofers", interval = 0.10, weight = 0.10, priority = 2,
-          fn = function() if C.Spoof and C.Spoof.tick then pcall(C.Spoof.tick) end end },
+          fn = function()
+              if C.Spoof and C.Spoof.tick then pcall(C.Spoof.tick) end
+          end },
         { id = "quest",    interval = 0.50, weight = 0.15, priority = 3,
-          fn = function() if C.Quest and C.Quest.cycle then pcall(C.Quest.cycle) end end },
+          fn = function()
+              if C.Quest and C.Quest.cycle then pcall(C.Quest.cycle) end
+          end },
         { id = "chest",    interval = 1.50, weight = 0.30, priority = 3,
-          fn = function() if C.Chest and C.Chest.collectPassive then pcall(C.Chest.collectPassive) end end },
-        { id = "config",   interval = F.AutoSaveT or 30, weight = 0.05, priority = 4,
-          fn = function() if F.tickAutoSave then pcall(F.tickAutoSave) end end },
-        { id = "gc",       interval = 60,   weight = 0.20, priority = 4,
-          fn = function() pcall(function() collectgarbage("collect") end) end },
+          fn = function()
+              if C.Chest and C.Chest.collectPassive then
+                  pcall(C.Chest.collectPassive)
+              end
+          end },
+        { id = "config",   interval = F.AutoSaveT or 30,
+          weight = 0.05, priority = 4,
+          fn = function()
+              if F.tickAutoSave then pcall(F.tickAutoSave) end
+          end },
+        { id = "gc",       interval = 60, weight = 0.20, priority = 4,
+          fn = function()
+              pcall(function() collectgarbage("collect") end)
+          end },
     }
 end
 
 local Perf = {
     avg_dt = 1/60, stress = 0, backoff = 1,
-    budget_used = 0, stats = {}, samples = {},
-    maxSamples = 60, lastRecalc = 0,
+    budget_used = 0, stats = {},
+    lastRecalc = 0, lastFrame = 0,
 }
 
 local function recalcStress()
@@ -70,7 +92,8 @@ local function runTick(C, loops, dt, now)
 
             local st = Perf.stats[L.id]
             if not st then
-                st = { runs = 0, errs = 0, totalMs = 0, maxMs = 0, lastMs = 0 }
+                st = { runs = 0, errs = 0, totalMs = 0,
+                       maxMs = 0, lastMs = 0 }
                 Perf.stats[L.id] = st
             end
             st.runs = st.runs + 1
@@ -86,8 +109,8 @@ local function runTick(C, loops, dt, now)
                 end
                 if st.errs >= 10 then
                     L.disabled = true
-                    warn(string.format(
-                        "[Dingus][loop %s] disabled after 10 errors", L.id))
+                    warn("[Dingus][loop " .. L.id
+                        .. "] disabled after 10 errors")
                 end
             end
         end
@@ -96,13 +119,7 @@ local function runTick(C, loops, dt, now)
     end
 
     Perf.budget_used = used
-    Perf.last_dt = dt
-
-    if #Perf.samples < Perf.maxSamples then
-        table.insert(Perf.samples, dt)
-    else
-        Perf.samples[(now * 10 | 0) % Perf.maxSamples + 1] = dt
-    end
+    Perf.lastFrame = now
 end
 
 function M.boot(C)
@@ -123,6 +140,7 @@ function M.boot(C)
     C.St = S
     _G.St = S
 
+    -- Kill any prior connections from a previous boot
     if _G.DINGUS_HEARTBEAT_CONN then
         pcall(function() _G.DINGUS_HEARTBEAT_CONN:Disconnect() end)
         _G.DINGUS_HEARTBEAT_CONN = nil
@@ -142,6 +160,7 @@ function M.boot(C)
         _G.DINGUS_CLEANUP_LIST = nil
     end
 
+    -- State
     S.run = true
     S.boot = false
     local D = F.DefaultToggles or {}
@@ -156,13 +175,15 @@ function M.boot(C)
     S.rHt     = {}
     S.aiI     = F.AtkInterval or 0.38
     S.eq      = "none"
-    S.kll, S.bKll, S.aAt, S.aHi, S.aMs = 0, 0, 0, 0, 0
+    S.kll, S.bKll = 0, 0
+    S.aAt, S.aHi, S.aMs = 0, 0, 0
     S.ens, S.ths, S.zn, S.imm = {}, {}, 0, 0
     S.tgt, S.tgtKind = nil, nil
     S.Spf = { hpC = 0, bkC = 0, spdC = 0, kbC = 0, jmpC = 0 }
     S.fs, S.fps = {}, 60
     S.perf = Perf
 
+    -- Scrub movers (deferred)
     task.spawn(function()
         local R = U.hrp()
         if not R then return end
@@ -182,16 +203,18 @@ function M.boot(C)
         end
     end)
 
+    -- Config load
     pcall(function()
         if F.setUtils then F.setUtils(U) end
         if F.exists and F.exists("default") then
             local ok, msg = F.load("default")
-            if ok and not _G.DINGUS_BOOT_COUNT or _G.DINGUS_BOOT_COUNT == 1 then
+            if ok and _G.DINGUS_BOOT_COUNT == 1 then
                 print("[Dingus][main] config: " .. tostring(msg))
             end
         end
     end)
 
+    -- Subsystem init (GUI intentionally absent — loader owns it)
     local ORDER = {
         { "detect",     "Detect" },
         { "scanners",   "Scan"   },
@@ -203,7 +226,6 @@ function M.boot(C)
         { "quests",     "Quest"  },
         { "attack",     "Atk"    },
         { "optimizers", "Opt"    },
-        { "gui",        "Gui"    },
     }
     local okCount = 0
     for i = 1, #ORDER do
@@ -214,22 +236,17 @@ function M.boot(C)
             if good then
                 okCount = okCount + 1
             else
-                warn("[Dingus][main] " .. pair[1]
-                    .. " init: " .. tostring(err))
+                warn("[Dingus][main] " .. pair[1] .. " init: "
+                    .. tostring(err))
             end
         else
             warn("[Dingus][main] " .. pair[1] .. " missing")
         end
-        task.wait()
+        -- Yield only on slow devices
+        if U.IsMobile then task.wait() end
     end
 
-    for _, k in ipairs({
-        "Cfg","Detect","Scan","Hotbar","Faction","Fly","Spoof",
-        "Chest","Quest","Atk","Opt","Gui",
-    }) do
-        if C[k] then pcall(function() _G[k] = C[k] end) end
-    end
-
+    -- Loops
     local loops = buildLoops(C, F)
     C.Loops = loops
 
@@ -249,6 +266,7 @@ function M.boot(C)
         end
     end)
 
+    -- FPS sampler at 0.5s cadence
     local fpsAccum = 0
     local fpsFrames = 0
     _G.DINGUS_RENDER_CONN = RS.RenderStepped:Connect(function(dt)
@@ -262,6 +280,7 @@ function M.boot(C)
         end
     end)
 
+    -- RightShift toggle (works even if GUI loads later)
     local UIS = U.UIS
     if UIS then
         _G.DINGUS_INPUT_CONN = UIS.InputBegan:Connect(function(inp, gp)
@@ -279,6 +298,7 @@ function M.boot(C)
         end)
     end
 
+    -- Respawn handler
     pcall(function()
         U.Lp.CharacterAdded:Connect(function()
             task.wait(2)
@@ -302,16 +322,15 @@ function M.boot(C)
         end)
     end)
 
+    -- Unload
     C.Unload = function()
         print("[Dingus] unloading...")
         S.run = false
         S.boot = false
         pcall(function() if F.save then F.save("default") end end)
-
         if C.Cleanup then
             for i = 1, #C.Cleanup do pcall(C.Cleanup[i]) end
         end
-
         if _G.DINGUS_HEARTBEAT_CONN then
             pcall(function() _G.DINGUS_HEARTBEAT_CONN:Disconnect() end)
             _G.DINGUS_HEARTBEAT_CONN = nil
@@ -324,17 +343,14 @@ function M.boot(C)
             pcall(function() _G.DINGUS_INPUT_CONN:Disconnect() end)
             _G.DINGUS_INPUT_CONN = nil
         end
-
         if C.Gui and C.Gui.gui then
             pcall(function() C.Gui.gui:Destroy() end)
         end
-
         local H = U.hum()
         if H then
             H.WalkSpeed = 16
             H.PlatformStand = false
         end
-
         _G.Ctx, _G.St = nil, nil
         print("[Dingus] unloaded")
     end
@@ -342,9 +358,8 @@ function M.boot(C)
     S.boot = true
     if _G.DINGUS_BOOT_COUNT == 1 then
         print(string.format(
-            "[Dingus] ready · %d loops · %d/%d subsystems",
+            "[Dingus] ready · %d loops · %d/%d subsystems (gui separate)",
             #loops, okCount, #ORDER))
-        print("[Dingus] RightShift toggles UI · _G.Ctx.Unload() to stop")
     end
 
     C.perf = function()
@@ -353,16 +368,15 @@ function M.boot(C)
             stress = Perf.stress,
             backoff = Perf.backoff,
             budget_used = Perf.budget_used,
-            frames_sampled = #Perf.samples,
             loops = {},
         }
         for _, L in ipairs(loops) do
             local st = Perf.stats[L.id]
                 or { runs = 0, errs = 0, totalMs = 0, maxMs = 0, lastMs = 0 }
             out.loops[L.id] = {
-                runs = st.runs,
-                errs = st.errs,
-                avg_ms = st.runs > 0 and (st.totalMs / st.runs * 1000) or 0,
+                runs = st.runs, errs = st.errs,
+                avg_ms = st.runs > 0
+                    and (st.totalMs / st.runs * 1000) or 0,
                 max_ms = st.maxMs * 1000,
                 last_ms = st.lastMs * 1000,
                 disabled = L.disabled or false,
