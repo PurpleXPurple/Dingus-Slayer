@@ -1,370 +1,311 @@
 --[[
-    Dingus-Slayer · main.lua v34
-    Adds hotbar subsystem. All phases pcall-wrapped.
+    Dingus-Slayer · main.lua v35 · compressed
+    Same feature set as v34. Just denser.
 ]]--
 
 local M = {}
+local PH = { "state", "scrub", "config", "subsys", "sys", "defer" }
 
-local PHASES = { "state", "scrub", "config", "subsystems", "systems", "deferred" }
-
-local function phase(idx, name)
-    print(string.format("[Dingus][boot %d/%d] %s", idx, #PHASES, name))
+local function mk(n, t, i, e)
+    return { name = n, tick = t, interval = i or 0.1,
+             maxErrors = e or 5, errors = 0, disabled = false,
+             lastRun = 0, totalRuns = 0 }
 end
 
-local function makeLoop(name, tick, interval, maxErrors)
-    return {
-        name = name, tick = tick, interval = interval or 0.1,
-        maxErrors = maxErrors or 5, errors = 0, disabled = false,
-        lastRun = 0, totalRuns = 0,
-    }
-end
-
-local function safeRun(label, fn)
+local function sr(label, fn)
     local ok, err = pcall(fn)
-    if not ok then
-        warn(string.format("[Dingus][main] %s: %s", label, tostring(err)))
-    end
-    return ok, err
+    if not ok then warn("[Dingus][main] "..label..": "..tostring(err)) end
+    return ok
 end
 
-function M.boot(Ctx)
-    if type(Ctx) ~= "table" then
-        warn("[Dingus][main] boot called without Ctx — aborting")
+function M.boot(C)
+    if type(C) ~= "table" then
+        warn("[Dingus][main] no Ctx — abort")
         return
     end
 
-    _G.Ctx = Ctx
-    _G.St  = Ctx.St
-
-    local U     = Ctx.Util
-    local Cfg   = Ctx.Cfg
-    local Lists = Ctx.Lists
-
-    if not U then warn("[Dingus][main] Util missing"); return end
-    if not Cfg then warn("[Dingus][main] Cfg missing"); return end
-
-    local St = Ctx.St
-    if type(St) ~= "table" then
-        St = {}
-        Ctx.St = St
-        _G.St = St
+    _G.Ctx = C
+    local U, F, L = C.Util, C.Cfg, C.Lists
+    if not U or not F then
+        warn("[Dingus][main] Util/Cfg missing — abort")
+        return
     end
 
-    --================================================================
-    -- PHASE 1 · STATE
-    --================================================================
-    phase(1, "state")
-    safeRun("state", function()
-        St.run = true
-        St.boot = false
-        St.bootPhase = "state"
+    local S = C.St or {}
+    C.St = S
+    _G.St = S
 
-        local DT = Cfg.DefaultToggles or {}
-        St.cbt     = DT.combat  or false
-        St.skl     = DT.skl     ~= false
-        St.eqp     = DT.eqp     ~= false
-        St.rtr     = DT.rtr     ~= false
-        St.gsp     = DT.gsp     or false
-        St.crw     = DT.crw     ~= false
-        St.stunPun = DT.stunPun ~= false
+    --========================================================
+    -- P1 · state
+    --========================================================
+    print(string.format("[Dingus][boot 1/%d] %s", #PH, PH[1]))
+    sr("state", function()
+        S.run, S.boot, S.bootPhase = true, false, "state"
+        local D = F.DefaultToggles or {}
+        S.cbt     = D.combat  or false
+        S.skl     = D.skl     ~= false
+        S.eqp     = D.eqp     ~= false
+        S.rtr     = D.rtr     ~= false
+        S.gsp     = D.gsp     or false
+        S.crw     = D.crw     ~= false
+        S.stunPun = D.stunPun ~= false
 
-        St.cbtS = "IDLE"
-        St.inp = 0
-        St.mxH = 0
+        -- timers table (single source)
+        S.t = {}
+        for _, k in ipairs({
+            "lHp","lHpT","lDmg","lScn","lTht","lSpf","lEqp","lAtk",
+            "lSkl","lBrt","lFac","lMove","lTele",
+        }) do S.t[k] = 0 end
 
-        St.lHp = 0; St.lHpT = 0; St.lDmg = 0
-        St.lScn = 0; St.lTht = 0; St.lSpf = 0; St.lEqp = 0
-        St.lAtk = 0; St.lSkl = 0; St.lBrt = 0; St.lFac = 0; St.lMove = 0
-        St.lTele = 0
+        S.cbtS = "IDLE"
+        S.rHt  = {}
+        S.skCd = {0,0,0,0,0,0}
+        S.aiI  = F.AtkInterval or 0.38
+        S.eq   = "none"
+        S.kll, S.bKll, S.aAt, S.aHi, S.aMs = 0, 0, 0, 0, 0
+        S.skC, S.rtrC, S.cQs, S.teleCount = 0, 0, 0, 0
 
-        St.rHt = {}
-        St.skCd = { 0, 0, 0, 0, 0, 0 }
+        S.FlyActive, S.flyFailLogged = false, false
+        S.uGs, S.uC, S.uGt, S.uST, S.uThC = false, 0, 0, 0, 0
 
-        St.aiI = Cfg.AtkInterval or 0.38
-        St.eq = "none"; St.swp = 0; St.lTl = false
+        S.ens, S.ths, S.zn, S.imm = {}, {}, 0, 0
+        S.tgt, S.tgtKind = nil, nil
 
-        St.kll = 0; St.bKll = 0
-        St.aAt = 0; St.aHi = 0; St.aMs = 0
-        St.skC = 0; St.rtrC = 0; St.cQs = 0
-        St.teleCount = 0
+        S.crT, S.crM, S.cPrch, S.crQuests = nil, nil, false, {}
+        S.crowCycle, S.crowTake = 0, 0
 
-        St.FlyActive = false
+        S.playerLevel, S.questTarget, S.questList = 0, nil, {}
+        S.huntCount, S.qCyc = 0, 0
 
-        St.uGs = false; St.uC = 0; St.uGt = 0; St.uST = 0; St.uThC = 0
+        S.questPriorityBosses = {}
+        S.questActiveList = {}
+        S.questAvailableCount = 0
+        S.questCycleCount = 0
+        S.questLastRead = 0
+        S.questLastCycle = 0
+        S.questPanelOpened = false
 
-        St.ens = {}; St.ths = {}; St.zn = 0; St.imm = 0
-        St.tgt = nil; St.tgtKind = nil
+        S.chestCollected, S.chestLootCollected = 0, 0
+        S.chestFailed, S.chestSkipped = 0, 0
+        S.chestPasses, S.chestCooldowns = 0, {}
 
-        St.questPriorityBosses = {}
-        St.questActiveList = {}
-        St.questAvailableCount = 0
-        St.questCycleCount = 0
-        St.questLastRead = 0
-        St.questLastCycle = 0
-        St.questPanelOpened = false
+        S.Spf = { hpC=0, bkC=0, spdC=0, kbC=0, jmpC=0 }
+        S.fs, S.fps = {}, 60
+        S.loadErrors = {}
+        S.hoverActive = false
 
-        St.crT = nil; St.cPrch = false; St.crQuests = {}
-        St.crowCycle = 0
-        St.crowTake = 0
+        F.QuestCycleT = F.QuestCycleT or 6.0
+        F.AutoSaveT   = F.AutoSaveT   or 30
 
-        St.playerLevel = 0
-        St.questTarget = nil
-        St.huntCount = 0
-        St.qCyc = 0
-
-        St.Spf = { hpC = 0, bkC = 0, spdC = 0, kbC = 0, jmpC = 0 }
-
-        St.fs = {}; St.fps = 60
-        St.loadErrors = {}
-        St.hoverActive = false
-
-        Cfg.QuestCycleT = Cfg.QuestCycleT or 6.0
-        Cfg.AutoSaveT   = Cfg.AutoSaveT   or 30
-
-        print("[Dingus][main] state initialized")
+        print("[Dingus][main] state init")
     end)
 
-    --================================================================
-    -- PHASE 2 · SCRUB
-    --================================================================
-    phase(2, "scrub")
-    safeRun("scrub", function()
-        local r = U.hrp()
-        if not r then return end
+    --========================================================
+    -- P2 · scrub movers
+    --========================================================
+    print(string.format("[Dingus][boot 2/%d] %s", #PH, PH[2]))
+    sr("scrub", function()
+        local R = U.hrp(); if not R then return end
         local n = 0
-        for _, c in ipairs(r:GetChildren()) do
-            pcall(function()
-                if c:IsA("BodyPosition") or c:IsA("BodyVelocity")
-                    or c:IsA("BodyGyro") or c:IsA("BodyForce")
-                    or c:IsA("LinearVelocity") or c:IsA("AlignOrientation")
-                    or c:IsA("AlignPosition") then
-                    c:Destroy()
-                    n = n + 1
-                end
-            end)
+        for _, c in ipairs(R:GetChildren()) do
+            if c:IsA("BodyPosition") or c:IsA("BodyVelocity")
+                or c:IsA("BodyGyro") or c:IsA("BodyForce")
+                or c:IsA("LinearVelocity") or c:IsA("AlignOrientation")
+                or c:IsA("AlignPosition") then
+                pcall(c.Destroy, c); n = n + 1
+            end
         end
-        local h = U.hum()
-        if h then
-            h.PlatformStand = false
-            h.WalkSpeed = 16
-            h.AutoRotate = true
-        end
-        if n > 0 then print("[Dingus][main] scrubbed " .. n .. " movers") end
+        local H = U.hum()
+        if H then H.PlatformStand = false; H.WalkSpeed = 16; H.AutoRotate = true end
+        if n > 0 then print("[Dingus][main] scrubbed "..n) end
     end)
 
-    --================================================================
-    -- PHASE 3 · CONFIG
-    --================================================================
-    phase(3, "config")
-    safeRun("config", function()
-        if Cfg.setUtils then Cfg.setUtils(U) end
-        if Cfg.exists and Cfg.exists("default") then
-            local ok, msg = Cfg.load("default")
-            print("[Dingus][Config] " .. tostring(msg))
+    --========================================================
+    -- P3 · config
+    --========================================================
+    print(string.format("[Dingus][boot 3/%d] %s", #PH, PH[3]))
+    sr("config", function()
+        if F.setUtils then F.setUtils(U) end
+        if F.exists and F.exists("default") then
+            local ok, msg = F.load("default")
+            print("[Dingus][Config] "..tostring(msg))
         end
     end)
 
-    --================================================================
-    -- PHASE 4 · SUBSYSTEMS
-    --================================================================
-    phase(4, "subsystems")
-    safeRun("subsystems", function()
-        local subsys = {
-            { name = "detect",     mod = "Detect" },
-            { name = "scanners",   mod = "Scan"   },
-            { name = "hotbar",     mod = "Hotbar" },
-            { name = "spoofers",   mod = "Spoof"  },
-            { name = "quests",     mod = "Quest"  },
-            { name = "attack",     mod = "Atk"    },
-            { name = "optimizers", mod = "Opt"    },
-            { name = "gui",        mod = "Gui"    },
+    --========================================================
+    -- P4 · subsystems
+    --========================================================
+    print(string.format("[Dingus][boot 4/%d] %s", #PH, PH[4]))
+    sr("subsys", function()
+        local order = {
+            { "detect",     "Detect" },
+            { "scanners",   "Scan"   },
+            { "hotbar",     "Hotbar" },
+            { "spoofers",   "Spoof"  },
+            { "chest",      "Chest"  },
+            { "quests",     "Quest"  },
+            { "attack",     "Atk"    },
+            { "optimizers", "Opt"    },
+            { "gui",        "Gui"    },
         }
-        local okCount = 0
-        for i = 1, #subsys do
-            local s = subsys[i]
-            local mod = Ctx[s.mod]
+        local ok = 0
+        for i = 1, #order do
+            local pair = order[i]
+            local mod = C[pair[2]]
             if mod and type(mod.init) == "function" then
-                local ok, err = pcall(mod.init, Ctx)
-                if ok then
-                    okCount = okCount + 1
-                    print("[Dingus]   + " .. s.name)
+                local good, err = pcall(mod.init, C)
+                if good then ok = ok + 1
+                    print("[Dingus]   + "..pair[1])
                 else
-                    print("[Dingus]   x " .. s.name .. ": " .. tostring(err))
-                    table.insert(St.loadErrors, s.name .. ": " .. tostring(err))
+                    print("[Dingus]   x "..pair[1]..": "..tostring(err))
+                    table.insert(S.loadErrors, pair[1]..": "..tostring(err))
                 end
             else
-                print("[Dingus]   x " .. s.name .. " missing")
-                table.insert(St.loadErrors, s.name .. ": missing")
+                print("[Dingus]   x "..pair[1].." missing")
+                table.insert(S.loadErrors, pair[1]..": missing")
             end
             task.wait(0.02)
         end
-        print(string.format("[Dingus] %d/%d subsystems ok", okCount, #subsys))
+        print(string.format("[Dingus] %d/%d subsystems ok", ok, #order))
 
-        _G.Cfg    = Ctx.Cfg
-        _G.Detect = Ctx.Detect
-        _G.Scan   = Ctx.Scan
-        _G.Hotbar = Ctx.Hotbar
-        _G.Quest  = Ctx.Quest
-        _G.Atk    = Ctx.Atk
-        _G.Spoof  = Ctx.Spoof
-        _G.Gui    = Ctx.Gui
+        for _, k in ipairs({
+            "Cfg","Detect","Scan","Hotbar","Spoof","Chest","Quest",
+            "Atk","Opt","Gui",
+        }) do
+            if C[k] then pcall(function() _G[k] = C[k] end) end
+        end
     end)
 
-    --================================================================
-    -- PHASE 5 · SYSTEMS
-    --================================================================
-    phase(5, "systems")
+    --========================================================
+    -- P5 · scheduler
+    --========================================================
+    print(string.format("[Dingus][boot 5/%d] %s", #PH, PH[5]))
 
     local loops = {}
 
-    safeRun("scheduler", function()
-        local combatTick = function()
-            if Ctx.Atk and Ctx.Atk.combatTick then
-                pcall(Ctx.Atk.combatTick)
+    sr("scheduler", function()
+        -- tick builders — every closure is pcall-wrapped at call site
+        local function T(name, fn)
+            return function()
+                local f = C[name]
+                if f then pcall(fn, f) end
             end
-        end
-        local spoofTick = function()
-            if Ctx.Spoof and Ctx.Spoof.tick then
-                pcall(Ctx.Spoof.tick)
-            end
-        end
-        local threatTick = function()
-            if Ctx.Detect and Ctx.Detect.updateThreats then
-                pcall(Ctx.Detect.updateThreats)
-            end
-        end
-        local questTick = function()
-            if Ctx.Quest and Ctx.Quest.cycle then
-                pcall(Ctx.Quest.cycle)
-            end
-        end
-        local configTick = function()
-            if Cfg.tickAutoSave then pcall(Cfg.tickAutoSave) end
-            if Cfg.save then
-                pcall(function() Cfg.save("default") end)
-            end
-        end
-        local gcTick = function()
-            pcall(function() collectgarbage("collect") end)
         end
 
-        local built = {
-            makeLoop("combat",   combatTick,  0.05, 5),
-            makeLoop("spoofers", spoofTick,   0.10, 5),
-            makeLoop("threats",  threatTick,  0.10, 5),
-            makeLoop("quest",    questTick,   0.5,  3),
-            makeLoop("config",   configTick,  Cfg.AutoSaveT or 30, 2),
-            makeLoop("gc",       gcTick,      60, 1),
+        loops = {
+            mk("combat",   function() if C.Atk and C.Atk.combatTick then pcall(C.Atk.combatTick) end end, 0.05, 5),
+            mk("spoofers", function() if C.Spoof and C.Spoof.tick then pcall(C.Spoof.tick) end end, 0.10, 5),
+            mk("threats",  function() if C.Detect and C.Detect.updateThreats then pcall(C.Detect.updateThreats) end end, 0.10, 5),
+            mk("quest",    function() if C.Quest and C.Quest.cycle then pcall(C.Quest.cycle) end end, 0.5, 3),
+            mk("chest",    function() if C.Chest and C.Chest.collectPassive then pcall(C.Chest.collectPassive) end end, 3.0, 3),
+            mk("config",   function()
+                if F.tickAutoSave then pcall(F.tickAutoSave) end
+                if F.save then pcall(function() F.save("default") end) end
+            end, F.AutoSaveT or 30, 2),
+            mk("gc", function() pcall(function() collectgarbage("collect") end) end, 60, 1),
         }
-        loops = built
-        Ctx.Loops = loops
-        print(string.format("[Dingus][main] %d scheduler loops", #loops))
+        C.Loops = loops
+        print(string.format("[Dingus][main] %d loops", #loops))
     end)
 
-    --================================================================
-    -- PHASE 6 · DEFERRED
-    --================================================================
-    phase(6, "deferred")
-    St.boot = true
+    --========================================================
+    -- P6 · deferred
+    --========================================================
+    print(string.format("[Dingus][boot 6/%d] %s", #PH, PH[6]))
+    S.boot = true
     print("[Dingus] ready · RightShift to toggle UI")
     pcall(function() U.notify("Dingus-Slayer", "loaded", 4) end)
 
+    -- one-shot warmup
     task.spawn(function()
-        task.wait(0.5)
-        if Ctx.Opt and Ctx.Opt.warmWorkspace then
-            pcall(Ctx.Opt.warmWorkspace)
-        end
-        task.wait(0.3)
-        if Ctx.Opt and Ctx.Opt.stripLighting then
-            pcall(Ctx.Opt.stripLighting)
-        end
-        task.wait(0.3)
-        if Ctx.Quest and Ctx.Quest.cycle then
-            pcall(Ctx.Quest.cycle)
-        end
-        task.wait(0.3)
-        local ok, bosses = pcall(function()
-            if Ctx.Detect and Ctx.Detect.scanBosses then
-                return Ctx.Detect.scanBosses(nil, true)
-            end
-            return {}
-        end)
-        if ok and bosses then
-            print(string.format("[Dingus] initial scan: %d bosses", #bosses))
+        local steps = {
+            function() if C.Opt and C.Opt.warmWorkspace then C.Opt.warmWorkspace() end end,
+            function() if C.Opt and C.Opt.stripLighting then C.Opt.stripLighting() end end,
+            function() if C.Quest and C.Quest.cycle then C.Quest.cycle() end end,
+            function()
+                if C.Detect and C.Detect.scanBosses then
+                    local ok, b = pcall(C.Detect.scanBosses, nil, true)
+                    if ok and b then
+                        print(string.format("[Dingus] initial scan: %d bosses", #b))
+                    end
+                end
+            end,
+        }
+        for i = 1, #steps do
+            task.wait(0.3)
+            pcall(steps[i])
         end
         print("[Dingus] boot complete")
     end)
 
-    --================================================================
-    -- MAIN SCHEDULER
-    --================================================================
-    local ST = St
+    --========================================================
+    -- main scheduler — single task, all loops
+    --========================================================
+    local ST = S
     task.spawn(function()
         while ST.run do
             if ST.boot then
-                local now = U.clock()
+                local t = U.clock()
                 local n = #loops
                 for i = 1, n do
                     local L = loops[i]
-                    if not L.disabled and now - L.lastRun >= L.interval then
-                        L.lastRun = now
+                    if not L.disabled and t - L.lastRun >= L.interval then
+                        L.lastRun = t
                         L.totalRuns = L.totalRuns + 1
-
                         local ok, err = pcall(L.tick)
                         if ok then
                             if L.errors > 0 then L.errors = 0 end
                         else
                             L.errors = L.errors + 1
                             if L.errors <= 3 then
-                                print(string.format(
-                                    "[Dingus][loop %s] err %d: %s",
+                                print(string.format("[Dingus][loop %s] err %d: %s",
                                     L.name, L.errors, tostring(err)))
                             end
                             if L.errors >= L.maxErrors then
                                 L.disabled = true
-                                print(string.format("[Dingus][loop %s] disabled", L.name))
+                                print("[Dingus][loop "..L.name.."] disabled")
                             end
                         end
                     end
                 end
             end
-            task.wait(0.03)
+            task.wait(0.05)
         end
     end)
 
-    --================================================================
-    -- FPS
-    --================================================================
+    --========================================================
+    -- FPS sampler
+    --========================================================
     pcall(function()
         game:GetService("RunService").RenderStepped:Connect(function(dt)
             if dt > 0 and dt < 1 then
-                table.insert(St.fs, dt)
-                if #St.fs > 30 then table.remove(St.fs, 1) end
-                local sum = 0
-                for i = 1, #St.fs do sum = sum + St.fs[i] end
-                if sum > 0 then St.fps = #St.fs / sum end
+                local fs = ST.fs
+                fs[#fs + 1] = dt
+                if #fs > 30 then table.remove(fs, 1) end
+                local s = 0
+                for i = 1, #fs do s = s + fs[i] end
+                if s > 0 then ST.fps = #fs / s end
             end
         end)
     end)
 
-    --================================================================
-    -- RESPAWN
-    --================================================================
+    --========================================================
+    -- Respawn
+    --========================================================
     pcall(function()
         U.Lp.CharacterAdded:Connect(function()
             task.wait(2)
-            if Ctx.Atk and Ctx.Atk.stopHover then pcall(Ctx.Atk.stopHover) end
-            St.tgt = nil
-            St.ens = {}
-            St.lScn = 0
-            St.mxH = 0
-            St.uGs = false
-            St.lHp = 0; St.lHpT = 0; St.lDmg = 0
-            St.cPrch = false
-            St.FlyActive = false
-            if Ctx.Hotbar and Ctx.Hotbar.forceRelease then
-                pcall(Ctx.Hotbar.forceRelease)
-            end
+            if C.Atk and C.Atk.stopHover then pcall(C.Atk.stopHover) end
+            if C.Hotbar and C.Hotbar.forceRelease then pcall(C.Hotbar.forceRelease) end
+            if C.Chest and C.Chest.resetCooldowns then pcall(C.Chest.resetCooldowns) end
+            ST.tgt = nil
+            ST.ens = {}
+            ST.lScn = 0
+            ST.mxH = 0
+            ST.uGs = false
+            ST.cPrch = false
+            ST.FlyActive = false
+            ST.lHp, ST.lHpT, ST.lDmg = 0, 0, 0
             for i = 1, #loops do
                 loops[i].errors = 0
                 loops[i].disabled = false
@@ -373,47 +314,41 @@ function M.boot(Ctx)
         end)
     end)
 
-    --================================================================
-    -- RIGHTSHIFT
-    --================================================================
+    --========================================================
+    -- RightShift toggle
+    --========================================================
     pcall(function()
-        game:GetService("UserInputService").InputBegan:Connect(function(input, gp)
+        game:GetService("UserInputService").InputBegan:Connect(function(inp, gp)
             if gp then return end
-            if input.KeyCode == Enum.KeyCode.RightShift then
-                if Ctx.Gui and Ctx.Gui.win then
-                    if Ctx.Gui.win.Visible then
-                        if Ctx.Gui.minimize then Ctx.Gui.minimize() end
+            if inp.KeyCode == Enum.KeyCode.RightShift then
+                local G = C.Gui
+                if G and G.win then
+                    if G.win.Visible then
+                        if G.minimize then G.minimize() end
                     else
-                        if Ctx.Gui.restore then Ctx.Gui.restore() end
+                        if G.restore then G.restore() end
                     end
                 end
             end
         end)
     end)
 
-    --================================================================
-    -- UNLOAD
-    --================================================================
-    Ctx.Unload = function()
+    --========================================================
+    -- Unload
+    --========================================================
+    C.Unload = function()
         print("[Dingus] unloading...")
-        if Ctx.Atk and Ctx.Atk.stopHover then pcall(Ctx.Atk.stopHover) end
-        if Ctx.Hotbar and Ctx.Hotbar.forceRelease then pcall(Ctx.Hotbar.forceRelease) end
-        St.run = false
-        St.boot = false
-        pcall(function() if Cfg.save then Cfg.save("default") end end)
-        if Ctx.Cleanup then
-            for i = 1, #Ctx.Cleanup do pcall(Ctx.Cleanup[i]) end
+        if C.Atk and C.Atk.stopHover then pcall(C.Atk.stopHover) end
+        if C.Hotbar and C.Hotbar.forceRelease then pcall(C.Hotbar.forceRelease) end
+        ST.run, ST.boot = false, false
+        pcall(function() if F.save then F.save("default") end end)
+        if C.Cleanup then
+            for i = 1, #C.Cleanup do pcall(C.Cleanup[i]) end
         end
-        if Ctx.Gui and Ctx.Gui.gui then
-            pcall(function() Ctx.Gui.gui:Destroy() end)
-        end
-        local h = U.hum()
-        if h then
-            h.WalkSpeed = 16
-            h.PlatformStand = false
-        end
-        _G.Ctx = nil
-        _G.St = nil
+        if C.Gui and C.Gui.gui then pcall(function() C.Gui.gui:Destroy() end) end
+        local H = U.hum()
+        if H then H.WalkSpeed = 16; H.PlatformStand = false end
+        _G.Ctx, _G.St = nil, nil
         print("[Dingus] unloaded")
     end
 end
