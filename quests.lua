@@ -1,8 +1,6 @@
 --[[
-    Dingus-Slayer · quests.lua v3
-    Multi-path level reader with self-diagnostics.
-    BossHunts parsing with structure logging.
-    Crow tool detection tolerant of name variants.
+    Dingus-Slayer · quests.lua v4
+    Custom-hotbar aware. Multi-path level reader. Auto-discover crow slot.
 ]]--
 
 local Q = {}
@@ -14,8 +12,8 @@ function Q.init(Ctx)
     local Lists = Ctx.Lists
 
     Cfg.QuestCycleT         = Cfg.QuestCycleT         or 6.0
-    Cfg.QuestCrowHotbar     = Cfg.QuestCrowHotbar     or "5"
-    Cfg.QuestMenuWait       = Cfg.QuestMenuWait       or 2.0
+    Cfg.QuestCrowHotbar     = Cfg.QuestCrowHotbar     or "2"
+    Cfg.QuestMenuWait       = Cfg.QuestMenuWait       or 2.5
     Cfg.QuestLogStructure   = Cfg.QuestLogStructure   ~= false
     Cfg.QuestPriorityStale  = Cfg.QuestPriorityStale  or 90
     Cfg.QuestReadOnOpen     = Cfg.QuestReadOnOpen     ~= false
@@ -29,7 +27,8 @@ function Q.init(Ctx)
     St.questAvailableCount  = St.questAvailableCount or 0
     St.questPanelOpened     = false
     St.questStructureLogged = St.questStructureLogged or false
-    St.questLevelPathsTried = {}
+    St.questLevelDumped     = St.questLevelDumped or false
+    St.questCrowSlotTried   = St.questCrowSlotTried or {}
 
     local rs = game:GetService("ReplicatedStorage")
 
@@ -40,102 +39,96 @@ function Q.init(Ctx)
     end
 
     --============================================================
-    -- LEVEL READER · multi-path with diagnostics
+    -- LEVEL READER · 4 fallback paths
     --============================================================
-    local function tryReadValue(inst, name)
-        if not inst then return nil end
-        local v = inst:FindFirstChild(name)
-        if not v then return nil end
-        local ok, val = pcall(function() return v.Value end)
-        if ok and type(val) == "number" then return val end
-        return nil
+    local function getSlots()
+        local ps = rs:FindFirstChild("Player_Service")
+        local data = ps and ps:FindFirstChild("Data")
+        local me = data and data:FindFirstChild(U.Lp.Name)
+        if not me then return nil, nil end
+        return me:FindFirstChild("slots"), me
     end
 
-    local LEVEL_PATHS = {
-        function(plr, rs)
-            -- Path 1: workspace.Humanoids.<name>.Progression.Level
-            local hf = workspace:FindFirstChild("Humanoids")
-            local me = hf and hf:FindFirstChild(plr.Name)
-            if not me then return nil, "Humanoids.<name> missing" end
-            return tryReadValue(me:FindFirstChild("Progression"), "Level"),
-                   "Humanoids.Progression.Level"
-        end,
-        function(plr, rs)
-            -- Path 2: workspace.Humanoids.Regions.<name>.Progression.Level
-            local hf = workspace:FindFirstChild("Humanoids")
-            local regions = hf and hf:FindFirstChild("Regions")
-            if not regions then return nil, "Humanoids.Regions missing" end
-            for _, r in ipairs(regions:GetChildren()) do
-                local me = r:FindFirstChild(plr.Name) or r:FindFirstChild("Players") and r.Players:FindFirstChild(plr.Name)
-                if me then
-                    return tryReadValue(me:FindFirstChild("Progression"), "Level"),
-                           "Regions.*.<name>.Progression.Level"
-                end
-            end
-            return nil, "no match in Regions"
-        end,
-        function(plr, rs)
-            -- Path 3: RS.Player_Service.Data.<name>.slots.SlotN.Progression.Level
-            local ps = rs:FindFirstChild("Player_Service")
-            local data = ps and ps:FindFirstChild("Data")
-            local me = data and data:FindFirstChild(plr.Name)
-            if not me then return nil, "Player_Service.Data.<name> missing" end
-            local slots = me:FindFirstChild("slots")
-            if not slots then return nil, "slots missing" end
-            for _, slot in ipairs(slots:GetChildren()) do
-                local v = tryReadValue(slot:FindFirstChild("Progression"), "Level")
-                if v then return v, "slots." .. slot.Name .. ".Progression.Level" end
-            end
-            return nil, "no Level in any slot"
-        end,
-        function(plr, rs)
-            -- Path 4: RS.Player_Service.Data.<name>.Profile.Level (alt structure)
-            local ps = rs:FindFirstChild("Player_Service")
-            local data = ps and ps:FindFirstChild("Data")
-            local me = data and data:FindFirstChild(plr.Name)
-            if not me then return nil, "no Data" end
-            return tryReadValue(me, "Level"), "Data.<name>.Level"
-        end,
-        function(plr, rs)
-            -- Path 5: character attribute
-            local char = plr.Character
-            if not char then return nil, "no char" end
-            local ok, lvl = pcall(function() return char:GetAttribute("Level") end)
-            if ok and type(lvl) == "number" then return lvl, "char attribute" end
-            return nil, "no char attribute"
-        end,
-        function(plr, rs)
-            -- Path 6: any NumberValue named Level anywhere in workspace.Humanoids
-            local hf = workspace:FindFirstChild("Humanoids")
-            if not hf then return nil, "no Humanoids" end
-            local me = hf:FindFirstChild(plr.Name)
-            if not me then return nil, "no me" end
-            for _, d in ipairs(me:GetDescendants()) do
-                if d.Name == "Level" and (d:IsA("NumberValue") or d:IsA("IntValue")) then
-                    return d.Value, "descendant Level"
-                end
-            end
-            return nil, "no descendant Level"
-        end,
-    }
-
     local function readLevelVerbose()
-        local plr = U.Lp
-        for i, pathFn in ipairs(LEVEL_PATHS) do
-            local ok, v, tag = pcall(pathFn, plr, rs)
-            if ok and v and type(v) == "number" and v > 0 then
-                if Cfg.QuestVerbose then
-                    log(string.format("level from path %d (%s): %d", i, tag, v))
+        local slots, me = getSlots()
+        if not slots then
+            if Cfg.QuestVerbose then
+                log("level: slots folder not found under Player_Service.Data.<me>")
+            end
+            return 0, "no slots"
+        end
+
+        -- Path A: slots.<slot>.Progression.Level
+        for _, slot in ipairs(slots:GetChildren()) do
+            local prog = slot:FindFirstChild("Progression")
+            local lvl = prog and prog:FindFirstChild("Level")
+            if lvl then
+                local ok, v = pcall(function() return lvl.Value end)
+                if ok and type(v) == "number" and v > 0 then
+                    return v, "slots." .. slot.Name .. ".Progression.Level"
                 end
-                return v, i
             end
         end
-        return 0, 0
+
+        -- Path B: slots.<slot>.Level
+        for _, slot in ipairs(slots:GetChildren()) do
+            local lvl = slot:FindFirstChild("Level")
+            if lvl then
+                local ok, v = pcall(function() return lvl.Value end)
+                if ok and type(v) == "number" and v > 0 then
+                    return v, "slots." .. slot.Name .. ".Level"
+                end
+            end
+        end
+
+        -- Path C: deep walk inside each slot for any NumberValue named Level
+        for _, slot in ipairs(slots:GetChildren()) do
+            for _, d in ipairs(slot:GetDescendants()) do
+                if d.Name == "Level"
+                   and (d:IsA("NumberValue") or d:IsA("IntValue"))
+                   and d.Value > 0 then
+                    return d.Value, "deep:" .. d:GetFullName()
+                end
+            end
+        end
+
+        -- Path D: character attribute
+        local char = U.Lp.Character
+        if char then
+            for _, attr in ipairs({"Level", "level", "PlayerLevel", "LVL"}) do
+                local ok, v = pcall(function() return char:GetAttribute(attr) end)
+                if ok and type(v) == "number" and v > 0 then
+                    return v, "charAttr:" .. attr
+                end
+            end
+        end
+
+        -- All failed — dump once for diagnosis
+        if not St.questLevelDumped then
+            St.questLevelDumped = true
+            print("[Dingus][Quest] LEVEL NOT FOUND — dumping slots tree:")
+            for _, slot in ipairs(slots:GetChildren()) do
+                print(string.format("  slot: %s (%s)", slot.Name, slot.ClassName))
+                for _, d in ipairs(slot:GetDescendants()) do
+                    if d:IsA("NumberValue") or d:IsA("IntValue") then
+                        print(string.format("    %s = %s",
+                            d:GetFullName(), tostring(d.Value)))
+                    end
+                end
+            end
+            if me then
+                print("  --- me top-level children ---")
+                for _, c in ipairs(me:GetChildren()) do
+                    print(string.format("    %s (%s)", c.Name, c.ClassName))
+                end
+            end
+        end
+
+        return 0, "no match"
     end
 
     function Q.readLevel()
-        local v = readLevelVerbose()
-        return v
+        return (readLevelVerbose())
     end
 
     --============================================================
@@ -157,7 +150,7 @@ function Q.init(Ctx)
         if not folder then
             if Cfg.QuestLogStructure and not St.questStructureLogged then
                 St.questStructureLogged = true
-                print("[Dingus][Quest] BossHunts not found in RS or RS.Assets")
+                print("[Dingus][Quest] BossHunts not found")
             end
             return {}
         end
@@ -218,11 +211,11 @@ function Q.init(Ctx)
     end
 
     --============================================================
-    -- CROW TOOL FINDER · variant-tolerant
+    -- CROW TOOL FINDER · Roblox Tool OR custom mesh
     --============================================================
     local CROW_NAMES = {
         "crow", "kasugai", "kasugai crow", "karasu",
-        "crow tool", "crowt", "the crow",
+        "crow tool", "crowt", "the crow", "bird",
     }
 
     local function isCrowish(name)
@@ -231,7 +224,6 @@ function Q.init(Ctx)
         for _, n in ipairs(CROW_NAMES) do
             if l == n then return true end
         end
-        -- substring
         if l:find("crow", 1, true) or l:find("kasugai", 1, true) then
             return true
         end
@@ -240,49 +232,94 @@ function Q.init(Ctx)
 
     local function findCrowToolVerbose()
         local plr = U.Lp
-        local found, from = nil, nil
 
-        -- Character
+        -- Roblox Tool in character
         local char = plr.Character
         if char then
             for _, c in ipairs(char:GetChildren()) do
                 if c:IsA("Tool") and isCrowish(c.Name) then
-                    found, from = c, "Character"
-                    break
+                    return c, "CharacterTool"
                 end
             end
         end
 
-        -- Backpack
-        if not found then
-            local bp = plr:FindFirstChildOfClass("Backpack")
-            if bp then
-                for _, c in ipairs(bp:GetChildren()) do
-                    if c:IsA("Tool") and isCrowish(c.Name) then
-                        found, from = c, "Backpack"
-                        break
-                    end
+        -- Roblox Tool in Backpack
+        local bp = plr:FindFirstChildOfClass("Backpack")
+        if bp then
+            for _, c in ipairs(bp:GetChildren()) do
+                if c:IsA("Tool") and isCrowish(c.Name) then
+                    return c, "BackpackTool"
                 end
             end
         end
 
-        if Cfg.QuestVerbose and not found then
-            -- Log what IS in the backpack so we know what names exist
-            local bp = plr:FindFirstChildOfClass("Backpack")
-            if bp then
-                local names = {}
-                for _, c in ipairs(bp:GetChildren()) do
-                    if c:IsA("Tool") then table.insert(names, c.Name) end
+        -- Custom mesh attached to character (hand / shoulder / anywhere)
+        if char then
+            for _, c in ipairs(char:GetDescendants()) do
+                if (c:IsA("Model") or c:IsA("MeshPart") or c:IsA("BasePart"))
+                   and isCrowish(c.Name) then
+                    return c, "CustomMesh"
                 end
-                log("no crow tool. Backpack tools: " .. table.concat(names, ", "))
             end
         end
 
-        return found, from
+        return nil, nil
     end
 
     --============================================================
-    -- PANEL FINDERS (unchanged shape, now read whole PlayerGui)
+    -- HOTBAR SLOT PROBE
+    --============================================================
+    local function hotbarSlotForCrow()
+        -- Ensure we don't infinitely probe. Skip last successful slot.
+        local order = { Cfg.QuestCrowHotbar or "2", "1", "3", "4", "5", "6", "7", "8" }
+        local tried = {}
+        for _, k in ipairs(order) do
+            if not tried[k] then
+                tried[k] = true
+                pcall(function() U.tap(k) end)
+                task.wait(0.45)
+                local tool, from = findCrowToolVerbose()
+                if tool then
+                    print(string.format(
+                        "[Dingus][Quest] crow found via hotbar '%s' (%s)",
+                        k, tostring(from)))
+                    Cfg.QuestCrowHotbar = k
+                    return tool, k
+                end
+            end
+        end
+        return nil, nil
+    end
+
+    local function equipCrow()
+        -- Already equipped?
+        local tool, from = findCrowToolVerbose()
+        if tool and from == "CharacterTool" then
+            return tool
+        end
+
+        -- Try configured slot
+        local slot = Cfg.QuestCrowHotbar or "2"
+        if Cfg.QuestVerbose then
+            log("equipping crow via hotbar '" .. slot .. "'")
+        end
+        pcall(function() U.tap(slot) end)
+        task.wait(0.45)
+
+        tool, from = findCrowToolVerbose()
+        if tool then
+            return tool
+        end
+
+        -- Auto-discover
+        if Cfg.QuestVerbose then
+            log("configured slot failed, probing all hotbar slots")
+        end
+        return hotbarSlotForCrow()
+    end
+
+    --============================================================
+    -- PANEL DETECTION · walk whole PlayerGui
     --============================================================
     local function findPanelRoot()
         local pg = U.Lp:FindFirstChildOfClass("PlayerGui")
@@ -311,9 +348,9 @@ function Q.init(Ctx)
     end
 
     local function findCancelButton()
-        local root = findPanelRoot()
-        if not root then return nil end
-        local stack = { root }
+        local pg = U.Lp:FindFirstChildOfClass("PlayerGui")
+        if not pg then return nil end
+        local stack = { pg }
         local iter = 0
         while #stack > 0 do
             local inst = table.remove(stack)
@@ -401,31 +438,10 @@ function Q.init(Ctx)
     --============================================================
     -- MENU OPEN / CLOSE
     --============================================================
-    local function equipCrow()
-        local tool = findCrowToolVerbose()
-        if tool then
-            local h = U.hum()
-            if h then
-                if tool.Parent ~= U.Lp.Character then
-                    pcall(function() h:EquipTool(tool) end)
-                    task.wait(0.5)
-                end
-            end
-            return tool
-        end
-        -- hotbar fallback
-        if Cfg.QuestCrowHotbar then
-            pcall(function() U.tap(Cfg.QuestCrowHotbar) end)
-            task.wait(0.5)
-            return findCrowToolVerbose()
-        end
-        return nil
-    end
-
     local function openMenu()
         if findPanelRoot() then return true end
         pcall(function() U.m1() end)
-        local deadline = U.clock() + (Cfg.QuestMenuWait or 2.0)
+        local deadline = U.clock() + (Cfg.QuestMenuWait or 2.5)
         while U.clock() < deadline do
             if findPanelRoot() then return true end
             task.wait(0.15)
@@ -504,17 +520,21 @@ function Q.init(Ctx)
                         St.questLastRead = now
                         print(string.format("[Dingus][Quest] %d active · %s",
                             #qs, table.concat(names, ", ")))
+                    else
+                        if Cfg.QuestVerbose then
+                            log("crow panel open but no quest labels found")
+                        end
                     end
                     closeMenu()
                     St.questPanelOpened = false
                 else
                     if Cfg.QuestVerbose then
-                        log("crow menu failed to open")
+                        log("crow menu failed to open after M1")
                     end
                 end
             else
                 if Cfg.QuestVerbose then
-                    log("no crow tool found, skipping menu open")
+                    log("no crow found in any hotbar slot")
                 end
             end
         end
@@ -539,6 +559,17 @@ function Q.init(Ctx)
         end
     end
 
+    function Q.probeHotbar()
+        print("[Dingus][Quest] probing hotbar slots for crow...")
+        for _, k in ipairs({"1","2","3","4","5","6","7","8"}) do
+            pcall(function() U.tap(k) end)
+            task.wait(0.4)
+            local tool, from = findCrowToolVerbose()
+            print(string.format("  slot %s: %s",
+                k, tool and (tool.Name .. " (" .. from .. ")") or "nothing"))
+        end
+    end
+
     function Q.stats()
         return {
             level = St.playerLevel or 0,
@@ -549,6 +580,7 @@ function Q.init(Ctx)
             cycles = St.questCycleCount or 0,
             panelOpen = St.questPanelOpened or false,
             crowTool = St.crT and St.crT.Name or "not found",
+            crowSlot = Cfg.QuestCrowHotbar,
         }
     end
 
@@ -557,20 +589,20 @@ function Q.init(Ctx)
     --============================================================
     task.spawn(function()
         task.wait(3)
-        print("[Dingus][Quest] v3 boot discovery")
+        print("[Dingus][Quest] v4 boot discovery")
         Q.readHunts()
         local lvl, which = readLevelVerbose()
         St.playerLevel = lvl
-        if which > 0 then
-            print(string.format("[Dingus][Quest] level=%d (path %d)", lvl, which))
+        if lvl > 0 then
+            print(string.format("[Dingus][Quest] level=%d (%s)", lvl, tostring(which)))
         else
-            print("[Dingus][Quest] level: NO PATH WORKED")
+            print("[Dingus][Quest] level: NO PATH WORKED — see dump above")
         end
-        print(string.format("[Dingus][Quest] ready · hunts=%d",
-            St.questAvailableCount))
+        print(string.format("[Dingus][Quest] ready · hunts=%d · crowSlot=%s",
+            St.questAvailableCount, Cfg.QuestCrowHotbar))
     end)
 
-    print("[Dingus][quests] v3 initialized")
+    print("[Dingus][quests] v4 initialized · custom-hotbar aware")
 end
 
 return Q
