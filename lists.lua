@@ -1,11 +1,10 @@
--- Dingus-Slayer · lists.lua v10
--- Merged from Synerox: full boss roster, 80 NPC positions, region anchors,
--- 18 quest entries, trainers, boss timers, shop, clans, BDA.
+-- Dingus-Slayer · lists.lua v11
+-- Full Synerox data + faction tables.
 
 local L = {}
 
 --============================================================
--- BOSS ROSTER (Synerox fn15 table)
+-- BOSS ROSTER
 --============================================================
 L.bossNames = {
     yetidemon=true, smallyeti=true, handdemon=true, zuko=true,
@@ -21,7 +20,6 @@ L.bossNames = {
     soryutraineegoki=true, reapertrainee=true, reapertraineekuzan=true,
 }
 
--- Human-readable display names
 L.bosses = {
     "yetidemon","smallyeti","handdemon","zuko","saneri","obari",
     "shinora","giyen","tengai","tengen","zentaro","gyorei","rengu",
@@ -52,35 +50,41 @@ L.bossRegions = {
 L.selectedBosses = {}
 for _, b in ipairs(L.bosses) do L.selectedBosses[b] = true end
 
-function L.setBossEnabled(n, e) if L.selectedBosses[n] ~= nil then L.selectedBosses[n] = not not e end end
+function L.setBossEnabled(n, e)
+    if L.selectedBosses[n] ~= nil then L.selectedBosses[n] = not not e end
+end
 function L.isBossEnabled(n) return L.selectedBosses[n] ~= false end
-function L.setAllBosses(e) for _, b in ipairs(L.bosses) do L.selectedBosses[b] = not not e end end
+function L.setAllBosses(e)
+    for _, b in ipairs(L.bosses) do L.selectedBosses[b] = not not e end
+end
 function L.enabledCount()
     local n = 0
-    for _, b in ipairs(L.bosses) do if L.selectedBosses[b] ~= false then n = n + 1 end end
+    for _, b in ipairs(L.bosses) do
+        if L.selectedBosses[b] ~= false then n = n + 1 end
+    end
     return n, #L.bosses
 end
 
 --============================================================
--- REGION TELEPORT ANCHORS (Synerox tbl2)
+-- REGION TELEPORT ANCHORS
 --============================================================
 L.regions = {
-    ["Hidden Mist Village"]   = Vector3.new(1651, 607.3, -124),
-    ["Mistfall Harbor"]       = Vector3.new(140.7, 873.5, 728.2),
-    ["Bamboo Grove"]          = Vector3.new(570, 1140, -1150),
-    ["Windy Peak"]            = Vector3.new(-456, 1241, -932),
-    ["Butterfly Estate"]      = Vector3.new(-1772, 311.3, -110.9),
-    ["Iceveil Valley"]        = Vector3.new(283.9, 1305, -2041.2),
-    ["Final Selection Plains"]= Vector3.new(-1834, 35, 487.5),
-    ["Verdant Cliffs"]        = Vector3.new(1775, 715, -425),
-    ["Forgotten Ruins"]       = Vector3.new(-954, 950, 945.5),
-    ["Stone Sanctuary"]       = Vector3.new(2564.1, 980, -590),
-    ["Misc"]                  = Vector3.new(-315.6, 1292.6, -1488.7),
-    ["Temporary"]             = Vector3.new(807, 1122, -1005),
+    ["Hidden Mist Village"]    = Vector3.new(1651, 607.3, -124),
+    ["Mistfall Harbor"]        = Vector3.new(140.7, 873.5, 728.2),
+    ["Bamboo Grove"]           = Vector3.new(570, 1140, -1150),
+    ["Windy Peak"]             = Vector3.new(-456, 1241, -932),
+    ["Butterfly Estate"]       = Vector3.new(-1772, 311.3, -110.9),
+    ["Iceveil Valley"]         = Vector3.new(283.9, 1305, -2041.2),
+    ["Final Selection Plains"] = Vector3.new(-1834, 35, 487.5),
+    ["Verdant Cliffs"]         = Vector3.new(1775, 715, -425),
+    ["Forgotten Ruins"]        = Vector3.new(-954, 950, 945.5),
+    ["Stone Sanctuary"]        = Vector3.new(2564.1, 980, -590),
+    ["Misc"]                   = Vector3.new(-315.6, 1292.6, -1488.7),
+    ["Temporary"]              = Vector3.new(807, 1122, -1005),
 }
 
 --============================================================
--- NPC / BOSS SPAWN POSITIONS (Synerox tbl3, ~80 entries)
+-- NPC / BOSS SPAWN POSITIONS
 --============================================================
 L.npcPositions = {
     ["Kanoe Demon Slayer"]      = Vector3.new(283.9, 1305, -2041.2),
@@ -183,7 +187,7 @@ L.npcPositions = {
 }
 
 --============================================================
--- QUEST DATABASE (Synerox tbl4 — 18 entries)
+-- QUEST DATABASE
 --============================================================
 L.quests = {
     { name="Ill take 3 bandits",            display="Bandits (Lv 0+)",              inst="Defeat 3 bandits",               minLvl=0,   cat="Normal", region="Windy Peak",           race="Any",            npc="Krue", mob="Bandit",               wp=Vector3.new(-297,1224,-1023),  tasks={["Bandits remaining"]="Bandit"} },
@@ -207,54 +211,54 @@ L.quests = {
 }
 
 --============================================================
--- TRAINERS (Synerox tbl10)
+-- TRAINERS
 --============================================================
 L.trainers = {
-    { name="Urokodaki", display="Water Breathing",  style="Water",   pos=Vector3.new(667.2,1022.7,-228.2) },
-    { name="Zentaro",   display="Thunder Breathing",style="Thunder", pos=Vector3.new(1970.2,1660,-609.8) },
-    { name="Rengu",     display="Flame Breathing",  style="Flame",   pos=Vector3.new(-967.6,1028.7,1188.2) },
-    { name="Saneri",    display="Wind Breathing",   style="Wind",    pos=Vector3.new(-275.6,1187.5,-3436.7) },
-    { name="Gyorei",    display="Stone Breathing",  style="Stone",   pos=Vector3.new(2578.6,1095.8,-828.4) },
-    { name="Shinora",   display="Insect Breathing", style="Insect",  pos=Vector3.new(-1798.9,347.9,-189.3) },
-    { name="Obari",     display="Serpent Breathing",style="Serpent", pos=Vector3.new(37,1311.2,-1179.5) },
-    { name="Tengai",    display="Sound Breathing",  style="Sound",   pos=Vector3.new(464.9,1491.1,-3272.8) },
+    { name="Urokodaki", display="Water Breathing",   style="Water",   pos=Vector3.new(667.2,1022.7,-228.2) },
+    { name="Zentaro",   display="Thunder Breathing", style="Thunder", pos=Vector3.new(1970.2,1660,-609.8) },
+    { name="Rengu",     display="Flame Breathing",   style="Flame",   pos=Vector3.new(-967.6,1028.7,1188.2) },
+    { name="Saneri",    display="Wind Breathing",    style="Wind",    pos=Vector3.new(-275.6,1187.5,-3436.7) },
+    { name="Gyorei",    display="Stone Breathing",   style="Stone",   pos=Vector3.new(2578.6,1095.8,-828.4) },
+    { name="Shinora",   display="Insect Breathing",  style="Insect",  pos=Vector3.new(-1798.9,347.9,-189.3) },
+    { name="Obari",     display="Serpent Breathing", style="Serpent", pos=Vector3.new(37,1311.2,-1179.5) },
+    { name="Tengai",    display="Sound Breathing",   style="Sound",   pos=Vector3.new(464.9,1491.1,-3272.8) },
 }
 
 --============================================================
--- BOSS TIMERS (Synerox tbl7)
+-- BOSS TIMERS
 --============================================================
 L.bossTimers = {
-    Nezuko      = { respawn=600,  pos=Vector3.new(-1040,1120,-680) },
-    Yahaba      = { respawn=900,  pos=Vector3.new(-150,280,-1650) },
-    Sasumaru    = { respawn=900,  pos=Vector3.new(-180,280,-1700) },
-    HandDemon   = { respawn=600,  pos=Vector3.new(2250,1600,-750) },
-    Sabito      = { respawn=600,  pos=Vector3.new(-1046.8,1133.5,-628.8) },
-    Shiron      = { respawn=480,  pos=Vector3.new(800,1030,-180) },
-    Sanemi      = { respawn=1200, pos=Vector3.new(-280,1190,-3450) },
-    Giyu        = { respawn=1200, pos=Vector3.new(670,1030,-250) },
-    Rengoku     = { respawn=1200, pos=Vector3.new(-970,1035,1200) },
-    Tengen      = { respawn=1200, pos=Vector3.new(1980,1670,-620) },
-    Akaza       = { respawn=1500, pos=Vector3.new(3100,1800,-1500) },
-    Douma       = { respawn=1800, pos=Vector3.new(-2500,2100,800) },
+    Nezuko    = { respawn=600,  pos=Vector3.new(-1040,1120,-680) },
+    Yahaba    = { respawn=900,  pos=Vector3.new(-150,280,-1650) },
+    Sasumaru  = { respawn=900,  pos=Vector3.new(-180,280,-1700) },
+    HandDemon = { respawn=600,  pos=Vector3.new(2250,1600,-750) },
+    Sabito    = { respawn=600,  pos=Vector3.new(-1046.8,1133.5,-628.8) },
+    Shiron    = { respawn=480,  pos=Vector3.new(800,1030,-180) },
+    Sanemi    = { respawn=1200, pos=Vector3.new(-280,1190,-3450) },
+    Giyu      = { respawn=1200, pos=Vector3.new(670,1030,-250) },
+    Rengoku   = { respawn=1200, pos=Vector3.new(-970,1035,1200) },
+    Tengen    = { respawn=1200, pos=Vector3.new(1980,1670,-620) },
+    Akaza     = { respawn=1500, pos=Vector3.new(3100,1800,-1500) },
+    Douma     = { respawn=1800, pos=Vector3.new(-2500,2100,800) },
 }
 
 --============================================================
--- SHOP (Synerox tbl5)
+-- SHOP
 --============================================================
 L.shop = {
     weapons = {
-        ["Common Katana"]     = { price=500,   pos=Vector3.new(-586.3,1244.6,-1085.8) },
-        ["Water Nichirin"]    = { price=2500,  pos=Vector3.new(667.2,1022.7,-228.2) },
-        ["Thunder Nichirin"]  = { price=2500,  pos=Vector3.new(1970.2,1660,-609.8) },
-        ["Wind Nichirin"]     = { price=2500,  pos=Vector3.new(-275.6,1187.5,-3436.7) },
-        ["Flame Nichirin"]    = { price=2500,  pos=Vector3.new(-967.6,1028.7,1188.2) },
-        ["Insect Nichirin"]   = { price=3000,  pos=Vector3.new(-1805,350,-180) },
-        ["Sound Nichirin"]    = { price=3000,  pos=Vector3.new(1980,1670,-620) },
-        ["Beast Nichirin"]    = { price=3000,  pos=Vector3.new(450,1050,-320) },
-        ["Mist Nichirin"]     = { price=3500,  pos=Vector3.new(980,280,-2820) },
-        ["Sun Nichirin"]      = { price=5000,  pos=Vector3.new(-1050,1135,-630) },
-        ["Moon Nichirin"]     = { price=5000,  pos=Vector3.new(3100,1800,-1500) },
-        ["Devourer Katana"]   = { price=10000, pos=Vector3.new(-2500,2100,800) },
+        ["Common Katana"]   = { price=500,   pos=Vector3.new(-586.3,1244.6,-1085.8) },
+        ["Water Nichirin"]  = { price=2500,  pos=Vector3.new(667.2,1022.7,-228.2) },
+        ["Thunder Nichirin"]= { price=2500,  pos=Vector3.new(1970.2,1660,-609.8) },
+        ["Wind Nichirin"]   = { price=2500,  pos=Vector3.new(-275.6,1187.5,-3436.7) },
+        ["Flame Nichirin"]  = { price=2500,  pos=Vector3.new(-967.6,1028.7,1188.2) },
+        ["Insect Nichirin"] = { price=3000,  pos=Vector3.new(-1805,350,-180) },
+        ["Sound Nichirin"]  = { price=3000,  pos=Vector3.new(1980,1670,-620) },
+        ["Beast Nichirin"]  = { price=3000,  pos=Vector3.new(450,1050,-320) },
+        ["Mist Nichirin"]   = { price=3500,  pos=Vector3.new(980,280,-2820) },
+        ["Sun Nichirin"]    = { price=5000,  pos=Vector3.new(-1050,1135,-630) },
+        ["Moon Nichirin"]   = { price=5000,  pos=Vector3.new(3100,1800,-1500) },
+        ["Devourer Katana"] = { price=10000, pos=Vector3.new(-2500,2100,800) },
     },
     gourds = {
         ["Small Gourd"]  = { price=700,  pos=Vector3.new(-1798.9,347.9,-189.3) },
@@ -271,7 +275,7 @@ L.shop = {
 }
 
 --============================================================
--- CLANS + BDA (Synerox)
+-- CLANS + BDA
 --============================================================
 L.clans = {
     "Kamado","Rengoku","Soyama","Uzui",
@@ -290,7 +294,7 @@ L.bda = {
 }
 
 --============================================================
--- WEAPON CLASSIFICATION (retained)
+-- WEAPON CLASSIFICATION
 --============================================================
 L.weapons = {
     "katana","sword","blade","saber","sabre","cutlass","rapier",
@@ -379,11 +383,71 @@ function L.findNpcPosition(arg)
     if not arg then return nil end
     local target = normalize(arg)
     for k, v in pairs(L.npcPositions) do
-        if normalize(k):find(target, 1, true) or target:find(normalize(k), 1, true) then
+        if normalize(k):find(target, 1, true)
+           or target:find(normalize(k), 1, true) then
             return v, k
         end
     end
     return nil
+end
+
+--============================================================
+-- FACTION TABLES
+--============================================================
+L.faction = {
+    demon = {
+        "demon", "lesser demon", "greater demon", "high demon",
+        "beast born demon", "blood hounded", "ice profound demon",
+        "fire profound demon", "yetidemon", "yeti demon",
+        "smallyeti", "small yeti", "handdemon", "hand demon",
+        "akaza", "douma", "muzan", "daki", "gyutaro",
+    },
+    slayer = {
+        "kanoe demon slayer", "mizunoe demon slayer", "mizunoto",
+        "demon slayer goro", "wounded slayer",
+        "sanemi", "giyu", "rengoku", "tengen", "sabito",
+        "hashira",
+    },
+    neutral = {
+        "bandit", "civilian", "spy",
+        "mother bear", "bear cub",
+        "trainee", "kaiden", "hoyuzo", "zuko",
+        "obari", "giyen", "sumari", "yahari",
+        "datai", "akazo", "domae", "nezura", "enru",
+        "reaper", "gyutai", "saneri", "shinora", "tengai",
+        "zentaro", "gyorei", "rengu",
+        "grove raider", "raid captain", "cache prowler",
+        "cache lancer", "iceveilroad",
+    },
+}
+
+function L.factionOf(name)
+    if not name then return "neutral" end
+    local l = string.lower(name)
+    for f, list in pairs(L.faction) do
+        for _, k in ipairs(list) do
+            if l == k then return f end
+        end
+    end
+    for f, list in pairs(L.faction) do
+        for _, k in ipairs(list) do
+            if l:find(k, 1, true) then return f end
+        end
+    end
+    return "neutral"
+end
+
+function L.isHashira(npcName)
+    if not npcName then return false end
+    local l = string.lower(npcName)
+    for _, k in ipairs({
+        "sanemi", "giyu", "rengoku", "tengen",
+        "hashira", "mitsuri", "obanai", "muichiro",
+        "shinobu", "gyomei",
+    }) do
+        if l:find(k, 1, true) then return true end
+    end
+    return false
 end
 
 return L
