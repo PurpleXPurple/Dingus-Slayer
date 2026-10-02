@@ -1,18 +1,6 @@
 --[[
-    Dingus-Slayer · gui.lua v32
-    Full rebuild. 8 tabs. Working scroll. Bigger window.
-
-    Layout:
-      Window 940x660
-      Sidebar 200 wide (scrollable nav)
-      Header 48 tall
-      Content = rest (scrolling pages)
-
-    Scroll fix: ScrollBarThickness=10, explicit ScrollingEnabled,
-    explicit ScrollingDirection, UIPadding.right reserves scrollbar
-    space so rows don't render underneath.
-
-    Targets tab: region-grouped boss selector with per-boss toggles.
+    Dingus-Slayer · gui.lua v33
+    Adds Chests tab (9 tabs total). Chest controls + live stats.
 ]]--
 
 local G = {}
@@ -26,30 +14,21 @@ function G.init(Ctx)
     local UIS   = game:GetService("UserInputService")
     local LogService = game:GetService("LogService")
 
-    --============================================================
-    -- GUI CONFIG
-    --============================================================
     Cfg.GuiPanicKey1   = Cfg.GuiPanicKey1   or "RightControl"
     Cfg.GuiPanicKey2   = Cfg.GuiPanicKey2   or "Backspace"
     Cfg.GuiConcealed   = Cfg.GuiConcealed   ~= false
     Cfg.GuiPanicHide   = Cfg.GuiPanicHide   ~= false
 
-    --============================================================
-    -- CAPABILITIES
-    --============================================================
     local HAS = {
-        writefile  = type(writefile) == "function",
-        readfile   = type(readfile) == "function",
-        delfile    = type(delfile) == "function",
-        isfile     = type(isfile) == "function",
-        listfiles  = type(listfiles) == "function",
+        writefile  = type(writefile)  == "function",
+        readfile   = type(readfile)   == "function",
+        delfile    = type(delfile)    == "function",
+        isfile     = type(isfile)     == "function",
+        listfiles  = type(listfiles)  == "function",
         makefolder = type(makefolder) == "function",
-        gethui     = type(gethui) == "function",
+        gethui     = type(gethui)     == "function",
     }
 
-    --============================================================
-    -- CONCEALMENT
-    --============================================================
     local function resolveParent()
         if Cfg.GuiConcealed then
             if HAS.gethui then
@@ -76,9 +55,6 @@ function G.init(Ctx)
     local old = parent:FindFirstChild("DingusUI")
     if old then pcall(function() old:Destroy() end) end
 
-    --============================================================
-    -- PALETTE
-    --============================================================
     local CLR = {
         bg          = Color3.fromRGB(12, 12, 16),
         bgHeader    = Color3.fromRGB(14, 14, 20),
@@ -92,20 +68,15 @@ function G.init(Ctx)
         navHover    = Color3.fromRGB(22, 22, 30),
         trackOff    = Color3.fromRGB(52, 52, 66),
         border      = Color3.fromRGB(40, 32, 34),
-
         accent      = Color3.fromRGB(220, 90, 70),
-        accentSoft  = Color3.fromRGB(240, 130, 110),
         accentDim   = Color3.fromRGB(150, 60, 50),
-
         green       = Color3.fromRGB(80, 200, 120),
         red         = Color3.fromRGB(220, 70, 80),
         blue        = Color3.fromRGB(70, 130, 200),
         orange      = Color3.fromRGB(210, 140, 80),
-
         text        = Color3.fromRGB(232, 232, 240),
         textDim     = Color3.fromRGB(160, 165, 180),
         textMuted   = Color3.fromRGB(110, 115, 135),
-
         logInfo     = Color3.fromRGB(200, 200, 210),
         logWarn     = Color3.fromRGB(240, 200, 100),
         logError    = Color3.fromRGB(240, 120, 120),
@@ -120,11 +91,8 @@ function G.init(Ctx)
     -- LOG MANAGER
     --============================================================
     local Log = {
-        buffer = {},
-        maxLines = 300,
-        filter = "all",
-        paused = false,
-        pendingUpdate = true,
+        buffer = {}, maxLines = 300, filter = "all",
+        paused = false, pendingUpdate = true,
     }
 
     function Log.add(text, msgType)
@@ -138,10 +106,7 @@ function G.init(Ctx)
         Log.pendingUpdate = true
     end
 
-    function Log.clear()
-        Log.buffer = {}
-        Log.pendingUpdate = true
-    end
+    function Log.clear() Log.buffer = {}; Log.pendingUpdate = true end
 
     function Log.export(filename)
         if not HAS.writefile then return false, "no writefile" end
@@ -196,24 +161,7 @@ function G.init(Ctx)
 
     function FileMgr.refresh()
         FileMgr.files = {}
-        if not HAS.listfiles then
-            local known = {
-                Cfg.ConfigFile or "dingus_config.json",
-                "dingus_boot_log.txt",
-                "dingus_combat_log.txt",
-            }
-            for _, f in ipairs(known) do
-                if HAS.isfile and isfile(f) then
-                    local size = 0
-                    if HAS.readfile then
-                        local ok, content = pcall(readfile, f)
-                        if ok and content then size = #content end
-                    end
-                    table.insert(FileMgr.files, { name = f, size = size })
-                end
-            end
-            return FileMgr.files
-        end
+        if not HAS.listfiles then return FileMgr.files end
         local ok, list = pcall(listfiles, FileMgr.rootFolder)
         if not ok or not list then ok, list = pcall(listfiles) end
         if ok and list then
@@ -233,18 +181,6 @@ function G.init(Ctx)
     function FileMgr.delete(path)
         if not HAS.delfile then return false, "no delfile" end
         return pcall(delfile, path)
-    end
-
-    function FileMgr.read(path)
-        if not HAS.readfile then return nil, "no readfile" end
-        local ok, content = pcall(readfile, path)
-        if not ok then return nil, tostring(content) end
-        return content
-    end
-
-    function FileMgr.write(path, content)
-        if not HAS.writefile then return false, "no writefile" end
-        return pcall(writefile, path, content)
     end
 
     --============================================================
@@ -269,8 +205,7 @@ function G.init(Ctx)
         local all = FileMgr.refresh()
         local prefix = "dingus_config_"
         for _, f in ipairs(all) do
-            local name = f.name or ""
-            local slot = name:match("^" .. prefix .. "(.-)%.json$")
+            local slot = (f.name or ""):match("^" .. prefix .. "(.-)%.json$")
             if slot then table.insert(out, { name = slot, path = f.path, size = f.size }) end
         end
         return out
@@ -282,7 +217,7 @@ function G.init(Ctx)
     end
 
     --============================================================
-    -- ROOT GUI
+    -- ROOT
     --============================================================
     local gui = Instance.new("ScreenGui")
     gui.Name = guiName
@@ -292,8 +227,7 @@ function G.init(Ctx)
     gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     gui.Parent = parent
 
-    -- BIGGER WINDOW
-    local WIN_W, WIN_H = 940, 660
+    local WIN_W, WIN_H = 940, 680
     local HEADER_H     = 48
     local SIDEBAR_W    = 200
     local PAD          = 14
@@ -301,9 +235,6 @@ function G.init(Ctx)
     local ROW_GAP      = 8
     local SCROLL_W     = 10
 
-    --============================================================
-    -- WINDOW
-    --============================================================
     local win = Instance.new("Frame")
     win.Name = "Window"
     win.Size = UDim2.new(0, WIN_W, 0, WIN_H)
@@ -324,7 +255,6 @@ function G.init(Ctx)
     -- HEADER
     --============================================================
     local header = Instance.new("Frame")
-    header.Name = "Header"
     header.Size = UDim2.new(1, 0, 0, HEADER_H)
     header.BackgroundColor3 = CLR.bgHeader
     header.BorderSizePixel = 0
@@ -417,10 +347,9 @@ function G.init(Ctx)
     local minBtn   = mkCtrlBtn("–", -78, Color3.fromRGB(60,60,75), Color3.fromRGB(70,70,90))
 
     --============================================================
-    -- SIDEBAR (scrollable nav)
+    -- SIDEBAR
     --============================================================
     local sidebar = Instance.new("Frame")
-    sidebar.Name = "Sidebar"
     sidebar.Size = UDim2.new(0, SIDEBAR_W, 1, -HEADER_H)
     sidebar.Position = UDim2.new(0, 0, 0, HEADER_H)
     sidebar.BackgroundColor3 = CLR.bgSidebar
@@ -475,7 +404,7 @@ function G.init(Ctx)
     fLbl.Size = UDim2.new(1, -32, 1, 0)
     fLbl.Position = UDim2.new(0, 28, 0, 0)
     fLbl.BackgroundTransparency = 1
-    fLbl.Text = "v32 · idle"
+    fLbl.Text = "v33 · idle"
     fLbl.TextColor3 = CLR.textMuted
     fLbl.TextXAlignment = Enum.TextXAlignment.Left
     fLbl.Font = FONT_B
@@ -483,10 +412,9 @@ function G.init(Ctx)
     fLbl.Parent = sideFooter
 
     --============================================================
-    -- CONTENT CONTAINER
+    -- CONTENT
     --============================================================
     local content = Instance.new("Frame")
-    content.Name = "Content"
     content.Size = UDim2.new(1, -SIDEBAR_W, 1, -HEADER_H)
     content.Position = UDim2.new(0, SIDEBAR_W, 0, HEADER_H)
     content.BackgroundColor3 = CLR.bg
@@ -512,7 +440,6 @@ function G.init(Ctx)
         track.AutoButtonColor = false
         track.Parent = par
         Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
-
         local knob = Instance.new("Frame")
         knob.Size = UDim2.new(0, 18, 0, 18)
         knob.Position = initial and UDim2.new(1, -20, 0.5, -9)
@@ -521,7 +448,6 @@ function G.init(Ctx)
         knob.BorderSizePixel = 0
         knob.Parent = track
         Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
-
         local state = initial
         local function set(v)
             state = v
@@ -586,10 +512,8 @@ function G.init(Ctx)
         t.Font = FONT_B
         t.TextSize = 14
         t.Parent = row
-
-        local d = nil
         if desc and desc ~= "" then
-            d = Instance.new("TextLabel")
+            local d = Instance.new("TextLabel")
             d.Size = UDim2.new(1, -100, 0, 15)
             d.Position = UDim2.new(0, 64, 0, (titleY or 12) + 20)
             d.BackgroundTransparency = 1
@@ -601,7 +525,6 @@ function G.init(Ctx)
             d.TextTruncate = Enum.TextTruncate.AtEnd
             d.Parent = row
         end
-        return t, d
     end
 
     local function mkSection(page, text)
@@ -628,6 +551,21 @@ function G.init(Ctx)
         mkTitleDesc(row, title, desc)
         local sw = mkSwitch(row, St[key], function(v)
             St[key] = v
+            if onChange then pcall(onChange, v) end
+        end)
+        sw.Position = UDim2.new(1, -58, 0.5, -11)
+        sw.ZIndex = 3
+        return row
+    end
+
+    -- Config-backed toggle (reads/writes Cfg instead of St)
+    local function mkCfgToggleRow(page, glyph, title, desc, key, onChange)
+        local row = mkRow(page, ROW_H)
+        mkIcon(row, glyph)
+        mkTitleDesc(row, title, desc)
+        local initial = Cfg[key] ~= false
+        local sw = mkSwitch(row, initial, function(v)
+            Cfg[key] = v
             if onChange then pcall(onChange, v) end
         end)
         sw.Position = UDim2.new(1, -58, 0.5, -11)
@@ -727,7 +665,6 @@ function G.init(Ctx)
         local chev = Instance.new("TextLabel")
         chev.Size = UDim2.new(0, 20, 0, 24)
         chev.Position = UDim2.new(1, -SCROLL_W - 24, 0.5, -12)
-        chev.AnchorPoint = Vector2.new(0, 0)
         chev.BackgroundTransparency = 1
         chev.Text = "›"
         chev.TextColor3 = CLR.textMuted
@@ -743,31 +680,6 @@ function G.init(Ctx)
         hit.MouseButton1Click:Connect(function()
             local ok, err = pcall(cb)
             if not ok then print("[Dingus][btn] " .. title .. ": " .. tostring(err)) end
-        end)
-        return row
-    end
-
-    local function mkInputRow(page, glyph, title, default, onCommit)
-        local row = mkRow(page, ROW_H)
-        mkIcon(row, glyph)
-        mkTitleDesc(row, title, nil, 20)
-
-        local box = Instance.new("TextBox")
-        box.Size = UDim2.new(0, 160, 0, 28)
-        box.Position = UDim2.new(1, -SCROLL_W - 174, 0.5, -14)
-        box.BackgroundColor3 = CLR.bgPanel
-        box.BorderSizePixel = 0
-        box.Text = default or ""
-        box.TextColor3 = CLR.text
-        box.PlaceholderText = "enter..."
-        box.PlaceholderColor3 = CLR.textMuted
-        box.Font = FONT_R
-        box.TextSize = 13
-        box.ClearTextOnFocus = false
-        box.Parent = row
-        Instance.new("UICorner", box).CornerRadius = UDim.new(0, 8)
-        box.FocusLost:Connect(function(enter)
-            if enter and onCommit then pcall(onCommit, box.Text) end
         end)
         return row
     end
@@ -795,7 +707,7 @@ function G.init(Ctx)
     end
 
     --============================================================
-    -- PAGE FACTORY — proper scroll
+    -- PAGES
     --============================================================
     local PAGES = {}
     local NAV   = {}
@@ -817,17 +729,14 @@ function G.init(Ctx)
         p.ScrollingDirection = Enum.ScrollingDirection.Y
         p.ElasticBehavior = Enum.ElasticBehavior.Never
         p.Parent = content
-
         local lay = Instance.new("UIListLayout", p)
         lay.Padding = UDim.new(0, ROW_GAP)
         lay.SortOrder = Enum.SortOrder.LayoutOrder
-
         local pad = Instance.new("UIPadding", p)
         pad.PaddingTop    = UDim.new(0, PAD)
         pad.PaddingLeft   = UDim.new(0, PAD)
         pad.PaddingRight  = UDim.new(0, 6)
         pad.PaddingBottom = UDim.new(0, PAD + 8)
-
         PAGES[name] = p
         return p
     end
@@ -896,7 +805,6 @@ function G.init(Ctx)
                 BackgroundTransparency = a and 0 or 1,
             }):Play()
         end
-
         item.MouseEnter:Connect(function()
             if not isActive then
                 Tween:Create(item, TweenInfo.new(0.12), {
@@ -913,29 +821,25 @@ function G.init(Ctx)
             end
         end)
         item.MouseButton1Click:Connect(function() selectPage(name) end)
-
         NAV[name] = { item = item, setActive = setActive }
         return item
     end
 
-    --============================================================
-    -- TAB REGISTRATION
-    --============================================================
     mkNavItem("◈", "Dashboard", "Dashboard", 1)
     mkNavItem("◆", "Combat",    "Combat",    2)
     mkNavItem("◎", "Targets",   "Targets",   3)
-    mkNavItem("✦", "Quests",    "Quests",    4)
-    mkNavItem("▤", "Config",    "Config",    5)
-    mkNavItem("▥", "Files",     "Files",     6)
-    mkNavItem("≡", "Logs",      "Logs",      7)
-    mkNavItem("⚙", "Settings",  "Settings",  8)
+    mkNavItem("◰", "Chests",    "Chests",    4)  -- NEW
+    mkNavItem("✦", "Quests",    "Quests",    5)
+    mkNavItem("▤", "Config",    "Config",    6)
+    mkNavItem("▥", "Files",     "Files",     7)
+    mkNavItem("≡", "Logs",      "Logs",      8)
+    mkNavItem("⚙", "Settings",  "Settings",  9)
 
     --============================================================
     -- DASHBOARD
     --============================================================
     local pDash = mkPage("Dashboard")
 
-    -- Stat grid
     local grid = Instance.new("Frame")
     grid.Size = UDim2.new(1, -SCROLL_W - 4, 0, 148)
     grid.BackgroundTransparency = 1
@@ -954,7 +858,6 @@ function G.init(Ctx)
         card.LayoutOrder = order
         card.Parent = parent
         Instance.new("UICorner", card).CornerRadius = UDim.new(0, 11)
-
         local l = Instance.new("TextLabel")
         l.Size = UDim2.new(1, -32, 0, 14)
         l.Position = UDim2.new(0, 16, 0, 12)
@@ -965,7 +868,6 @@ function G.init(Ctx)
         l.Font = FONT_B
         l.TextSize = 10
         l.Parent = card
-
         local v = Instance.new("TextLabel")
         v.Size = UDim2.new(1, -32, 0, 26)
         v.Position = UDim2.new(0, 16, 0, 30)
@@ -986,43 +888,22 @@ function G.init(Ctx)
     local svKills  = mkStat(grid, "Kills",  4)
 
     mkSection(pDash, "Control")
-    mkButtonRow(pDash, "▶", "Start Combat",
-        "Enable auto-combat and target acquisition",
-        function() St.cbt = true; print("[Dingus] combat on") end)
-    mkButtonRow(pDash, "■", "Stop Combat",
-        "Halt combat loop",
-        function()
-            St.cbt = false
-            if Ctx.Fly and Ctx.Fly.stop then pcall(Ctx.Fly.stop) end
-            print("[Dingus] combat off")
-        end, true)
-    mkButtonRow(pDash, "◎", "Scan for Bosses",
-        "Force a boss scan; results in F9",
-        function()
-            St.lScn = 0
-            local l = Ctx.Detect.scanBosses()
-            print("[Dingus] found " .. #l .. " bosses")
-        end)
-    mkButtonRow(pDash, "▲", "Force Move To Target",
-        "Teleport above current target",
-        function()
-            if Ctx.Atk and Ctx.Atk.forceMove then Ctx.Atk.forceMove() end
-        end)
-    mkButtonRow(pDash, "↻", "Reset Movers",
-        "Strip BodyMovers from HRP",
-        function()
-            local r = U.hrp()
-            if r then
-                for _, c in ipairs(r:GetChildren()) do
-                    if c:IsA("BodyPosition") or c:IsA("BodyVelocity")
-                        or c:IsA("BodyGyro") or c:IsA("LinearVelocity")
-                        or c:IsA("AlignOrientation") then
-                        c:Destroy()
-                    end
-                end
-                print("[Dingus] movers reset")
-            end
-        end, true)
+    mkButtonRow(pDash, "▶", "Start Combat", "Enable auto-combat", function()
+        St.cbt = true; print("[Dingus] combat on")
+    end)
+    mkButtonRow(pDash, "■", "Stop Combat", "Halt combat loop", function()
+        St.cbt = false
+        if Ctx.Fly and Ctx.Fly.stop then pcall(Ctx.Fly.stop) end
+        print("[Dingus] combat off")
+    end, true)
+    mkButtonRow(pDash, "◎", "Scan for Bosses", "Force a boss scan", function()
+        St.lScn = 0
+        local l = Ctx.Detect.scanBosses(nil, true)
+        print("[Dingus] found " .. #l .. " bosses")
+    end)
+    mkButtonRow(pDash, "▲", "Force Move To Target", "Teleport above target", function()
+        if Ctx.Atk and Ctx.Atk.forceMove then Ctx.Atk.forceMove() end
+    end)
 
     --============================================================
     -- COMBAT
@@ -1030,16 +911,11 @@ function G.init(Ctx)
     local pCombat = mkPage("Combat")
 
     mkSection(pCombat, "Automation")
-    mkToggleRow(pCombat, "✦", "Auto Skill Rotation",
-        "Cycles slot order per F-probe result", "skl")
-    mkToggleRow(pCombat, "◆", "Auto Equip Weapon",
-        "Swaps to first weapon in inventory", "eqp")
-    mkToggleRow(pCombat, "◀", "Auto Retreat",
-        "Dash away when HP drops", "rtr")
-    mkToggleRow(pCombat, "◎", "Stun Punish",
-        "Attack extra fast during stun", "stunPun")
-    mkToggleRow(pCombat, "◇", "Guard Spoof",
-        "Client-side HP / block reinforcement", "gsp")
+    mkToggleRow(pCombat, "✦", "Auto Skill Rotation", "Cycles slot order per F-probe", "skl")
+    mkToggleRow(pCombat, "◆", "Auto Equip Weapon", "Swaps to first weapon", "eqp")
+    mkToggleRow(pCombat, "◀", "Auto Retreat", "Dash away when HP drops", "rtr")
+    mkToggleRow(pCombat, "◎", "Stun Punish", "Attack extra fast during stun", "stunPun")
+    mkToggleRow(pCombat, "◇", "Guard Spoof", "Client-side HP reinforcement", "gsp")
 
     mkSection(pCombat, "Tuning")
     mkSliderRow(pCombat, "◈", "Attack Range", 6, 20,
@@ -1074,28 +950,24 @@ function G.init(Ctx)
     end
 
     mkSection(pTargets, "Bulk")
-    mkButtonRow(pTargets, "◈", "Select All",
-        "Enable every boss in every region",
-        function()
-            if Lists and Lists.setAllBosses then
-                Lists.setAllBosses(true)
-                for name, setter in pairs(TARGET_CHECKBOXES) do
-                    if setter then pcall(setter, true) end
-                end
-                refreshTargetHeader()
+    mkButtonRow(pTargets, "◈", "Select All", "Enable every boss", function()
+        if Lists and Lists.setAllBosses then
+            Lists.setAllBosses(true)
+            for _, setter in pairs(TARGET_CHECKBOXES) do
+                if setter then pcall(setter, true) end
             end
-        end)
-    mkButtonRow(pTargets, "✕", "Clear All",
-        "Disable every boss",
-        function()
-            if Lists and Lists.setAllBosses then
-                Lists.setAllBosses(false)
-                for name, setter in pairs(TARGET_CHECKBOXES) do
-                    if setter then pcall(setter, false) end
-                end
-                refreshTargetHeader()
+            refreshTargetHeader()
+        end
+    end)
+    mkButtonRow(pTargets, "✕", "Clear All", "Disable every boss", function()
+        if Lists and Lists.setAllBosses then
+            Lists.setAllBosses(false)
+            for _, setter in pairs(TARGET_CHECKBOXES) do
+                if setter then pcall(setter, false) end
             end
-        end, true)
+            refreshTargetHeader()
+        end
+    end, true)
 
     if Lists and Lists.bossRegions then
         for _, region in ipairs(Lists.bossRegions) do
@@ -1103,7 +975,6 @@ function G.init(Ctx)
             for _, bossName in ipairs(region.bosses) do
                 local row = mkRow(pTargets, 48)
                 mkIcon(row, "◆")
-
                 local lbl = Instance.new("TextLabel")
                 lbl.Size = UDim2.new(1, -110, 1, 0)
                 lbl.Position = UDim2.new(0, 64, 0, 0)
@@ -1114,16 +985,10 @@ function G.init(Ctx)
                 lbl.Font = FONT_B
                 lbl.TextSize = 13
                 lbl.Parent = row
-
                 local init = true
-                if Lists.isBossEnabled then
-                    init = Lists.isBossEnabled(bossName)
-                end
-
+                if Lists.isBossEnabled then init = Lists.isBossEnabled(bossName) end
                 local sw, setter = mkSwitch(row, init, function(v)
-                    if Lists.setBossEnabled then
-                        Lists.setBossEnabled(bossName, v)
-                    end
+                    if Lists.setBossEnabled then Lists.setBossEnabled(bossName, v) end
                     refreshTargetHeader()
                 end)
                 sw.Position = UDim2.new(1, -SCROLL_W - 6, 0.5, -11)
@@ -1133,8 +998,87 @@ function G.init(Ctx)
             end
         end
     end
-
     refreshTargetHeader()
+
+    --============================================================
+    -- CHESTS (NEW)
+    --============================================================
+    local pChests = mkPage("Chests")
+
+    mkSection(pChests, "Master")
+    mkCfgToggleRow(pChests, "◰", "Enable Chest Collection",
+        "Master switch for all chest/loot operations",
+        "ChestEnabled")
+    mkCfgToggleRow(pChests, "◆", "Collect on Boss Kill",
+        "Run a full multi-pass collection cycle after each kill",
+        "ChestOnKill")
+    mkCfgToggleRow(pChests, "◎", "Passive Sweep While Idle",
+        "Scan and collect when no boss is engaged",
+        "ChestPassive")
+
+    mkSection(pChests, "Collection Methods")
+    mkCfgToggleRow(pChests, "▤", "Use ProximityPrompt",
+        "fireproximityprompt + InputHold fallback",
+        "ChestUseProximity")
+    mkCfgToggleRow(pChests, "▥", "Use ClickDetector",
+        "fireclickdetector on click-triggered containers",
+        "ChestUseClick")
+    mkCfgToggleRow(pChests, "⌨", "Use Physical Key",
+        "Tap T (then E) as a last-resort fallback",
+        "ChestUseKey")
+    mkCfgToggleRow(pChests, "◇", "Skip Locked Containers",
+        "After a failed open, don't retry the same chest for a while",
+        "ChestSkipLocked")
+
+    mkSection(pChests, "Range & Timing")
+    mkSliderRow(pChests, "◈", "Scan Radius", 10, 100,
+        function() return Cfg.ChestRadius or 50 end,
+        function(v) Cfg.ChestRadius = v end, "%.0f")
+    mkSliderRow(pChests, "◆", "Scan Depth", 3, 12,
+        function() return Cfg.ChestScanDepth or 8 end,
+        function(v) Cfg.ChestScanDepth = v end, "%.0f")
+    mkSliderRow(pChests, "▶", "Max Passes", 1, 10,
+        function() return Cfg.ChestMaxPasses or 6 end,
+        function(v) Cfg.ChestMaxPasses = v end, "%.0f")
+    mkSliderRow(pChests, "◀", "Pass Deadline (s)", 3, 20,
+        function() return Cfg.ChestPassDeadline or 12 end,
+        function(v) Cfg.ChestPassDeadline = v end, "%.0f")
+    mkSliderRow(pChests, "◎", "Per-Target Cooldown (s)", 10, 120,
+        function() return Cfg.ChestPerTargetCooldown or 45 end,
+        function(v) Cfg.ChestPerTargetCooldown = v end, "%.0f")
+    mkSliderRow(pChests, "⌛", "Passive Interval (s)", 5, 60,
+        function() return Cfg.ChestPassiveInterval or 15 end,
+        function(v) Cfg.ChestPassiveInterval = v end, "%.0f")
+
+    mkSection(pChests, "Actions")
+    mkButtonRow(pChests, "▶", "Force Collect Now",
+        "Immediately run a full multi-pass cycle",
+        function()
+            if Ctx.Chest and Ctx.Chest.collectAll then
+                local fired, pass = Ctx.Chest.collectAll()
+                print(string.format("[Dingus][Chest] forced · fired=%d passes=%d",
+                    fired, pass))
+            end
+        end)
+    mkButtonRow(pChests, "◈", "Scan Now (Dump to F9)",
+        "List every detected target with kind, name, distance",
+        function()
+            if Ctx.Chest and Ctx.Chest.dump then Ctx.Chest.dump() end
+        end)
+    mkButtonRow(pChests, "✕", "Reset Cooldowns",
+        "Clear skip-lists so failed chests are retried immediately",
+        function()
+            if Ctx.Chest and Ctx.Chest.resetCooldowns then
+                Ctx.Chest.resetCooldowns()
+                print("[Dingus][Chest] cooldowns cleared")
+            end
+        end, true)
+
+    mkSection(pChests, "Live Stats")
+    local chestStats = mkInfo(pChests, 180)
+
+    mkSection(pChests, "Last Scan")
+    local chestTargets = mkInfo(pChests, 140)
 
     --============================================================
     -- QUESTS
@@ -1143,80 +1087,80 @@ function G.init(Ctx)
 
     mkSection(pQuest, "Crow")
     mkToggleRow(pQuest, "✦", "Auto Crow Quests",
-        "Periodically read available crow quests", "crw")
-    mkButtonRow(pQuest, "◆", "Equip Crow",
-        "Find and equip the crow tool",
-        function()
-            local t = Ctx.Scan and Ctx.Scan.findCrowTool and Ctx.Scan.findCrowTool()
+        "Periodically read active quest assignments", "crw")
+    mkButtonRow(pQuest, "◆", "Equip Crow", "Find and equip the crow tool", function()
+        if Ctx.Scan and Ctx.Scan.findCrowTool then
+            local tool = Ctx.Scan.findCrowTool()
             local h = U.hum()
-            if t and h and t:IsA("Tool") then
-                pcall(function() h:EquipTool(t) end)
+            if tool and h and tool:IsA("Tool") then
+                pcall(function() h:EquipTool(tool) end)
                 print("[Dingus] crow equipped")
             end
+        end
+    end)
+    mkButtonRow(pQuest, "◈", "Force Quest Read",
+        "Open crow menu, read quests, close", function()
+            if Ctx.Quest and Ctx.Quest.cycle then
+                local cached = St.questLastCycle
+                St.questLastCycle = 0
+                pcall(Ctx.Quest.cycle)
+                St.questLastCycle = cached
+            end
         end)
-    mkButtonRow(pQuest, "◈", "Summon Crow",
-        "Call the crow with M1",
-        function() U.m1() end)
-    mkButtonRow(pQuest, "☰", "Read Quest Panel",
-        "Scrape current quests from open panel",
-        function()
-            if Ctx.Scan and Ctx.Scan.readCrowQuests then
-                local qs = Ctx.Scan.readCrowQuests()
-                print(string.format("[Dingus][Crow] %d quests: %s",
-                    #qs, table.concat(qs, ", ")))
+    mkButtonRow(pQuest, "▤", "Dump Structure",
+        "Print BossHunts + Assets.Quests to F9", function()
+            if Ctx.Quest and Ctx.Quest.dumpStructure then
+                pcall(Ctx.Quest.dumpStructure)
             end
         end)
 
-    mkSection(pQuest, "Quest Cycle")
-    mkButtonRow(pQuest, "↻", "Run Quest Cycle",
-        "Force a quest discovery pass",
-        function()
-            if Ctx.Quest and Ctx.Quest.doCycle then Ctx.Quest.doCycle() end
-        end)
-
-    local questInfo = mkInfo(pQuest, 130)
+    mkSection(pQuest, "Priority")
+    local questInfo = mkInfo(pQuest, 140)
 
     --============================================================
     -- CONFIG
     --============================================================
     local pConfig = mkPage("Config")
-
     mkSection(pConfig, "Active Slot")
-    mkInputRow(pConfig, "▤", "Slot Name", ConfigMgr.currentSlot, function(text)
-        ConfigMgr.currentSlot = text
-        print("[Dingus][Config] slot = " .. text)
+
+    local slotInput = Instance.new("TextBox")
+    slotInput.Size = UDim2.new(1, -SCROLL_W - 4, 0, 34)
+    slotInput.BackgroundColor3 = CLR.bgInput
+    slotInput.BorderSizePixel = 0
+    slotInput.Text = ConfigMgr.currentSlot
+    slotInput.TextColor3 = CLR.text
+    slotInput.PlaceholderText = "slot name"
+    slotInput.PlaceholderColor3 = CLR.textMuted
+    slotInput.Font = FONT_R
+    slotInput.TextSize = 13
+    slotInput.ClearTextOnFocus = false
+    slotInput.LayoutOrder = nextOrder(pConfig)
+    slotInput.Parent = pConfig
+    Instance.new("UICorner", slotInput).CornerRadius = UDim.new(0, 8)
+    slotInput.FocusLost:Connect(function()
+        ConfigMgr.currentSlot = slotInput.Text
     end)
 
     mkSection(pConfig, "Actions")
-    mkButtonRow(pConfig, "▶", "Save to Slot",
-        "Persist current settings",
-        function()
-            local ok, err = ConfigMgr.saveTo()
-            print("[Dingus][Config] save " .. (ok and "ok" or ("fail: " .. tostring(err))))
-        end)
-    mkButtonRow(pConfig, "◀", "Load from Slot",
-        "Read settings from disk",
-        function()
-            local ok, err = ConfigMgr.loadFrom()
-            print("[Dingus][Config] load " .. (ok and tostring(err) or ("fail: " .. tostring(err))))
-        end)
-    mkButtonRow(pConfig, "✕", "Delete Current Slot",
-        "Remove the slot file",
-        function()
-            local ok = ConfigMgr.deleteSlot(ConfigMgr.currentSlot)
-            print("[Dingus][Config] delete " .. tostring(ok))
-        end, true)
-    mkButtonRow(pConfig, "↻", "Reset to Defaults",
-        "Restore factory settings",
-        function()
-            if Ctx.Cfg and Ctx.Cfg.reset then Ctx.Cfg.reset() end
-            print("[Dingus][Config] reset")
-        end, true)
-    mkButtonRow(pConfig, "≡", "Print Values to F9",
-        "Dump full config to console",
-        function()
-            if Ctx.Cfg and Ctx.Cfg.pretty then print(Ctx.Cfg.pretty()) end
-        end)
+    mkButtonRow(pConfig, "▶", "Save to Slot", "Persist current settings", function()
+        local ok, err = ConfigMgr.saveTo()
+        print("[Dingus][Config] save " .. (ok and "ok" or ("fail: " .. tostring(err))))
+    end)
+    mkButtonRow(pConfig, "◀", "Load from Slot", "Read settings from disk", function()
+        local ok, err = ConfigMgr.loadFrom()
+        print("[Dingus][Config] load " .. (ok and tostring(err) or ("fail: " .. tostring(err))))
+    end)
+    mkButtonRow(pConfig, "✕", "Delete Current Slot", "Remove the slot file", function()
+        local ok = ConfigMgr.deleteSlot(ConfigMgr.currentSlot)
+        print("[Dingus][Config] delete " .. tostring(ok))
+    end, true)
+    mkButtonRow(pConfig, "↻", "Reset to Defaults", "Restore factory settings", function()
+        if Ctx.Cfg and Ctx.Cfg.reset then Ctx.Cfg.reset() end
+        print("[Dingus][Config] reset")
+    end, true)
+    mkButtonRow(pConfig, "≡", "Print Values to F9", "Dump full config", function()
+        if Ctx.Cfg and Ctx.Cfg.pretty then print(Ctx.Cfg.pretty()) end
+    end)
 
     local configInfo = mkInfo(pConfig, 110)
     local slotsInfo  = mkInfo(pConfig, 110)
@@ -1225,21 +1169,15 @@ function G.init(Ctx)
     -- FILES
     --============================================================
     local pFiles = mkPage("Files")
-
     mkSection(pFiles, "Actions")
-    mkButtonRow(pFiles, "↻", "Refresh File List",
-        "Re-scan the Dingus folder",
-        function()
-            FileMgr.refresh()
-            print("[Dingus][Files] refreshed: " .. #FileMgr.files .. " files")
-        end)
-    mkButtonRow(pFiles, "✕", "Delete boot log",
-        "Remove dingus_boot_log.txt",
-        function()
-            local ok = FileMgr.delete("dingus_boot_log.txt")
-            print("[Dingus][Files] delete log: " .. tostring(ok))
-        end, true)
-
+    mkButtonRow(pFiles, "↻", "Refresh File List", "Re-scan Dingus folder", function()
+        FileMgr.refresh()
+        print("[Dingus][Files] refreshed: " .. #FileMgr.files .. " files")
+    end)
+    mkButtonRow(pFiles, "✕", "Delete boot log", "Remove dingus_boot_log.txt", function()
+        local ok = FileMgr.delete("dingus_boot_log.txt")
+        print("[Dingus][Files] delete log: " .. tostring(ok))
+    end, true)
     mkSection(pFiles, "Discovered")
     local filesInfo = mkInfo(pFiles, 260)
 
@@ -1247,8 +1185,6 @@ function G.init(Ctx)
     -- LOGS
     --============================================================
     local pLogs = mkPage("Logs")
-    -- Override: logs page uses fixed height log frame, not list
-    -- Remove the auto layout and add manual positioning
     for _, child in ipairs(pLogs:GetChildren()) do
         if child:IsA("UIPadding") then child:Destroy() end
     end
@@ -1257,10 +1193,10 @@ function G.init(Ctx)
     logPad.PaddingLeft   = UDim.new(0, PAD)
     logPad.PaddingRight  = UDim.new(0, PAD + 4)
     logPad.PaddingBottom = UDim.new(0, PAD)
+    pLogs.ScrollingEnabled = false
 
     local filterRow = Instance.new("Frame")
     filterRow.Size = UDim2.new(1, -SCROLL_W - 8, 0, 34)
-    filterRow.Position = UDim2.new(0, 0, 0, 0)
     filterRow.BackgroundTransparency = 1
     filterRow.Parent = pLogs
 
@@ -1307,9 +1243,7 @@ function G.init(Ctx)
         Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
         b.MouseButton1Click:Connect(cb)
     end
-    mkLogBtn("Clear", 240, 66, function()
-        Log.clear(); print("[Dingus][Log] cleared")
-    end, CLR.red)
+    mkLogBtn("Clear", 240, 66, function() Log.clear(); print("[Dingus][Log] cleared") end, CLR.red)
     mkLogBtn("Pause", 310, 66, function()
         Log.paused = not Log.paused
         print("[Dingus][Log] paused = " .. tostring(Log.paused))
@@ -1348,7 +1282,6 @@ function G.init(Ctx)
     logScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
     logScroll.ScrollingEnabled = true
     logScroll.ScrollingDirection = Enum.ScrollingDirection.Y
-    logScroll.ElasticBehavior = Enum.ElasticBehavior.Never
     logScroll.Parent = logFrame
     local logLay = Instance.new("UIListLayout", logScroll)
     logLay.Padding = UDim.new(0, 3)
@@ -1393,23 +1326,18 @@ function G.init(Ctx)
     local pSettings = mkPage("Settings")
 
     mkSection(pSettings, "Concealment")
-    mkToggleRow(pSettings, "◈", "Concealed Parent",
+    mkCfgToggleRow(pSettings, "◈", "Concealed Parent",
         "Uses gethui/CoreGui. Takes effect on reload.",
-        "GuiConcealed",
-        function(v) Cfg.GuiConcealed = v end)
-    mkToggleRow(pSettings, "◇", "Panic Keybind Enabled",
+        "GuiConcealed")
+    mkCfgToggleRow(pSettings, "◇", "Panic Keybind Enabled",
         "RightCtrl + Backspace hides the GUI",
-        "GuiPanicHide",
-        function(v) Cfg.GuiPanicHide = v end)
-
-    mkButtonRow(pSettings, "⇩", "Panic Hide Now",
-        "Tear down the GUI immediately",
-        function()
-            if gui and gui.Parent then
-                gui.Parent = nil
-                print("[Dingus] GUI hidden (panic)")
-            end
-        end, true)
+        "GuiPanicHide")
+    mkButtonRow(pSettings, "⇩", "Panic Hide Now", "Tear down GUI immediately", function()
+        if gui and gui.Parent then
+            gui.Parent = nil
+            print("[Dingus] GUI hidden (panic)")
+        end
+    end, true)
 
     mkSection(pSettings, "Diagnostics")
     local parentInfo = mkInfo(pSettings, 80)
@@ -1528,61 +1456,82 @@ function G.init(Ctx)
                 local hp = h and string.format("%d/%d",
                     math.floor(h.Health), math.floor(h.MaxHealth)) or "?"
 
+                -- Dashboard
                 local s_state = tostring(St.cbtS or "—")
-                if cache.s_state ~= s_state then
-                    cache.s_state = s_state
-                    svState.Text = s_state
-                end
+                if cache.s_state ~= s_state then cache.s_state = s_state; svState.Text = s_state end
                 local s_tgt = St.tgt and St.tgt.ch.Name or "none"
-                if cache.s_tgt ~= s_tgt then
-                    cache.s_tgt = s_tgt
-                    svTarget.Text = s_tgt
-                end
-                if cache.s_hp ~= hp then
-                    cache.s_hp = hp
-                    svHp.Text = hp
-                end
+                if cache.s_tgt ~= s_tgt then cache.s_tgt = s_tgt; svTarget.Text = s_tgt end
+                if cache.s_hp ~= hp then cache.s_hp = hp; svHp.Text = hp end
                 local s_kill = tostring(St.bKll or 0)
-                if cache.s_kill ~= s_kill then
-                    cache.s_kill = s_kill
-                    svKills.Text = s_kill
-                end
+                if cache.s_kill ~= s_kill then cache.s_kill = s_kill; svKills.Text = s_kill end
 
                 -- Combat info
                 local hitRate = St.aAt > 0 and math.floor(St.aHi / St.aAt * 100) or 0
                 local fInfo = Ctx.Atk and Ctx.Atk.fModeInfo and Ctx.Atk.fModeInfo() or {}
-                local tInfo = Ctx.Atk and Ctx.Atk.telemetry and Ctx.Atk.telemetry() or {}
                 local ci = string.format(
                     "  state: %s  ·  hits: %d/%d (%d%%)\n" ..
-                    "  kills: %d  ·  retreats: %d  ·  skills: %d\n" ..
-                    "  threats: %d  ·  zone: %d  ·  imminent: %d\n" ..
+                    "  kills: %d  ·  retreats: %d\n" ..
+                    "  threats: %d  ·  imminent: %d\n" ..
                     "  F-mode: %s  ·  blocking: %s\n" ..
-                    "  teleports: %d  ·  last gap: %.2fs\n" ..
                     "  hp: %s  ·  atk interval: %.2f",
                     St.cbtS or "—", St.aHi or 0, St.aAt or 0, hitRate,
-                    St.bKll or 0, St.rtrC or 0, St.skC or 0,
-                    St.zn or 0, St.zn or 0, St.imm or 0,
+                    St.bKll or 0, St.rtrC or 0,
+                    St.zn or 0, St.imm or 0,
                     fInfo.isBlock and "BLOCK" or (fInfo.resolved and "SKILL" or "?"),
-                    tostring(fInfo.blocking),
-                    tInfo.teleports or 0, tInfo.lastTeleportGap or 0,
-                    hp, St.aiI or 0)
+                    tostring(fInfo.blocking), hp, St.aiI or 0)
                 if cache.combatInfo ~= ci then cache.combatInfo = ci; combatInfo.Text = ci end
 
-                -- Quest info
+                -- Chests live stats
+                if Ctx.Chest and Ctx.Chest.stats then
+                    local cs = Ctx.Chest.stats()
+                    local csi = string.format(
+                        "  enabled: %s  ·  onKill: %s  ·  passive: %s\n" ..
+                        "  radius: %d studs  ·  scan depth: %d\n" ..
+                        "  sweeps run: %d  ·  total targets: %d\n" ..
+                        "  chests opened: %d\n" ..
+                        "  loot picked: %d  ·  failed: %d  ·  skipped: %d\n" ..
+                        "  last fired: %d  ·  cooldowns: %d\n" ..
+                        "  running: %s",
+                        tostring(cs.enabled), tostring(cs.onKill), tostring(cs.passive),
+                        cs.radius, Cfg.ChestScanDepth or 8,
+                        cs.totalSweeps, cs.lastTargets,
+                        cs.collected, cs.lootCollected, cs.failed, cs.skipped,
+                        cs.lastFired, cs.cooldowns,
+                        tostring(cs.running))
+                    if cache.chestStats ~= csi then cache.chestStats = csi; chestStats.Text = csi end
+
+                    local lines = {}
+                    local targets = Ctx.Chest.lastTargets and Ctx.Chest.lastTargets() or {}
+                    if #targets == 0 then
+                        table.insert(lines, "  (no targets — press Scan Now)")
+                    else
+                        table.insert(lines, string.format("  %d detected:", #targets))
+                        for i = 1, math.min(#targets, 6) do
+                            local t = targets[i]
+                            table.insert(lines, string.format("    [%s] %s @%.0f",
+                                t.kind, (t.name or "?"):gsub("^%s+", ""):sub(1, 28), t.dist))
+                        end
+                        if #targets > 6 then
+                            table.insert(lines, string.format("    ... +%d more", #targets - 6))
+                        end
+                    end
+                    local ct = table.concat(lines, "\n")
+                    if cache.chestTargets ~= ct then cache.chestTargets = ct; chestTargets.Text = ct end
+                end
+
+                -- Quests
                 local qi = string.format(
                     "  crow tool: %s\n" ..
                     "  perched: %s  ·  quests read: %d\n" ..
                     "  player level: %d  ·  hunts: %d\n" ..
-                    "  crow cycles: %d  ·  cards taken: %d\n" ..
-                    "  quest target: %s",
+                    "  crow cycles: %d  ·  cards taken: %d",
                     St.crT and St.crT.Name or "not found",
                     tostring(St.cPrch), St.crQuests and #St.crQuests or 0,
                     St.playerLevel or 0, St.huntCount or 0,
-                    St.crowCycle or 0, St.crowTake or 0,
-                    tostring(St.questTarget or "—"))
+                    St.crowCycle or 0, St.crowTake or 0)
                 if cache.questInfo ~= qi then cache.questInfo = qi; questInfo.Text = qi end
 
-                -- Config info
+                -- Config
                 local slotList = ConfigMgr.listSlots()
                 local cfgi = string.format(
                     "  active slot: %s\n" ..
@@ -1619,8 +1568,7 @@ function G.init(Ctx)
                     "  gethui available: %s\n" ..
                     "  concealed mode: %s",
                     parentKind, guiName,
-                    tostring(HAS.gethui),
-                    tostring(Cfg.GuiConcealed))
+                    tostring(HAS.gethui), tostring(Cfg.GuiConcealed))
                 if cache.parentInfo ~= pi then cache.parentInfo = pi; parentInfo.Text = pi end
 
                 local ri = string.format(
@@ -1634,7 +1582,7 @@ function G.init(Ctx)
                     Lists and #Lists.bosses or 0)
                 if cache.runtimeInfo ~= ri then cache.runtimeInfo = ri; runtimeInfo.Text = ri end
 
-                -- Header status
+                -- Header
                 local bar = string.format("%s · fps %.0f · log %d",
                     St.cbt and "combat" or "idle", St.fps or 60, #Log.buffer)
                 if cache.live ~= bar then cache.live = bar; liveLbl.Text = bar end
@@ -1671,17 +1619,11 @@ function G.init(Ctx)
         end
     end)
 
-    --============================================================
-    -- CLOSE
-    --============================================================
     closeBtn.MouseButton1Click:Connect(function()
         restoreGlobals()
         gui:Destroy()
     end)
 
-    --============================================================
-    -- EXPOSE
-    --============================================================
     G.gui        = gui
     G.win        = win
     G.minimize   = minimize
@@ -1693,8 +1635,8 @@ function G.init(Ctx)
     G.parent     = parent
     G.parentKind = parentKind
 
-    print(string.format("[Dingus][gui] v32 initialized · parent=%s · name=%s",
-        parentKind, guiName))
+    print(string.format("[Dingus][gui] v33 initialized · parent=%s · 9 tabs",
+        parentKind))
 end
 
 return G
