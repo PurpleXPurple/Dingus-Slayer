@@ -1,7 +1,7 @@
 --[[
-    Dingus-Slayer · detect.lua v7
-    Fixes v6 per-iteration throttle. Walk covers all roots unconditionally.
-    Every other v6 feature retained (squared dist, name cache, sticky, etc).
+    Dingus-Slayer · detect.lua v8
+    Fixes v7 shared-iter bug. Multi-container BFS walk.
+    Per-root time+iteration budgets. Walk diagnostics.
 ]]--
 
 local D = {}
@@ -21,20 +21,23 @@ function D.init(Ctx)
         threats = { history = {} },
     }
 
-    local MAX_WALK = 60000
-    local YIELD_EVERY = 500
-    local CAP_WARNED = false
-    local ANIM_TTL = 0.05
+    D.walkStats = {}
+
+    local MAX_DEPTH      = 8
+    local PER_ROOT_MS    = 800         -- per-root wall clock cap
+    local TOTAL_SCAN_MS  = 2500        -- overall cap for one collectHumanoids call
+    local MAX_ITER_ROOT  = 40000       -- per-root iteration cap
+    local YIELD_EVERY    = 2000
+    local BOSS_SCAN_HOT  = 0.3
+    local BOSS_SCAN_WARM = 1.2
+    local ANIM_TTL       = 0.05
     local STICKY_ATTACK_TTL = 0.15
     local PRIORITY_FAIL_LIMIT = 20
-    local BOSS_SCAN_HOT = 0.3
-    local BOSS_SCAN_WARM = 1.2
+    local CAP_WARNED     = false
 
     local priorityFailures = 0
     local targetHistory = { fails = {} }
-    local stickyTarget = nil
-    local stickyScore = 0
-    local stickyTs = 0
+    local stickyTarget, stickyScore, stickyTs = nil, 0, 0
 
     local function now() return os.clock() end
 
@@ -47,48 +50,82 @@ function D.init(Ctx)
     end
 
     --============================================================
-    -- HUMANOID COLLECTOR · v7 batching
+    -- MULTI-CONTAINER ROOT DISCOVERY
     --============================================================
-    local function collectHumanoids(maxDist, filterFn)
-        maxDist = maxDist or 500
-        filterFn = filterFn or function() return true end
-        local maxSq = maxDist * maxDist
+    local CONTAINER_NAMES = {
+        "Humanoids", "NPCs", "Enemies", "Mobs",
+        "Entities", "Units", "Characters", "Monsters",
+    }
 
-        local myHrp = U.hrp()
-        if not myHrp then return {} end
-        local myPos = myHrp.Position
-        local myName = U.Name
-        local out, seen = {}, {}
-        local iter = 0
-
-        -- Always walk all roots. No region shortcut, no early break.
+    local function buildRoots()
         local roots = {}
+        local seenRoot = {}
+
+        -- 1. Regions first (deepest known container)
         local hf = workspace:FindFirstChild("Humanoids")
         if hf then
-            table.insert(roots, { hf, "Humanoids" })
             local regions = hf:FindFirstChild("Regions")
             if regions then
-                table.insert(roots, { regions, "Regions" })
+                table.insert(roots, { regions, "Humanoids.Regions" })
+                seenRoot[regions] = true
+            end
+            table.insert(roots, { hf, "Humanoids" })
+            seenRoot[hf] = true
+        end
+
+        -- 2. Other common containers
+        for _, name in ipairs(CONTAINER_NAMES) do
+            if name ~= "Humanoids" then
+                local c = workspace:FindFirstChild(name)
+                if c and not seenRoot[c] then
+                    table.insert(roots, { c, name })
+                    seenRoot[c] = true
+                end
             end
         end
+
+        -- 3. workspace as last fallback
         table.insert(roots, { workspace, "workspace" })
 
-        for ri = 1, #roots do
-            local root = roots[ri][1]
-            local tag = roots[ri][2]
-            local stack = { { root, 0 } }
+        return roots
+    end
 
-            while #stack > 0 do
-                local item = table.remove(stack)
-                local inst, depth = item[1], item[2]
+    --============================================================
+    -- WALKER · BFS with per-root budgets
+    --============================================================
+    -- Returns: hits count
+    -- Populates `out`, `seen`, `myPos`, `myName`, `maxSq`, `filterFn`
+    local function bfsWalk(root, tag, maxIter, out, seen, myPos, myName,
+                            maxSq, filterFn, totalDeadline)
+        local startT = now()
+        local queue = { { root, 0 } }
+        local head = 1
+        local iter = 0
+        local hits = 0
 
-                if inst and depth <= 8 then
-                    if inst ~= U.Lp.Character and not seen[inst] then
-                        local hum = inst:FindFirstChildOfClass("Humanoid")
-                        if hum and hum.Health > 0 then
-                            local nm = inst.Name
-                            local skip = (nm == myName) or U.isPlayer(inst)
-                            if not skip and filterFn(inst, hum) then
+        while head <= #queue do
+            -- budget checks
+            if (now() - startT) * 1000 > PER_ROOT_MS then break end
+            if now() > totalDeadline then break end
+            if iter >= maxIter then break end
+
+            local item = queue[head]
+            head = head + 1
+            local inst, depth = item[1], item[2]
+
+            if inst and depth <= MAX_DEPTH then
+                if inst ~= U.Lp.Character and not seen[inst] then
+                    local hum = inst:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.Health > 0 then
+                        local nm = inst.Name
+                        if nm ~= myName then
+                            -- only call isPlayer for plausible-player models
+                            -- (has a Player-shaped name and a Head child)
+                            local isP = false
+                            if inst:FindFirstChild("Head") then
+                                isP = U.isPlayer(inst)
+                            end
+                            if not isP and filterFn(inst, hum) then
                                 local hrp = inst:FindFirstChild("HumanoidRootPart")
                                 if hrp then
                                     local dx = myPos.X - hrp.Position.X
@@ -97,39 +134,70 @@ function D.init(Ctx)
                                     local dSq = dx*dx + dy*dy + dz*dz
                                     if dSq <= maxSq then
                                         seen[inst] = true
+                                        hits = hits + 1
                                         table.insert(out, {
-                                            ch = inst, hm = hum, rp = hrp,
-                                            d = dSq, src = tag,
+                                            ch=inst, hm=hum, rp=hrp,
+                                            d=dSq, src=tag,
                                         })
                                     end
                                 end
                             end
                         end
                     end
+                end
 
-                    local ok, kids = pcall(function() return inst:GetChildren() end)
+                if depth < MAX_DEPTH then
+                    local ok, kids = pcall(inst.GetChildren, inst)
                     if ok and kids then
                         for i = 1, #kids do
-                            table.insert(stack, { kids[i], depth + 1 })
+                            queue[#queue + 1] = { kids[i], depth + 1 }
                         end
-                    end
-
-                    iter = iter + 1
-                    if iter >= MAX_WALK then
-                        if not CAP_WARNED then
-                            CAP_WARNED = true
-                            warn("[Dingus][detect] walk cap "..MAX_WALK)
-                        end
-                        break
-                    end
-                    -- batch yield
-                    if iter % YIELD_EVERY == 0 then
-                        task.wait()
                     end
                 end
+
+                iter = iter + 1
+                if iter % YIELD_EVERY == 0 then task.wait() end
             end
-            if iter >= MAX_WALK then break end
         end
+
+        return hits, iter, math.floor((now() - startT) * 1000)
+    end
+
+    --============================================================
+    -- COLLECT HUMANOIDS · v8
+    --============================================================
+    local function collectHumanoids(maxDist, filterFn)
+        maxDist = maxDist or 2000
+        filterFn = filterFn or function() return true end
+        local maxSq = maxDist * maxDist
+
+        local myHrp = U.hrp()
+        if not myHrp then return {} end
+        local myPos = myHrp.Position
+        local myName = U.Name
+
+        local out, seen = {}, {}
+        local totalStart = now()
+        local totalDeadline = totalStart + TOTAL_SCAN_MS / 1000
+
+        local roots = buildRoots()
+        local perRootIter = math.floor(MAX_ITER_ROOT / math.max(1, #roots))
+        local stats = {}
+
+        for ri = 1, #roots do
+            local root, tag = roots[ri][1], roots[ri][2]
+            local hits, iter, ms = bfsWalk(
+                root, tag, perRootIter, out, seen, myPos, myName,
+                maxSq, filterFn, totalDeadline
+            )
+            stats[tag] = { iter = iter, hits = hits, ms = ms }
+            if now() > totalDeadline then
+                stats[tag].cut = true
+                break
+            end
+        end
+
+        D.walkStats = stats
 
         for i = 1, #out do out[i].d = math.sqrt(out[i].d) end
         table.sort(out, function(a, b) return a.d < b.d end)
@@ -154,7 +222,7 @@ function D.init(Ctx)
     end
 
     --============================================================
-    -- SCAN BOSSES
+    -- SCAN BOSSES · 3-tier cache
     --============================================================
     function D.scanBosses(force, includeNonPriority)
         local t = now()
@@ -223,7 +291,7 @@ function D.init(Ctx)
     end
 
     --============================================================
-    -- MOBS · annotated with tier and adjacency
+    -- MOBS
     --============================================================
     function D.scanMobs(force)
         local t = now()
@@ -249,8 +317,7 @@ function D.init(Ctx)
                   or hp >= 500 and "mid" or "weak"
             for j = 1, #bosses do
                 if (bosses[j].rp.Position - m.rp.Position).Magnitude < 40 then
-                    m.adjBoss = true
-                    break
+                    m.adjBoss = true; break
                 end
             end
         end
@@ -279,10 +346,11 @@ function D.init(Ctx)
         local pg = U.Lp:FindFirstChildOfClass("PlayerGui")
         if not pg then cache.ovl.list = {}; return cache.ovl.list end
         local hits, seen = {}, {}
-        local stack = { { pg, 0 } }
+        local queue = { { pg, 0 } }
+        local head = 1
         local iter = 0
-        while #stack > 0 do
-            local item = table.remove(stack)
+        while head <= #queue do
+            local item = queue[head]; head = head + 1
             local inst, d = item[1], item[2]
             if inst and d <= 5 then
                 if inst:IsA("TextLabel") then
@@ -301,10 +369,10 @@ function D.init(Ctx)
                         end
                     end
                 end
-                local okc, kids = pcall(function() return inst:GetChildren() end)
+                local okc, kids = pcall(inst.GetChildren, inst)
                 if okc and kids then
                     for i = 1, #kids do
-                        table.insert(stack, { kids[i], d + 1 })
+                        queue[#queue + 1] = { kids[i], d + 1 }
                     end
                 end
                 iter = iter + 1
@@ -318,7 +386,7 @@ function D.init(Ctx)
     function D.overlayBosses(force) return D.readOverlay(force) end
 
     --============================================================
-    -- ANIMATION COMBINED READ
+    -- ANIMATION
     --============================================================
     local function readAnimState(enemy)
         local t = now()
@@ -554,7 +622,7 @@ function D.init(Ctx)
     function D.clearSticky() stickyTarget = nil; stickyScore = 0; stickyTs = 0 end
 
     --============================================================
-    -- ITEMS + CHESTS (unchanged)
+    -- ITEMS + CHESTS
     --============================================================
     local ITEM_KEYWORDS = {
         "coin","wen","yen","pouch","ore","scrap","ingot","silk","plating",
@@ -583,16 +651,18 @@ function D.init(Ctx)
         end
         return nil
     end
+
     function D.scanItems(radius)
         radius = radius or 50
         local myHrp = U.hrp(); if not myHrp then return {} end
         local myPos = myHrp.Position
         local maxSq = radius * radius
         local out, seen = {}, {}
-        local stack = { { workspace, 0 } }
+        local queue = { { workspace, 0 } }
+        local head = 1
         local iter = 0
-        while #stack > 0 do
-            local item = table.remove(stack)
+        while head <= #queue do
+            local item = queue[head]; head = head + 1
             local inst, depth = item[1], item[2]
             if inst and depth <= 5 then
                 if not seen[inst] and (inst:IsA("Model") or inst:IsA("BasePart")
@@ -616,7 +686,7 @@ function D.init(Ctx)
                     end
                 end
                 for _, c in ipairs(inst:GetChildren()) do
-                    table.insert(stack, { c, depth + 1 })
+                    queue[#queue + 1] = { c, depth + 1 }
                 end
                 iter = iter + 1
                 if iter % YIELD_EVERY == 0 then task.wait() end
@@ -643,16 +713,18 @@ function D.init(Ctx)
         end
         return false
     end
+
     function D.scanChests(radius)
         radius = radius or 50
         local myHrp = U.hrp(); if not myHrp then return {} end
         local myPos = myHrp.Position
         local maxSq = radius * radius
         local out, seen = {}, {}
-        local stack = { { workspace, 0 } }
+        local queue = { { workspace, 0 } }
+        local head = 1
         local iter = 0
-        while #stack > 0 do
-            local item = table.remove(stack)
+        while head <= #queue do
+            local item = queue[head]; head = head + 1
             local inst, depth = item[1], item[2]
             if inst and depth <= 8 then
                 local found, kind, label = false, nil, nil
@@ -686,7 +758,7 @@ function D.init(Ctx)
                     end
                 end
                 for _, c in ipairs(inst:GetChildren()) do
-                    table.insert(stack, { c, depth + 1 })
+                    queue[#queue + 1] = { c, depth + 1 }
                 end
                 iter = iter + 1
                 if iter % YIELD_EVERY == 0 then task.wait() end
@@ -702,7 +774,7 @@ function D.init(Ctx)
     end
 
     --============================================================
-    -- STATS + INVALIDATE + DUMP
+    -- STATS / INVALIDATE / DUMP
     --============================================================
     function D.stats()
         return {
@@ -727,11 +799,21 @@ function D.init(Ctx)
         D.clearSticky()
     end
 
+    function D.walkStats_()
+        return D.walkStats
+    end
+
     function D.dump()
         local t0 = now()
         local list = collectHumanoids(2000, function() return true end)
         local ms = math.floor((now() - t0) * 1000)
         print(string.format("[Dingus][detect] dump: %d humanoids in %dms", #list, ms))
+        print("  per-root stats:")
+        for tag, st in pairs(D.walkStats) do
+            print(string.format("    %-22s iter=%-6d hits=%-3d ms=%-4d%s",
+                tag, st.iter or 0, st.hits or 0, st.ms or 0,
+                st.cut and "  [CUT]" or ""))
+        end
         local n = 0
         for i = 1, #list do
             local e = list[i]
@@ -745,7 +827,7 @@ function D.init(Ctx)
         return #list
     end
 
-    print("[Dingus][detect] v7 initialized · batched walk · all-roots")
+    print("[Dingus][detect] v8 initialized · multi-container BFS")
 end
 
 return D
