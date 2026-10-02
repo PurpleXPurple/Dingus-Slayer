@@ -1,21 +1,32 @@
--- Dingus-Slayer · loader.lua v37
--- Added faction module to manifest.
+-- Dingus-Slayer · loader.lua v38
+-- Fixes the v37 Luau typeof() bug that aborted boot on every executor.
+-- The prior check used `type(game) ~= "table"` — in Luau, type(game) is
+-- "userdata", not "table". That condition was always true, so the loader
+-- errored before doing anything. This version uses typeof().
 
-local VERSION = "v37"
+local VERSION = "v38"
 local REPO_USER = "PurpleXPurple"
 local REPO_NAME = "Dingus-Slayer"
 local REPO_BRANCH = "main"
 
-if type(game) ~= "table" or type(game.GetService) ~= "function" then
-    error("[Dingus] Not a Roblox environment.")
+--================================================================
+-- PREREQUISITE CHECK
+--================================================================
+-- In Luau, `type(game)` is "userdata" and `typeof(game)` is "Instance".
+-- Never compare against "table" for a Roblox global.
+if not game or typeof(game) ~= "Instance" then
+    error("[Dingus] game is nil or not an Instance — not a Roblox environment.")
 end
 if type(loadstring) ~= "function" and type(load) ~= "function" then
-    error("[Dingus] Executor has no loadstring.")
+    error("[Dingus] Executor has no loadstring — cannot boot.")
 end
 if type(game.HttpGet) ~= "function" then
-    error("[Dingus] Executor has no game:HttpGet.")
+    error("[Dingus] Executor has no game:HttpGet — cannot fetch modules.")
 end
 
+--================================================================
+-- EXECUTOR PROBES
+--================================================================
 local function probe(n)
     if type(_G[n]) == "function" then return _G[n] end
     local ok, v = pcall(function() return getfenv()[n] end)
@@ -43,13 +54,16 @@ local F = {
 
 local HTTP_MODE = REQUEST and "request" or "HttpGet"
 
-_G.DINGUS_FN_CACHE = _G.DINGUS_FN_CACHE or {}
-_G.DINGUS_SRC_CACHE = _G.DINGUS_SRC_CACHE or {}
-_G.DINGUS_SESSION = _G.DINGUS_SESSION
+_G.DINGUS_FN_CACHE   = _G.DINGUS_FN_CACHE or {}
+_G.DINGUS_SRC_CACHE  = _G.DINGUS_SRC_CACHE or {}
+_G.DINGUS_SESSION    = _G.DINGUS_SESSION
     or string.format("%04x", math.random(0, 0xFFFF))
 _G.DINGUS_BOOT_COUNT = (_G.DINGUS_BOOT_COUNT or 0) + 1
 local IS_REBOOT = _G.DINGUS_BOOT_COUNT > 1
 
+--================================================================
+-- MANIFEST
+--================================================================
 local MANIFEST = {
     { name = "config",     slots = { "Cfg", "Config" } },
     { name = "lists",      slots = { "Lists" } },
@@ -68,6 +82,9 @@ local MANIFEST = {
     { name = "main",       slots = nil },
 }
 
+--================================================================
+-- CDN CHAIN
+--================================================================
 local CDNS = {
     { label = "github", url = function(n)
         return string.format(
@@ -99,6 +116,9 @@ local function ms() return (os.clock() - T0) * 1000 end
 local function log(msg) print("[Dingus][loader] " .. msg) end
 local function warn2(msg) warn("[Dingus][loader] " .. msg) end
 
+--================================================================
+-- DISK CACHE
+--================================================================
 local function cPath(n) return CACHE_DIR .. "/" .. n .. ".lua" end
 local function cMeta(n) return CACHE_DIR .. "/" .. n .. ".meta" end
 
@@ -121,6 +141,9 @@ local function diskDelete(n)
     pcall(F.delete, cMeta(n))
 end
 
+--================================================================
+-- HTTP
+--================================================================
 local FETCH_BUDGET = 0
 local FETCH_SLOW  = false
 
@@ -133,8 +156,10 @@ local function httpGet(url)
         if ok and type(res) == "table" then
             local body = res.Body or res.body
             local status = res.StatusCode or res.Status or res.status
-            if type(status) == "number" and status >= 200 and status < 300
-               and type(body) == "string" and #body >= MIN_SRC then
+            if type(status) == "number"
+               and status >= 200 and status < 300
+               and type(body) == "string"
+               and #body >= MIN_SRC then
                 FETCH_BUDGET = FETCH_BUDGET + (os.clock() - t0)
                 if os.clock() - t0 > 2 then FETCH_SLOW = true end
                 return body
@@ -162,18 +187,28 @@ local function fetchModule(name)
     return nil, nil
 end
 
+--================================================================
+-- CTX
+--================================================================
 local Ctx = {
     St = {}, Errors = {}, Warnings = {},
     Loaded = {},
-    BootId = _G.DINGUS_SESSION,
+    BootId    = _G.DINGUS_SESSION,
     StartTime = T0,
     BootCount = _G.DINGUS_BOOT_COUNT,
-    Boot = { fetch=0, compile=0, execute=0, reused=0, missed=0, slow=false },
+    Boot = {
+        fetch = 0, compile = 0, execute = 0,
+        reused = 0, missed = 0, slow = false,
+    },
 }
 
+--================================================================
+-- MODULE LOADER
+--================================================================
 local function loadModule(entry)
     local name = entry.name
 
+    -- 1. in-memory cache
     local cachedFn = _G.DINGUS_FN_CACHE[name]
     if cachedFn then
         Ctx.Boot.reused = Ctx.Boot.reused + 1
@@ -185,6 +220,7 @@ local function loadModule(entry)
         end
     end
 
+    -- 2. disk cache, else CDN
     local src = diskRead(name)
     local source = "disk"
     if not src then
@@ -195,6 +231,7 @@ local function loadModule(entry)
         diskWrite(name, src)
     end
 
+    -- 3. compile
     local tc = os.clock()
     local compiler = loadstring or load
     local fn, cerr = compiler(src, "@" .. name .. ".lua")
@@ -205,6 +242,7 @@ local function loadModule(entry)
         return nil, "compile-fail", tostring(cerr)
     end
 
+    -- 4. execute
     local te = os.clock()
     local ok, mod = pcall(fn)
     Ctx.Boot.execute = Ctx.Boot.execute + (os.clock() - te)
@@ -221,14 +259,19 @@ local function loadModule(entry)
     return mod, source
 end
 
+--================================================================
+-- BANNER
+--================================================================
 if not IS_REBOOT then
     print("")
     print(string.rep("═", 62))
     print("  DINGUS-SLAYER · loader " .. VERSION)
     print(string.format("  session %s · %s",
         _G.DINGUS_SESSION, os.date("%Y-%m-%d %H:%M:%S")))
-    print(string.format("  modules=%d · http=%s · cache=%s · executor=%s",
-        #MANIFEST, HTTP_MODE, F.write and "disk+mem" or "mem",
+    print(string.format(
+        "  modules=%d · http=%s · cache=%s · executor=%s",
+        #MANIFEST, HTTP_MODE,
+        F.write and "disk+mem" or "mem",
         tostring(F.id and F.id() or "?")))
     print(string.rep("═", 62))
 else
@@ -236,6 +279,9 @@ else
         _G.DINGUS_BOOT_COUNT, _G.DINGUS_SESSION))
 end
 
+--================================================================
+-- PHASE 1 · LOAD
+--================================================================
 if not IS_REBOOT then
     print("")
     print("----- PHASE 1/4 · LOAD ----------------------------------------")
@@ -269,7 +315,8 @@ for i = 1, #MANIFEST do
         failed = failed + 1
         Ctx.Loaded[entry.name] = false
         table.insert(Ctx.Errors, {
-            stage = entry.name, msg = source or "?",
+            stage = entry.name,
+            msg   = source or "?",
             detail = err,
         })
         if not IS_REBOOT then
@@ -284,6 +331,9 @@ for i = 1, #MANIFEST do
     task.wait()
 end
 
+--================================================================
+-- PHASE 2 · BOOT
+--================================================================
 if not IS_REBOOT then
     print("")
     print("----- PHASE 2/4 · BOOT ----------------------------------------")
@@ -313,13 +363,16 @@ else
     })
 end
 
+--================================================================
+-- PHASE 3 · EXPOSE
+--================================================================
 if not IS_REBOOT then
     print("")
     print("----- PHASE 3/4 · EXPOSE --------------------------------------")
 end
 
 pcall(function() _G.Ctx = Ctx end)
-pcall(function() _G.St = Ctx.St end)
+pcall(function() _G.St  = Ctx.St end)
 for _, k in ipairs({
     "Cfg","Lists","Util","Detect","Scan","Hotbar","Faction","Fly",
     "Spoof","Chest","Quest","Atk","Opt","Gui",
@@ -328,28 +381,32 @@ for _, k in ipairs({
 end
 
 _G.DINGUS_BOOT = {
-    id = _G.DINGUS_SESSION,
-    version = VERSION,
+    id         = _G.DINGUS_SESSION,
+    version    = VERSION,
     boot_count = _G.DINGUS_BOOT_COUNT,
-    ok = bootOk,
-    loaded = loaded,
-    failed = failed,
-    total = #MANIFEST,
-    errors = #Ctx.Errors,
-    warnings = #Ctx.Warnings,
-    elapsed = (os.clock() - T0),
-    fetch = Ctx.Boot.fetch,
-    compile = Ctx.Boot.compile,
-    execute = Ctx.Boot.execute,
-    reused = Ctx.Boot.reused,
+    ok         = bootOk,
+    loaded     = loaded,
+    failed     = failed,
+    total      = #MANIFEST,
+    errors     = #Ctx.Errors,
+    warnings   = #Ctx.Warnings,
+    elapsed    = (os.clock() - T0),
+    fetch      = Ctx.Boot.fetch,
+    compile    = Ctx.Boot.compile,
+    execute    = Ctx.Boot.execute,
+    reused     = Ctx.Boot.reused,
 }
 
+--================================================================
+-- PHASE 4 · NOTIFY
+--================================================================
 if not IS_REBOOT then
     print("")
     print("----- PHASE 4/4 · NOTIFY --------------------------------------")
     task.spawn(function()
         pcall(function()
-            game:GetService("StarterGui"):SetCore("SendNotification", {
+            game:GetService("StarterGui"):SetCore(
+                "SendNotification", {
                 Title = "Dingus-Slayer",
                 Text = string.format("%s · %.1fs · %d/%d",
                     bootOk and "loaded" or "incomplete",
@@ -360,6 +417,9 @@ if not IS_REBOOT then
     end)
 end
 
+--================================================================
+-- SUMMARY
+--================================================================
 if not IS_REBOOT then
     print("")
     print(string.rep("─", 62))
@@ -369,8 +429,10 @@ if not IS_REBOOT then
         loaded, failed, #Ctx.Errors, #Ctx.Warnings))
     print(string.format(
         "  fetch=%.0fms  compile=%.0fms  execute=%.0fms  reused=%d",
-        Ctx.Boot.fetch * 1000, Ctx.Boot.compile * 1000,
-        Ctx.Boot.execute * 1000, Ctx.Boot.reused))
+        Ctx.Boot.fetch   * 1000,
+        Ctx.Boot.compile * 1000,
+        Ctx.Boot.execute * 1000,
+        Ctx.Boot.reused))
     if #Ctx.Errors > 0 then
         print("")
         for _, e in ipairs(Ctx.Errors) do
