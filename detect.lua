@@ -1,3 +1,16 @@
+--[[
+    Dingus-Slayer · detect.lua v3
+    Region-first workspace walk retained from v2 (30k instance cap).
+    New: overlay reader for the top-right boss tracker UI. Provides
+    a fallback boss list when the workspace walk misses hidden or
+    unreplicated bosses (fog, LOD, streaming).
+
+    Overlay cannot provide positions, so it is not used for targeting
+    directly. It is exposed as D.overlayBosses() for GUI display and
+    as a diagnostic — if the workspace reports 0 bosses but the
+    overlay shows 5, something in the scan is broken.
+]]--
+
 local D = {}
 
 function D.init(Ctx)
@@ -10,10 +23,14 @@ function D.init(Ctx)
     local mobCache = { ts = 0, list = {} }
     local humanoidCache = { ts = 0, list = {} }
 
-    -- Hard instance cap per scan — prevents workspace fallback from starving
+    local overlayCache = { ts = 0, list = {} }
+
     local MAX_WALK = 30000
     local CAP_WARNED = false
 
+    --============================================================
+    -- HUMANOID COLLECTOR (unchanged from v2)
+    --============================================================
     local function collectHumanoids(maxDist, filterFn)
         maxDist = maxDist or 500
         filterFn = filterFn or function() return true end
@@ -85,7 +102,9 @@ function D.init(Ctx)
                     if iter >= MAX_WALK then
                         if not CAP_WARNED then
                             CAP_WARNED = true
-                            warn(string.format("[Dingus][detect] walk cap %d hit — workspace fallback in use", MAX_WALK))
+                            warn(string.format(
+                                "[Dingus][detect] walk cap %d hit — workspace fallback in use",
+                                MAX_WALK))
                         end
                         break
                     end
@@ -101,20 +120,102 @@ function D.init(Ctx)
         return out
     end
 
+    --============================================================
+    -- BOSS SCANNER
+    --============================================================
     function D.scanBosses(force)
         local now = U.clock()
         if not force and now - bossCache.ts < Cfg.ScanTTL then
             return bossCache.list
         end
         bossCache.ts = now
+
         local list = collectHumanoids(500, function(inst, hum)
             return L.isBoss(inst.Name)
         end)
+
         bossCache.list = list
         St.ens = list
+
+        -- Diagnostic: if workspace is empty but overlay shows bosses,
+        -- log once so the user knows the scan is missing them.
+        if #list == 0 and (St.overlayBosses and #St.overlayBosses > 0) then
+            if not St._overlayMissWarned then
+                St._overlayMissWarned = true
+                print(string.format(
+                    "[Dingus][detect] workspace scan empty; overlay shows %d boss(es): %s",
+                    #St.overlayBosses, table.concat(St.overlayBosses, ", ")))
+            end
+        else
+            St._overlayMissWarned = false
+        end
+
         return list
     end
 
+    --============================================================
+    -- OVERLAY READER (new in v3)
+    -- Walks PlayerGui at shallow depth looking for TextLabels whose
+    -- text matches a boss name. Screenshot 1 evidence: the top-right
+    -- tracker renders boss names as plain TextLabels.
+    --============================================================
+    function D.readOverlay(force)
+        local now = U.clock()
+        if not force and now - overlayCache.ts < 1.0 then
+            return overlayCache.list
+        end
+        overlayCache.ts = now
+
+        local pg = U.Lp:FindFirstChildOfClass("PlayerGui")
+        if not pg then
+            overlayCache.list = {}
+            return overlayCache.list
+        end
+
+        local hits = {}
+        local seen = {}
+        local stack = { { pg, 0 } }
+        local iter = 0
+
+        while #stack > 0 do
+            local item = table.remove(stack)
+            local inst, d = item[1], item[2]
+            if inst and d <= 5 then
+                if inst:IsA("TextLabel") then
+                    local ok, txt = pcall(function() return inst.Text end)
+                    if ok and type(txt) == "string"
+                        and #txt >= 3 and #txt <= 30 then
+                        if L.isBoss(txt) then
+                            local norm = txt:lower():gsub("^%s+", ""):gsub("%s+$", "")
+                            if not seen[norm] then
+                                seen[norm] = true
+                                hits[#hits+1] = txt
+                            end
+                        end
+                    end
+                end
+                local okc, kids = pcall(function() return inst:GetChildren() end)
+                if okc and kids then
+                    for i = 1, #kids do
+                        table.insert(stack, { kids[i], d + 1 })
+                    end
+                end
+                iter = iter + 1
+                if iter % 2000 == 0 then task.wait() end
+            end
+        end
+
+        overlayCache.list = hits
+        return hits
+    end
+
+    function D.overlayBosses(force)
+        return D.readOverlay(force)
+    end
+
+    --============================================================
+    -- MOB SCANNER
+    --============================================================
     function D.scanMobs(force)
         local now = U.clock()
         if not force and now - mobCache.ts < Cfg.ScanTTL then
@@ -148,6 +249,9 @@ function D.init(Ctx)
         return list
     end
 
+    --============================================================
+    -- THREAT DETECTION (unchanged from v2)
+    --============================================================
     local function isAttackingAnim(enemy)
         local an = enemy.hm:FindFirstChildOfClass("Animator")
         if not an then return false end
@@ -230,6 +334,9 @@ function D.init(Ctx)
         St.imm = imminent
     end
 
+    --============================================================
+    -- BLOCK / STUN DETECTION (unchanged)
+    --============================================================
     function D.isEnemyBlocking(enemy)
         if not enemy or not enemy.ch or not enemy.hm then return false end
         local c = enemy.ch
@@ -357,7 +464,9 @@ function D.init(Ctx)
             for i = 1, #bosses do
                 local b = bosses[i]
                 if b.d <= 40 and D.isEnemyStunned(b) then
-                    if not bestStunned or b.d < bestStunned.d then bestStunned = b end
+                    if not bestStunned or b.d < bestStunned.d then
+                        bestStunned = b
+                    end
                 end
             end
             if bestStunned then return bestStunned, "boss-stunned" end
@@ -372,9 +481,12 @@ function D.init(Ctx)
         bossCache.ts = 0
         mobCache.ts = 0
         humanoidCache.ts = 0
+        overlayCache.ts = 0
         bossCache.list = {}
         mobCache.list = {}
         humanoidCache.list = {}
+        overlayCache.list = {}
+        St._overlayMissWarned = false
     end
 
     function D.stats()
@@ -385,10 +497,11 @@ function D.init(Ctx)
             threats = #St.ths,
             imminent = St.imm,
             zone = St.zn,
+            overlay = #overlayCache.list,
         }
     end
 
-    print("[Dingus][detect] initialized")
+    print("[Dingus][detect] v3 initialized")
 end
 
 return D
