@@ -1,6 +1,5 @@
--- Dingus-Slayer · attack.lua v24
--- Fixes: F-04 (setthreadidentity capability chain).
--- Full Synerox farming loop.
+-- Dingus-Slayer · attack.lua v25
+-- Synerox farm loop + faction-aware targeting + priority weights.
 
 local A = {}
 
@@ -10,9 +9,6 @@ function A.init(Ctx)
     F.AtkRange = F.AtkRange or 60
     F.AtkVerbose = F.AtkVerbose ~= false
 
-    --========================================================
-    -- STATE
-    --========================================================
     S.lockedTarget = nil
     S.targetMob = F.SynTargetMob or S.targetMob or "All"
     S.mobCategory = F.SynMobCategory or S.mobCategory or "All"
@@ -31,20 +27,15 @@ function A.init(Ctx)
     S.lastStateLog = nil
 
     --========================================================
-    -- THREAD IDENTITY HELPER — capability-aware, chain-fallback
+    -- THREAD IDENTITY (capability-aware)
     --========================================================
-    -- Returns (ok, result). Uses elevated identity only when supported.
-    -- Never errors when getthreadidentity is missing.
-    local HAS_IDENTITY = (U.Fn.getthreadidentity ~= nil and U.Fn.setthreadidentity ~= nil)
+    local HAS_IDENTITY = (U.Fn.getthreadidentity ~= nil
+                          and U.Fn.setthreadidentity ~= nil)
 
     local function withIdentity(fn)
-        if not HAS_IDENTITY then
-            return pcall(fn)
-        end
+        if not HAS_IDENTITY then return pcall(fn) end
         local ok, prev = pcall(U.Fn.getthreadidentity)
-        if not ok or prev == nil then
-            return pcall(fn)
-        end
+        if not ok or prev == nil then return pcall(fn) end
         pcall(U.Fn.setthreadidentity, 2)
         local ok2, r = pcall(fn)
         pcall(U.Fn.setthreadidentity, prev)
@@ -52,7 +43,7 @@ function A.init(Ctx)
     end
 
     --========================================================
-    -- GAME MODULE PROBES (Synerox paths)
+    -- GAME MODULE PROBES
     --========================================================
     local function safeRequire(path)
         if not path then return nil end
@@ -98,7 +89,7 @@ function A.init(Ctx)
     end
 
     --========================================================
-    -- FREEZE RECOVERY (Synerox fn11)
+    -- FREEZE RECOVERY
     --========================================================
     local function recoverFreeze()
         local char = U.Lp.Character
@@ -124,7 +115,9 @@ function A.init(Ctx)
 
         pcall(function()
             if hrp then
-                for _, n in ipairs({"skill_stand_still","skill_slow","air_combo_bp"}) do
+                for _, n in ipairs({
+                    "skill_stand_still","skill_slow","air_combo_bp",
+                }) do
                     local c = hrp:FindFirstChild(n)
                     if c then c:Destroy() end
                 end
@@ -214,7 +207,7 @@ function A.init(Ctx)
     end
 
     --========================================================
-    -- PLATFORM (via Ctx.Fly)
+    -- PLATFORM (delegates to Ctx.Fly)
     --========================================================
     local function movePlatform(cf)
         if Ctx.Fly and Ctx.Fly.movePlatform then Ctx.Fly.movePlatform(cf) end
@@ -224,7 +217,7 @@ function A.init(Ctx)
     end
 
     --========================================================
-    -- M1 (Synerox fn13)
+    -- M1
     --========================================================
     local function fireM1(count, trackGuard)
         count = count or 1
@@ -265,18 +258,15 @@ function A.init(Ctx)
     end
 
     --========================================================
-    -- AUTO SKILL (Synerox fn12, 5-tier fallback)
+    -- AUTO SKILL (5-tier fallback)
     --========================================================
-    -- 1. Elevated Attempt_Hold (identity-aware, on capable executors)
-    -- 2. Unelevated Attempt_Hold
-    -- 3. GUI button MouseButton1Down/Up
-    -- 4. U.fireSkill (screen button)
-    -- 5. U.keyDown / U.keyUp
     local function fireAutoSkill()
         if not F.SynAutoSkills then return false end
         if isStunned() then return false end
         local now = U.clock()
-        if now - (S.lastSkillTime or 0) < (F.SynSkillInterval or 1) then return false end
+        if now - (S.lastSkillTime or 0) < (F.SynSkillInterval or 1) then
+            return false
+        end
 
         local SP = Syn.Skill_Provider
         local SC = Syn.Skill_Controller
@@ -297,7 +287,6 @@ function A.init(Ctx)
         S.skillIndex = S.skillIndex + 1
         if not skill then return false end
 
-        -- Tier 1: identity-aware Attempt_Hold
         if HAS_IDENTITY then
             local ok2, flag = withIdentity(function()
                 return SC.Attempt_Hold(skill.Name)
@@ -311,7 +300,6 @@ function A.init(Ctx)
             end
         end
 
-        -- Tier 2: unelevated Attempt_Hold
         local ok3, flag2 = pcall(function() return SC.Attempt_Hold(skill.Name) end)
         if ok3 and flag2 then
             task.delay(0.08, function()
@@ -321,7 +309,6 @@ function A.init(Ctx)
             return true
         end
 
-        -- Tier 3: GUI button
         local pg = U.Lp:FindFirstChildOfClass("PlayerGui")
         local cc = pg and pg:FindFirstChild("ComponentsHolder")
         local bh = cc and cc:FindFirstChild("BottomHolder")
@@ -342,13 +329,11 @@ function A.init(Ctx)
             end
         end
 
-        -- Tier 4: fireSkill (screen button by key label)
         if U.fireSkill and U.fireSkill(skill.Key) then
             S.lastSkillTime = now
             return true
         end
 
-        -- Tier 5: key event
         if skill.Key and Enum.KeyCode[skill.Key] then
             U.keyDown(skill.Key); task.wait(0.04); U.keyUp(skill.Key)
             S.lastSkillTime = now
@@ -358,7 +343,7 @@ function A.init(Ctx)
     end
 
     --========================================================
-    -- MOB SCAN (Synerox fn14)
+    -- MOB SCAN
     --========================================================
     local function findMobs()
         local out = {}
@@ -375,7 +360,8 @@ function A.init(Ctx)
                                 local h = model:FindFirstChildOfClass("Humanoid")
                                 local root = model:FindFirstChild("HumanoidRootPart")
                                     or model:FindFirstChild("Torso")
-                                if h and root and h.Health > 0 and root.Position.Y > -400 then
+                                if h and root and h.Health > 0
+                                   and root.Position.Y > -400 then
                                     table.insert(out, {
                                         Model = model, Root = root, Humanoid = h,
                                         Name = model.Name, Type = tf.Name,
@@ -395,10 +381,12 @@ function A.init(Ctx)
                     local h = model:FindFirstChildOfClass("Humanoid")
                     local root = model:FindFirstChild("HumanoidRootPart")
                         or model:FindFirstChild("Torso")
-                    if h and root and h.Health > 0 and root.Position.Y > -400 then
+                    if h and root and h.Health > 0
+                       and root.Position.Y > -400 then
                         table.insert(out, {
                             Model = model, Root = root, Humanoid = h,
-                            Name = model.Name, Type = model.Name, Region = "Direct",
+                            Name = model.Name, Type = model.Name,
+                            Region = "Direct",
                         })
                     end
                 end
@@ -419,7 +407,8 @@ function A.init(Ctx)
 
     local function nameMatches(selName, mob)
         if not selName or selName == "All"
-           or selName == "All Bosses" or selName == "All Normal Mobs" then
+           or selName == "All Bosses"
+           or selName == "All Normal Mobs" then
             return true
         end
         local s = string.lower(selName)
@@ -432,9 +421,8 @@ function A.init(Ctx)
         local strip = ss:gsub("_%a+", "")
         local tstrip = ts:gsub("_%a+", "")
         local nstrip = ns:gsub("_%a+", "")
-        if tstrip == strip or nstrip == strip or ts == strip or ns == strip then
-            return true
-        end
+        if tstrip == strip or nstrip == strip
+           or ts == strip or ns == strip then return true end
         local wantG = s:find("greater") ~= nil
         local wantL = s:find("lesser") ~= nil
         local hasG = (ts:find("greater") or ns:find("greater")) ~= nil
@@ -465,14 +453,26 @@ function A.init(Ctx)
         if (mob.Humanoid.Health or 0) <= 0 then return false end
         if not mob.Root or not mob.Root.Parent
            or mob.Root.Position.Y <= -400 then return false end
+
+        -- FACTION FILTER (new)
+        if Ctx.Faction and Ctx.Faction.isAutoEnabled
+           and Ctx.Faction.isAutoEnabled() then
+            if not Ctx.Faction.shouldTarget(mob.Name) then
+                return false
+            end
+        end
+
         local isCiv = string.find(string.lower(mob.Type or ""), "civilian")
             or string.find(string.lower(mob.Name or ""), "civilian")
         local wantCiv = type(selName) == "string"
-            and (selName:lower():find("civilian") or selName:lower():find("civil"))
+            and (selName:lower():find("civilian")
+                 or selName:lower():find("civil"))
         if isCiv and not wantCiv then return false end
+
         local isBoss = isBossName(mob)
         if category == "Boss" and not isBoss then return false end
         if category == "Normal" and isBoss then return false end
+
         if type(selName) == "table" then
             if #selName == 0 then return true end
             for _, v in ipairs(selName) do
@@ -481,26 +481,35 @@ function A.init(Ctx)
             return false
         end
         if not nameMatches(selName, mob) then return false end
-        if region and region ~= "All" and mob.Region ~= region then return false end
+        if region and region ~= "All" and mob.Region ~= region then
+            return false
+        end
         return true
     end
 
+    -- Priority-weighted target pick
     local function pickTarget()
         local hrp = U.hrp()
         if not hrp then return nil end
         local mobs = findMobs()
-        local best, bestD = nil, math.huge
+        local best, bestScore = nil, -math.huge
         for _, m in ipairs(mobs) do
             if passesFilter(m, S.targetMob, S.regionFilter, S.mobCategory) then
                 local d = (hrp.Position - m.Root.Position).Magnitude
-                if d < bestD then best, bestD = m, d end
+                local score = -d
+                if Ctx.Faction and Ctx.Faction.priorityWeight then
+                    score = score + (Ctx.Faction.priorityWeight(m.Name) or 0)
+                end
+                if score > bestScore then
+                    best, bestScore = m, score
+                end
             end
         end
         return best
     end
 
     --========================================================
-    -- POSITION AT TARGET
+    -- POSITIONING
     --========================================================
     local function positionAt(mob)
         local hrp = U.hrp()
@@ -536,7 +545,8 @@ function A.init(Ctx)
         local sel = S.selectedBosses
         if type(sel) ~= "table" or #sel <= 1 then return end
         local now = U.clock()
-        if now - (S.bossRotateTime or 0) < (F.SynBossRotationT or 15) then return end
+        if now - (S.bossRotateTime or 0)
+           < (F.SynBossRotationT or 15) then return end
         S.bossRotateTime = now
         S.bossIndex = (S.bossIndex % #sel) + 1
         S.targetMob = sel[S.bossIndex]
@@ -555,12 +565,14 @@ function A.init(Ctx)
 
         local char = U.Lp.Character
         if not char then
-            S.cbtS = "NO_CHAR"; logState("NO_CHAR"); destroyPlatform(); return
+            S.cbtS = "NO_CHAR"; logState("NO_CHAR")
+            destroyPlatform(); return
         end
         local hum = char:FindFirstChildOfClass("Humanoid")
         local hrp = char:FindFirstChild("HumanoidRootPart")
         if not hum or hum.Health <= 0 or not hrp then
-            S.cbtS = "DEAD"; logState("DEAD"); destroyPlatform(); return
+            S.cbtS = "DEAD"; logState("DEAD")
+            destroyPlatform(); return
         end
 
         if isStunned() then
@@ -597,7 +609,8 @@ function A.init(Ctx)
         if not locked and (bossWaiting or mobWaiting) then
             local pos = bossWaiting and S.bossLootPos or S.mobCorpsePos
             local cf = CFrame.new(
-                pos + Vector3.new(0, (F.SynHeightOffset or 3.8) + 0.5, 0), pos)
+                pos + Vector3.new(0, (F.SynHeightOffset or 3.8) + 0.5, 0),
+                pos)
             hrp.CFrame = cf
             hrp.AssemblyLinearVelocity = Vector3.zero
             hrp.AssemblyAngularVelocity = Vector3.zero
@@ -618,7 +631,8 @@ function A.init(Ctx)
 
         if not locked then
             destroyPlatform()
-            if F.SynAutoTravel and S.regionFilter and S.regionFilter ~= "All" then
+            if F.SynAutoTravel and S.regionFilter
+               and S.regionFilter ~= "All" then
                 local rp = L.getRegionPos(S.regionFilter)
                 if rp and (hrp.Position - rp).Magnitude > 80 then
                     hrp.CFrame = CFrame.new(rp + Vector3.new(0, 3, 0))
@@ -742,7 +756,7 @@ function A.init(Ctx)
     end)
 
     print(string.format(
-        "[Dingus][attack] v24 · %s · identity=%s · IH=%s SP=%s SC=%s",
+        "[Dingus][attack] v25 · %s · identity=%s · IH=%s SP=%s SC=%s",
         U.Platform, tostring(HAS_IDENTITY),
         tostring(Syn.InputHandler ~= nil),
         tostring(Syn.Skill_Provider ~= nil),
