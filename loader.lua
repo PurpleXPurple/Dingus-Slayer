@@ -1,76 +1,62 @@
 --[[
-    Dingus-Slayer · loader.lua v26
-    Auto-discovery loader. GitHub contents API + topological sort.
-    Single-pass fetch, no polling, no sleep padding.
+    Dingus-Slayer · loader.lua v27
+    Fetches, compiles, executes, and slots every module.
+    Prints full error text — no more masked "runtime error" lines.
 
-    Discovers every .lua in the repo root, orders modules by dependency
-    (detected by scanning source for `Ctx.<Slot>` references), registers
-    under canonical + alias names, boots main.
-
-    Speed wins vs v25:
-      - No coroutine timeout wrapper (game:HttpGet is synchronous anyway)
-      - No 0.03s inter-file sleeps, no 0.1s inter-phase sleeps
-      - Retry = 2 attempts @ 0.35s (was 3 growing up to ~2s)
-      - No re-fetch of main in phase 3 (single fetch, kept in memory)
-      - No init phase in the loader (main.boot owns init — kills double-init)
-
-    Structural wins:
-      - No hardcoded MANIFEST
-      - No continue_or_break() stub (was broken; module with missing deps
-        still got fetched)
-      - Auto-registers under all alias slot names (Fly + FlyMod etc.)
-      - Kahn topo sort with deterministic alpha tiebreak + cycle fallback
-      - Fallback file list if the GitHub API is unreachable
-      - Post-boot safety net for main.lua's missing fly entry
+    Structure:
+      1. Fetch each module over HTTP
+      2. Compile with loadstring
+      3. Execute to get the returned table
+      4. Slot the table into Ctx under canonical + alias names
+      5. Boot main with the populated Ctx
+      6. Print summary including full error detail
 ]]--
 
 local REPO_USER   = "PurpleXPurple"
 local REPO_NAME   = "Dingus-Slayer"
 local REPO_BRANCH = "main"
-
 local RAW_BASE = string.format(
     "https://raw.githubusercontent.com/%s/%s/%s/",
     REPO_USER, REPO_NAME, REPO_BRANCH
 )
-local API_LIST = string.format(
-    "https://api.github.com/repos/%s/%s/contents/?ref=%s",
-    REPO_USER, REPO_NAME, REPO_BRANCH
-)
 
--- Fallback list — only used if the GitHub API call fails.
-local FALLBACK = {
-    "lists", "config", "utils", "detect", "scanners", "spoofers",
-    "fly", "attack", "optimizers", "gui", "main",
+--============================================================
+-- MANIFEST
+-- name = filename stem · slots = Ctx keys to register under
+--============================================================
+local MANIFEST = {
+    { name = "config",     slots = { "Cfg", "Config" } },
+    { name = "lists",      slots = { "Lists" } },
+    { name = "utils",      slots = { "Util", "Utils", "U" } },
+    { name = "detect",     slots = { "Detect", "D" } },
+    { name = "scanners",   slots = { "Scan", "Scanner", "Scanners" } },
+    { name = "spoofers",   slots = { "Spoof", "Spoofer", "Spoofers" } },
+    { name = "fly",        slots = { "Fly", "FlyMod" } },
+    { name = "attack",     slots = { "Atk", "Attack" } },
+    { name = "optimizers", slots = { "Opt", "Optimizer", "Optimizers" } },
+    { name = "gui",        slots = { "Gui", "GUI" } },
+    { name = "main",       slots = nil },  -- special: booted, not slotted
 }
 
--- Canonical slot + aliases per known module.
--- Consumers use `Ctx.<Slot>`. Aliases preserve backward compat when a
--- consumer was written against a different name (e.g. Fly vs FlyMod).
-local SLOT_MAP = {
-    lists      = { "Lists" },
-    config     = { "Cfg", "Config" },
-    utils      = { "Util", "Utils", "U" },
-    detect     = { "Detect", "D" },
-    scanners   = { "Scan", "Scanner", "Scanners" },
-    spoofers   = { "Spoof", "Spoofer", "Spoofers" },
-    fly        = { "Fly", "FlyMod" },
-    attack     = { "Atk", "Attack" },
-    optimizers = { "Opt", "Optimizer", "Optimizers" },
-    gui        = { "Gui", "GUI" },
-    -- main is special: not stored in a slot, booted last.
-}
-
-local SELF        = "loader"
 local MAX_RETRY   = 2
-local RETRY_DELAY = 0.35
+local RETRY_DELAY = 0.4
 local MIN_SOURCE  = 16
 
+--============================================================
+-- BOOT ID (random hex so multi-session logs are distinguishable)
+--============================================================
+local bootId = string.format("%04x", math.random(0, 0xFFFF))
+
+--============================================================
+-- CONTEXT
+--============================================================
 local Ctx = {
-    St       = {},
-    Errors   = {},
-    Warnings = {},
-    Loaded   = {},
+    St        = {},
+    Errors    = {},
+    Warnings  = {},
+    Loaded    = {},
     StartTime = os.clock(),
+    BootId    = bootId,
 }
 
 --============================================================
@@ -78,14 +64,15 @@ local Ctx = {
 --============================================================
 local function log(level, msg)
     local prefix = "[Dingus][" .. level .. "]"
-    if level == "err" then warn(prefix .. " " .. msg)
-    else print(prefix .. " " .. msg) end
+    if level == "err" then
+        warn(prefix .. " " .. msg)
+    else
+        print(prefix .. " " .. msg)
+    end
 end
 
 local function recordErr(stage, msg, detail)
     table.insert(Ctx.Errors, { stage = stage, msg = msg, detail = detail })
-    log("err", stage .. ": " .. msg ..
-        (detail ~= nil and (" — " .. tostring(detail)) or ""))
 end
 
 local function recordWarn(stage, msg)
@@ -93,301 +80,195 @@ local function recordWarn(stage, msg)
     log("warn", stage .. ": " .. msg)
 end
 
-local function count(t)
-    local c = 0
-    for _ in pairs(t) do c = c + 1 end
-    return c
-end
-
 --============================================================
--- HTTP (no coroutine polling — HttpGet is synchronous)
+-- HTTP
 --============================================================
 local function httpGet(url)
+    local lastErr
     for attempt = 1, MAX_RETRY do
         local ok, res = pcall(function() return game:HttpGet(url, true) end)
         if ok and type(res) == "string" and #res >= MIN_SOURCE then
             return res, nil
         end
+        lastErr = ok and ("short response: " .. tostring(res and #res or "nil"))
+                 or ("raised: " .. tostring(res))
         if attempt < MAX_RETRY then task.wait(RETRY_DELAY) end
     end
-    return nil, "fetch failed after " .. MAX_RETRY .. " attempts"
+    return nil, lastErr
 end
 
 --============================================================
--- DISCOVERY
+-- FETCH + COMPILE + EXECUTE
+-- Returns: table module, or nil + error triple
 --============================================================
-local function discoverFiles()
-    local ok, body = pcall(function() return game:HttpGet(API_LIST, true) end)
-    if not ok or type(body) ~= "string" or #body < 2 then
-        recordWarn("discover", "GitHub API unreachable, using fallback list")
-        return FALLBACK
+local function loadModule(entry)
+    local name = entry.name
+    local url = RAW_BASE .. name .. ".lua"
+
+    -- Fetch
+    local src, fetchErr = httpGet(url)
+    if not src then
+        return nil, "fetch-fail", fetchErr
+    end
+    if string.find(src, "404: Not Found", 1, true) then
+        return nil, "404", url
     end
 
-    local http = game:GetService("HttpService")
-    local okD, data = pcall(function() return http:JSONDecode(body) end)
-    if not okD or type(data) ~= "table" then
-        recordWarn("discover", "API returned non-JSON, using fallback")
-        return FALLBACK
+    -- Compile
+    local fn, compileErr = loadstring(src, "@" .. name .. ".lua")
+    if not fn then
+        return nil, "compile-fail", tostring(compileErr)
     end
 
-    local names = {}
-    for _, item in ipairs(data) do
-        if type(item) == "table" and item.type == "file" then
-            local nm = item.name
-            if type(nm) == "string" and nm:sub(-4) == ".lua" then
-                local stem = nm:sub(1, -5)
-                if stem ~= SELF then
-                    table.insert(names, stem)
-                end
-            end
-        end
+    -- Execute
+    local ok, mod = pcall(fn)
+    if not ok then
+        return nil, "runtime-fail", tostring(mod)
+    end
+    if mod == nil then
+        return nil, "returns-nil", "file missing 'return' at end"
+    end
+    if type(mod) ~= "table" then
+        return nil, "wrong-type", "returned " .. type(mod) .. ", expected table"
     end
 
-    if #names == 0 then
-        recordWarn("discover", "API returned no .lua files, using fallback")
-        return FALLBACK
-    end
-
-    table.sort(names)
-    return names
+    return mod, nil, nil
 end
 
 --============================================================
--- SLOT RESOLUTION
+-- REGISTER SLOTS
 --============================================================
-local function slotsFor(name)
-    local known = SLOT_MAP[name]
-    if known then return known end
-    -- Heuristic: snake_case → PascalCase
-    local pascal = name:gsub("_(%a)", function(c) return c:upper() end)
-    pascal = pascal:sub(1, 1):upper() .. pascal:sub(2)
-    return { pascal }
-end
-
---============================================================
--- DEPENDENCY GRAPH
---============================================================
-local function extractCtxRefs(src)
-    local set = {}
-    for id in src:gmatch("Ctx%.([%a_][%w_]*)") do set[id] = true end
-    return set
-end
-
-local function buildOrder(sources)
-    -- Map every alias → module name
-    local aliasToName = {}
-    for name in pairs(sources) do
-        for _, alias in ipairs(slotsFor(name)) do
-            aliasToName[alias] = name
-        end
+local function registerSlots(mod, slots)
+    if not slots then return end
+    for _, key in ipairs(slots) do
+        Ctx[key] = mod
     end
-
-    -- Deps: name → set of module names it depends on
-    local deps = {}
-    for name, src in pairs(sources) do
-        deps[name] = {}
-        for ref in pairs(extractCtxRefs(src)) do
-            local target = aliasToName[ref]
-            if target and target ~= name then
-                deps[name][target] = true
-            end
-        end
-    end
-
-    -- Kahn's algorithm; ties broken alphabetically for determinism
-    local inDegree = {}
-    local reverse  = {}
-    for name in pairs(sources) do
-        inDegree[name] = inDegree[name] or 0
-        reverse[name]  = reverse[name]  or {}
-    end
-    for name, ds in pairs(deps) do
-        for target in pairs(ds) do
-            inDegree[name] = inDegree[name] + 1
-            reverse[target][name] = true
-        end
-    end
-
-    local ready = {}
-    for name, d in pairs(inDegree) do
-        if d == 0 then table.insert(ready, name) end
-    end
-    table.sort(ready)
-
-    local order = {}
-    while #ready > 0 do
-        local n = table.remove(ready, 1)
-        table.insert(order, n)
-        local newlyReady = {}
-        for dep in pairs(reverse[n] or {}) do
-            inDegree[dep] = inDegree[dep] - 1
-            if inDegree[dep] == 0 then table.insert(newlyReady, dep) end
-        end
-        table.sort(newlyReady)
-        for _, d in ipairs(newlyReady) do table.insert(ready, d) end
-    end
-
-    if #order < count(sources) then
-        -- Cycle — append remaining alphabetically
-        local seen = {}
-        for _, n in ipairs(order) do seen[n] = true end
-        local rest = {}
-        for name in pairs(sources) do
-            if not seen[name] then table.insert(rest, name) end
-        end
-        table.sort(rest)
-        for _, n in ipairs(rest) do table.insert(order, n) end
-        recordWarn("graph", "dependency cycle detected — partial order used")
-    end
-
-    return order, deps
-end
-
---============================================================
--- FETCH + COMPILE
---============================================================
-local function fetchSources(names)
-    local sources = {}
-    for _, name in ipairs(names) do
-        local url = RAW_BASE .. name .. ".lua"
-        local src, e = httpGet(url)
-        if not src then
-            recordErr(name, "fetch failed", e)
-        else
-            sources[name] = src
-        end
-    end
-    return sources
-end
-
-local function compileAll(sources)
-    local compiled = {}
-    for name, src in pairs(sources) do
-        local fn, ce = loadstring(src, "@" .. name .. ".lua")
-        if not fn then
-            recordErr(name, "compile error", ce)
-        else
-            compiled[name] = fn
-        end
-    end
-    return compiled
-end
-
---============================================================
--- REGISTER
---============================================================
-local function registerAll(order, compiled)
-    local mainMod = nil
-    for _, name in ipairs(order) do
-        local fn = compiled[name]
-        if fn then
-            local ok, mod = pcall(fn)
-            if not ok then
-                recordErr(name, "runtime error", mod)
-            elseif mod == nil then
-                recordErr(name, "returned nil — missing 'return' at end")
-            else
-                Ctx.Loaded[name] = true
-                if name == "main" then
-                    mainMod = mod
-                else
-                    for _, alias in ipairs(slotsFor(name)) do
-                        Ctx[alias] = mod
-                    end
-                end
-                log("info", "  + " .. name)
-            end
-        end
-    end
-    return mainMod
 end
 
 --============================================================
 -- BOOT
 --============================================================
-local function bootMain(mainMod)
-    if type(mainMod) ~= "table" or type(mainMod.boot) ~= "function" then
-        recordErr("main", "main must return { boot = function(Ctx) }")
-        return false
+print("=================================================")
+print("  Dingus-Slayer · boot v27 · id=" .. bootId)
+print("  " .. RAW_BASE)
+print("=================================================")
+
+local t0 = os.clock()
+local loadedCount = 0
+local mainMod = nil
+
+for i = 1, #MANIFEST do
+    local entry = MANIFEST[i]
+    local name = entry.name
+
+    -- Load
+    local mod, errKind, errDetail = loadModule(entry)
+
+    if not mod then
+        log("err", string.format("%s — %s%s",
+            name, errKind,
+            errDetail and (" — " .. tostring(errDetail)) or ""))
+        recordErr(name, errKind, errDetail)
+        Ctx.Loaded[name] = false
+    else
+        loadedCount = loadedCount + 1
+        Ctx.Loaded[name] = true
+
+        if name == "main" then
+            mainMod = mod
+            if type(mod.boot) ~= "function" then
+                log("warn", "main has no .boot function")
+                recordWarn("main", "missing .boot")
+            else
+                log("info", "  + " .. name .. " (boot fn present)")
+            end
+        else
+            registerSlots(mod, entry.slots)
+            log("info", "  + " .. name)
+        end
     end
-    local ok, e = pcall(mainMod.boot, Ctx)
-    if not ok then
-        recordErr("main.boot", tostring(e))
-        return false
-    end
-    log("info", "  + main.boot")
-    return true
+
+    task.wait(0.02)
 end
 
 --============================================================
--- POST-BOOT SAFETY
--- main.boot's subsys list omits fly, but attack.lua calls
--- Ctx.Fly.start(). If fly was loaded but never initialized (no .tick
--- function exists yet), init it here so combat doesn't nil-call.
+-- BOOT MAIN
 --============================================================
-local function postBootSafety()
-    if Ctx.Fly
-        and type(Ctx.Fly.init) == "function"
-        and type(Ctx.Fly.tick) ~= "function" then
-        local ok, e = pcall(Ctx.Fly.init, Ctx)
+local bootOk = false
+if mainMod and type(mainMod.boot) == "function" then
+    log("info", "calling main.boot")
+    local ok, err = pcall(mainMod.boot, Ctx)
+    if ok then
+        bootOk = true
+        log("info", "  + main.boot returned cleanly")
+    else
+        log("err", "main.boot raised — " .. tostring(err))
+        recordErr("main.boot", "runtime", tostring(err))
+    end
+elseif not mainMod then
+    log("err", "main module never loaded — cannot boot")
+    recordErr("main", "not-loaded", nil)
+else
+    log("err", "main.boot is not a function")
+    recordErr("main", "no-boot-fn", nil)
+end
+
+--============================================================
+-- POST-BOOT SAFETY (fly)
+-- If fly was loaded but not initialized, init it now.
+--============================================================
+if not bootOk then
+    if Ctx.Fly and type(Ctx.Fly.init) == "function"
+       and type(Ctx.Fly.tick) ~= "function" then
+        local ok, err = pcall(Ctx.Fly.init, Ctx)
         if ok then
-            log("info", "  + fly.init (post-boot safety)")
+            log("info", "  + fly.init (post-boot fallback)")
         else
-            recordWarn("fly.init", "post-boot init failed: " .. tostring(e))
+            log("warn", "fly.init fallback failed: " .. tostring(err))
         end
     end
 end
 
 --============================================================
--- ENTRY
+-- SUMMARY
 --============================================================
-print("=================================================")
-print("  Dingus-Slayer · boot v26")
-print("  " .. RAW_BASE)
-print("=================================================")
-
-local t0 = os.clock()
-
-local names = discoverFiles()
-log("info", string.format("discovered %d modules", #names))
-
-local sources  = fetchSources(names)
-log("info", string.format("fetched %d/%d", count(sources), #names))
-
-local compiled = compileAll(sources)
-log("info", string.format("compiled %d", count(compiled)))
-
-local order, _deps = buildOrder(sources)
-log("info", "load order: " .. table.concat(order, " → "))
-
-local mainMod = registerAll(order, compiled)
-local bootOk  = bootMain(mainMod)
-
-postBootSafety()
-
 local elapsed = os.clock() - t0
 print("=================================================")
-print(string.format("  boot %s in %.2fs",
-    bootOk and "complete" or "incomplete", elapsed))
+print(string.format("  boot %s in %.2fs  ·  %d/%d modules loaded",
+    bootOk and "complete" or "incomplete",
+    elapsed, loadedCount, #MANIFEST))
+print("=================================================")
+
 if #Ctx.Errors > 0 then
     print(string.format("  errors (%d):", #Ctx.Errors))
     for _, e in ipairs(Ctx.Errors) do
-        print(string.format("    [%s] %s", e.stage, e.msg))
+        print(string.format("    [%s] %s%s",
+            e.stage,
+            e.msg,
+            e.detail and (" — " .. tostring(e.detail)) or ""))
     end
+    print("-------------------------------------------------")
 end
+
 if #Ctx.Warnings > 0 then
     print(string.format("  warnings (%d):", #Ctx.Warnings))
     for _, w in ipairs(Ctx.Warnings) do
         print(string.format("    [%s] %s", w.stage, w.msg))
     end
+    print("-------------------------------------------------")
 end
+
 print("=================================================")
 
+--============================================================
+-- NOTIFICATION
+--============================================================
 pcall(function()
     game:GetService("StarterGui"):SetCore("SendNotification", {
         Title = "Dingus-Slayer",
         Text = string.format("%s · %.1fs · %d errors",
-            bootOk and "loaded" or "partial", elapsed, #Ctx.Errors),
+            bootOk and "loaded" or "incomplete",
+            elapsed, #Ctx.Errors),
         Duration = 5,
     })
 end)
