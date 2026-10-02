@@ -1,7 +1,18 @@
 --[[
-    Dingus-Slayer · attack.lua v14
-    ProximityPrompt-driven loot. Boss kill → 8s loot window → next boss.
-    Combo engine, hotbar mutex, telegraph reaction all retained.
+    Dingus-Slayer · attack.lua v15
+    Integrates with: hotbar v2 (item DB), quests v7 (priority), detect v4
+                     (isEnemyAttacking, isEnemyStunned, isEnemyBlocking),
+                     spoofers v3, optimizers v2, gui v32, config v6.
+
+    Highlights:
+      - Weapon equip via Ctx.Hotbar.equipFirstOf("weapon") — no blind taps
+      - Crow equip delegated to quests
+      - Target filtered by Ctx.Quest.isPriority
+      - Combo engine: 4 random orders, all 6 skill slots
+      - ProximityPrompt loot cycle on boss kill (8s deadline)
+      - Critical HP hard retreat + regular retreat threshold
+      - Damage-triggered auto-block + telegraph dodge
+      - Passive loot sweep while idle
 ]]--
 
 local A = {}
@@ -33,7 +44,6 @@ function A.init(Ctx)
     Cfg.SkillKeys      = Cfg.SkillKeys      or { "F", "Z", "X", "C", "V", "B" }
     Cfg.SkillUnlocked  = Cfg.SkillUnlocked  or { true, true, true, true, true, true }
     Cfg.GCDWindow      = Cfg.GCDWindow      or 1.10
-
     Cfg.ComboOrderCount = Cfg.ComboOrderCount or 4
     Cfg.ComboReshuffleN = Cfg.ComboReshuffleN or 3
 
@@ -83,8 +93,6 @@ function A.init(Ctx)
     Cfg.TelegraphWindow    = Cfg.TelegraphWindow    or 0.45
     Cfg.M1MaxHz            = Cfg.M1MaxHz            or 10
 
-    Cfg.WeaponHotbarOrder  = Cfg.WeaponHotbarOrder  or { "3", "4", "1", "5" }
-
     --============================================================
     -- STATE
     --============================================================
@@ -95,13 +103,14 @@ function A.init(Ctx)
     St.lAtk = 0; St.lSkl = 0; St.lEqp = 0; St.lBrt = 0
     St.lDodge = 0; St.lTele = 0; St.lInRangeChase = 0
     St.lStateRefresh = 0; St.lChestScan = 0; St.lChestPassive = 0
-    St.lLootSweep = 0
 
     St.eq = "none"
+    St.eqKey = nil
     St.cbtS = "IDLE"
     St.comboIndex = 0
     St.comboTargetName = nil
     St.swapPending = false
+    St.equipFailCount = 0
 
     St.fIsBlock = false
     St.fModeResolved = false
@@ -118,12 +127,11 @@ function A.init(Ctx)
     St.emergency = false
     St.critical = false
 
-    -- Loot state
     St.chestCollected = 0
     St.lootCollected = 0
     St.lootSkipped = 0
     St.lootPasses = 0
-    St.lootTargetCooldowns = {}   -- [instance] = expiry
+    St.lootTargetCooldowns = {}
 
     St.teleCount = 0; St.teleFail = 0; St.dodgeCount = 0
     St.gcdHits = 0; St.gcdMisses = 0
@@ -190,9 +198,7 @@ function A.init(Ctx)
     local function advanceCombo()
         local order = currentOrder()
         if not order or #order == 0 then
-            St.comboOrderIdx = 1
-            St.comboPos = 1
-            return
+            St.comboOrderIdx = 1; St.comboPos = 1; return
         end
         St.comboPos = St.comboPos + 1
         if St.comboPos > #order then
@@ -238,6 +244,7 @@ function A.init(Ctx)
         St.blockHoldUntil = 0
         St.fModeResolved = false
         St.comboTargetName = nil
+        St.eqKey = nil
         resetCombo()
     end)
 
@@ -272,6 +279,9 @@ function A.init(Ctx)
         return false
     end
 
+    --============================================================
+    -- HOLD PROBE
+    --============================================================
     local function holdProbeOne(idx)
         local override = Cfg.HoldOverride[idx]
         if override ~= nil then return override end
@@ -328,7 +338,7 @@ function A.init(Ctx)
     end
 
     --============================================================
-    -- TOOL
+    -- EQUIPPED TOOL READER · matches hotbar v2's logic
     --============================================================
     local function equippedTool()
         local c = U.Lp.Character
@@ -336,10 +346,18 @@ function A.init(Ctx)
         for _, t in ipairs(c:GetChildren()) do
             if t:IsA("Tool") and not L.isCrow(t.Name) then return t end
         end
-        local rh = c:FindFirstChild("RightHand")
-        if rh then
-            for _, child in ipairs(rh:GetChildren()) do
-                if not L.isCrow(child.Name) then return child end
+        for _, handName in ipairs({"RightHand", "LeftHand"}) do
+            local hand = c:FindFirstChild(handName)
+            if hand then
+                for _, child in ipairs(hand:GetChildren()) do
+                    if child:IsA("BasePart")
+                       or child:IsA("MeshPart")
+                       or child:IsA("Model") then
+                        if not L.isCrow(child.Name) then
+                            return child
+                        end
+                    end
+                end
             end
         end
         return nil
@@ -362,23 +380,34 @@ function A.init(Ctx)
         return out
     end
 
+    --============================================================
+    -- WEAPON EQUIP · delegates to Hotbar v2 item DB
+    --============================================================
     local function equipWeapon()
         if St.swapPending then return end
+
+        -- Skip while quest panel is open (would close it)
         if Ctx.Quest and Ctx.Quest.stats then
             local qs = Ctx.Quest.stats()
             if qs.panelOpen then return end
         end
+
+        -- Skip if hotbar mutex held by another subsystem
         local H = Ctx.Hotbar
         if H and H.isLocked() then return end
+
         local now = U.clock()
         if now - St.lEqp < 1.5 then return end
         St.lEqp = now
+
         local h = U.hum(); if not h then return end
         local current = equippedTool()
         if current and L.isWeapon(current.Name) then
             St.eq = current.Name
             return
         end
+
+        -- Roblox Tool path (rare on PS2)
         for _, t in ipairs(inventoryTools()) do
             if L.isWeapon(t.Name) then
                 St.swapPending = true
@@ -390,21 +419,32 @@ function A.init(Ctx)
                 return
             end
         end
+
+        -- Custom hotbar path via Hotbar v2
         St.swapPending = true
         task.spawn(function()
-            if not H or not H.acquire("attack-weapon", 3.0) then
+            if not H then
                 St.swapPending = false
                 return
             end
-            for _, k in ipairs(Cfg.WeaponHotbarOrder or {"3"}) do
-                pcall(function() U.tap(k) end)
-                task.wait(0.4)
-                local eq = equippedTool()
-                if eq and not L.isCrow(eq.Name) then
-                    St.eq = eq.Name
-                    H.release("attack-weapon")
-                    St.swapPending = false
-                    return
+            if not H.acquire("attack-weapon", 3.0) then
+                St.swapPending = false
+                return
+            end
+
+            local ok, info = H.equipFirstOf("attack-weapon", "weapon", 0.5)
+            if ok then
+                St.eq = info or "weapon"
+                St.eqKey = H.slotOf(info)
+                St.equipFailCount = 0
+                print(string.format("[Dingus][Atk] equipped %s (slot %s)",
+                    tostring(info), tostring(St.eqKey)))
+            else
+                St.equipFailCount = (St.equipFailCount or 0) + 1
+                -- After 3 fails, force a scan on next attempt
+                if St.equipFailCount >= 3 then
+                    if H.scanSlots then H.scanSlots("attack-refresh") end
+                    St.equipFailCount = 0
                 end
             end
             H.release("attack-weapon")
@@ -539,7 +579,7 @@ function A.init(Ctx)
     end
 
     --============================================================
-    -- CHAINED STRIKE
+    -- CHAINED STRIKE (M1/M2)
     --============================================================
     local function doChainedStrike(count)
         count = count or Cfg.ComboBurst
@@ -570,7 +610,7 @@ function A.init(Ctx)
         task.spawn(function()
             task.wait(0.35)
             if not (t and t.hm and t.hm.Parent) then return end
-            local hit = t.hm.History < hpBefore
+            local hit = t.hm.Health < hpBefore
             table.insert(St.rHt, hit)
             if #St.rHt > Cfg.HitWindow then table.remove(St.rHt, 1) end
             if hit then St.aHi = (St.aHi or 0) + 1
@@ -697,14 +737,12 @@ function A.init(Ctx)
             local ok = pcall(fireproximityprompt, prompt)
             if ok then return true end
         end
-        -- Hold duration fallback
         local ok = pcall(function()
             if prompt.InputHoldBegin then prompt:InputHoldBegin() end
             task.wait(prompt.HoldDuration or 0.1)
             if prompt.InputHoldEnd then prompt:InputHoldEnd() end
         end)
         if ok then return true end
-        -- Move + tap T
         local r = U.hrp()
         local pos = promptPos(prompt)
         if r and pos then
@@ -736,12 +774,10 @@ function A.init(Ctx)
         task.wait(0.12)
     end
 
-    -- Single sweep: find all chest+loot prompts within radius, fire them
     local function lootSweep(radius)
         local now = U.clock()
         local prompts = scanPrompts(radius)
         if #prompts == 0 then return 0 end
-
         local fired = 0
         for i = 1, #prompts do
             local p = prompts[i]
@@ -768,7 +804,6 @@ function A.init(Ctx)
         return fired
     end
 
-    -- Full loot cycle after a kill. Deadline-capped.
     local function lootBossDrop()
         if not Cfg.ChestEnabled then return end
         local startT = U.clock()
@@ -794,10 +829,8 @@ function A.init(Ctx)
         if totalFired > 0 then
             print(string.format("[Dingus][Loot] cycle done · fired=%d passes=%d",
                 totalFired, pass))
-        else
-            if Cfg.LootVerbose then
-                print("[Dingus][Loot] no loot found within radius")
-            end
+        elseif Cfg.LootVerbose then
+            print("[Dingus][Loot] no loot found within radius")
         end
     end
 
@@ -811,7 +844,7 @@ function A.init(Ctx)
     end
 
     --============================================================
-    -- TARGET ACQUISITION
+    -- TARGET ACQUISITION · uses Quest priority filter via detect
     --============================================================
     local function acquireTarget()
         local tgt, kind = D.pickTarget()
@@ -957,6 +990,7 @@ function A.init(Ctx)
         local now = U.clock()
         local hpFrac = h.Health / h.MaxHealth
 
+        -- Critical HP hard retreat
         St.critical = hpFrac < Cfg.CriticalHP
         if St.critical and not retreatRunning then
             local nearest = St.ths and St.ths[1]
@@ -978,6 +1012,7 @@ function A.init(Ctx)
             St.partySize = readPartySize()
         end
 
+        -- Damage detection → block trigger
         if St.lastHp > 0 and h.Health < St.lastHp - 0.5 then
             if St.fIsBlock and Cfg.AutoBlockOnDamage then
                 St.damageBlockUntil = now + Cfg.BlockReactionWindow
@@ -987,6 +1022,7 @@ function A.init(Ctx)
 
         if now - St.lBrt > 2.5 then St.lBrt = now; U.tap("L") end
 
+        -- Retreat at regular threshold
         if not St.emergency and St.rtr and hpFrac < Cfg.RetreatHP
            and not retreatRunning then
             local nearest = St.ths and St.ths[1]
@@ -994,7 +1030,7 @@ function A.init(Ctx)
         end
         if retreatRunning then return end
 
-        -- Passive loot — only when no target engaged
+        -- Passive loot while idle
         if Cfg.ChestEnabled and not St.tgt
            and (now - St.lChestPassive) > 15 then
             St.lChestPassive = now
@@ -1043,6 +1079,7 @@ function A.init(Ctx)
             St.threatPeak = now
         end
 
+        -- Long range → teleport
         if dist > Cfg.AtkRange then
             St.cbtS = "TELEPORT"
             releaseBlock()
@@ -1071,6 +1108,7 @@ function A.init(Ctx)
         end
         if St.emergency then forceBlock = false end
 
+        -- Dodge on telegraph
         if not St.emergency then
             local canDodge = (now - St.lDodge) > Cfg.DodgeCooldown
             local telegraph = timeSinceThreat < Cfg.TelegraphWindow
@@ -1196,6 +1234,7 @@ function A.init(Ctx)
             lootSkipped = St.lootSkipped or 0,
             lootPasses = St.lootPasses or 0,
             equipped = St.eq,
+            equipKey = St.eqKey,
             hotbarHolder = holder,
         }
     end
@@ -1214,7 +1253,7 @@ function A.init(Ctx)
     function A.scanPromptsNow()
         local list = scanPrompts(Cfg.LootRadius or 30)
         print(string.format("[Dingus][Loot] %d prompts within radius:", #list))
-        for i = 1, math.min(#list, 10) do
+        for i = 1, math.min(#list, 15) do
             local p = list[i]
             print(string.format("  [%s] %s @ %.0f",
                 p.kind, (p.name or ""):gsub("^%s+", ""), p.dist))
@@ -1222,10 +1261,15 @@ function A.init(Ctx)
         return list
     end
 
+    function A.refreshWeapon()
+        St.lEqp = 0
+        St.equipFailCount = 0
+    end
+
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function() releaseBlock() end)
 
-    print("[Dingus][attack] v14 initialized · ProximityPrompt loot")
+    print("[Dingus][attack] v15 initialized · integrated with hotbar v2")
 end
 
 return A
