@@ -1,14 +1,13 @@
 --[[
-    Dingus-Slayer · config.lua v3
-    Extended PERSIST to cover keys introduced by module refactors:
-      spoofers v3 · fly v2 · scanners v3
-    gsp default flipped to false per audit (spoof was net-negative).
-    No schema change — v2 files load clean.
+    Dingus-Slayer · config.lua v4
+    Adds: FKeyMode, AutoBlock, BlockHoldTTL, BlockProbeWait.
+    No schema break — v3 files load, new keys default in.
+    SkillKeys now has 6 entries (F is slot 1).
 ]]--
 
 local Cfg = {}
 
-Cfg.VERSION = 3
+Cfg.VERSION = 4
 
 -- COMBAT
 Cfg.AtkRange       = 8
@@ -33,7 +32,7 @@ Cfg.ScanTTL        = 1.2
 Cfg.CrowCheckT     = 1.5
 Cfg.QuestCycleT    = 5.0
 
--- HOVER-BEHIND (fly.lua hover geometry)
+-- HOVER-BEHIND
 Cfg.HoverEnabled   = true
 Cfg.HoverDistance  = 8
 Cfg.HoverHeight    = 2
@@ -42,22 +41,32 @@ Cfg.HoverD         = 900
 Cfg.HoverTTL       = 0.05
 Cfg.HoverRecalcT   = 0.15
 
--- UNDERGROUND (legacy; spoofers v3 no longer uses)
+-- UNDERGROUND (legacy)
 Cfg.UGDepth        = 22
 Cfg.UGTrigHP       = 0.55
 Cfg.UGMaxT         = 6
 Cfg.UGClearT       = 1.6
 
--- SKILLS
-Cfg.SkillKeys      = { "Z", "X", "C", "V", "B" }
-Cfg.SkillCooldowns = { 1.2, 2.0, 2.8, 3.6, 6.0 }
-Cfg.RotationOrder  = { 2, 1, 3, 4, 5 }
+-- SKILLS · 6 slots (F at index 1)
+Cfg.SkillKeys      = { "F", "Z", "X", "C", "V", "B" }
+Cfg.SkillCooldowns = { 0.5, 1.2, 2.0, 2.8, 3.6, 6.0 }
+-- Order excludes index 1 by default; auto-tuned at boot.
+Cfg.RotationOrder  = { 2, 3, 4, 5, 6 }
+
+-- F-KEY BEHAVIOR
+-- "auto"  — probe once, cache result
+-- "block" — force block mode (hold-to-block)
+-- "skill" — force skill mode (F joins rotation)
+Cfg.FKeyMode       = "auto"
+Cfg.AutoBlock      = true
+Cfg.BlockHoldTTL   = 0.6    -- seconds to keep holding after threat clears
+Cfg.BlockProbeWait = 0.15   -- seconds to observe after probe tap
 
 -- PULL
 Cfg.PullRange      = 45
 Cfg.MaxPull        = 12
 
--- FLY (fly.lua v2)
+-- FLY
 Cfg.FlySpeed       = 85
 Cfg.FlySpeedBoost  = 40
 Cfg.FlyJitter      = 3
@@ -68,18 +77,18 @@ Cfg.FlyP           = 4000
 Cfg.FlyD           = 1200
 Cfg.FlyArriveDist  = 10
 Cfg.FlyMinSpeed    = 40
-Cfg.FlyParentHead  = false   -- parent BodyMovers to Head vs HRP
-Cfg.FlyDetachCam   = false   -- reset camera subject on stop
-Cfg.FlyVerbose     = false   -- gate 0.5s telemetry print
+Cfg.FlyParentHead  = false
+Cfg.FlyDetachCam   = false
+Cfg.FlyVerbose     = false
 
--- SPOOFERS (spoofers v3)
+-- SPOOFERS
 Cfg.SpoofSpeedMult = 1.25
 Cfg.SpoofJumpMult  = 1.15
 Cfg.SpoofWriteHz   = 5
 Cfg.SpoofAntiKnock = false
 Cfg.SpoofVerbose   = false
 
--- SCANNERS (scanners v3)
+-- SCANNERS
 Cfg.CrowMenuCooldown = 30
 Cfg.CrowScanMinGap   = 0.3
 Cfg.CrowModelTTL     = 2.0
@@ -88,8 +97,6 @@ Cfg.CrowModelTTL     = 2.0
 Cfg.ConfigFile     = "dingus_config.json"
 Cfg.AutoSaveT      = 30
 
--- gsp flipped to false per audit: spoof is net-negative in
--- FilteredEnabled games. Enable manually if you want it.
 Cfg.DefaultToggles = {
     combat  = false,
     skl     = true,
@@ -101,8 +108,8 @@ Cfg.DefaultToggles = {
     hover   = true,
 }
 
--- PERSIST: every key that round-trips to disk. Tables excluded
--- (SkillKeys/Cooldowns/RotationOrder are structural).
+-- PERSIST — every key that round-trips to disk.
+-- Tables excluded (SkillKeys/Cooldowns/RotationOrder are structural).
 local PERSIST = {
     "AtkRange", "AtkInterval", "AtkIntMin", "AtkIntMax",
     "StunAtkInt", "HitWindow",
@@ -119,6 +126,7 @@ local PERSIST = {
     "SpoofSpeedMult", "SpoofJumpMult", "SpoofWriteHz",
     "SpoofAntiKnock", "SpoofVerbose",
     "CrowMenuCooldown", "CrowScanMinGap", "CrowModelTTL",
+    "FKeyMode", "AutoBlock", "BlockHoldTTL", "BlockProbeWait",
 }
 
 local DEFAULTS = {}
