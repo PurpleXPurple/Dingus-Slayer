@@ -1,8 +1,8 @@
--- Dingus-Slayer · config.lua v8
--- Added: full Synerox farm + quest keys to PERSIST.
+-- Dingus-Slayer · config.lua v9
+-- Faction + hotbar persistence added.
 
 local Cfg = {}
-Cfg.VERSION = 8
+Cfg.VERSION = 9
 
 --=== Combat
 Cfg.AtkRange = 8
@@ -26,8 +26,8 @@ Cfg.ComboBurst = 4
 Cfg.ComboGap = 0.11
 Cfg.M1MaxHz = 10
 
---=== Synerox farm (NEW to config — were implicit state in v23)
-Cfg.SynSafeMode         = "Overhead"   -- Overhead | Underground | In Front | Ground
+--=== Synerox farm
+Cfg.SynSafeMode         = "Overhead"
 Cfg.SynHeightOffset     = 3.8
 Cfg.SynDistance         = 2
 Cfg.SynMultiHit         = true
@@ -42,11 +42,18 @@ Cfg.SynAutoTravel       = true
 Cfg.SynTargetLock       = true
 Cfg.SynBossRotationT    = 15
 
---=== Synerox farm — category/mob/region selection
-Cfg.SynMobCategory      = "All"        -- Normal | Boss | All
-Cfg.SynTargetMob        = "All"        -- "All" | name | table (multi-boss)
-Cfg.SynRegionFilter     = "All"        -- "All" | region name
+Cfg.SynMobCategory      = "All"
+Cfg.SynTargetMob        = "All"
+Cfg.SynRegionFilter     = "All"
 Cfg.SynSelectedBosses   = {}
+
+--=== Faction
+Cfg.FactionAuto           = true
+Cfg.FactionManual         = "auto"
+Cfg.FactionIncludeNeutral = true
+Cfg.FactionPriorityUpper  = true
+Cfg.FactionDetectInterval = 8.0
+Cfg.FactionHashiraBoost   = true
 
 --=== Chest
 Cfg.ChestEnabled = true
@@ -105,6 +112,9 @@ Cfg.GuiPanicKey2 = "Backspace"
 Cfg.GuiConcealed = true
 Cfg.GuiPanicHide = true
 
+--=== Hotbar
+Cfg.HotbarSlots = {}
+
 Cfg.DefaultToggles = {
     combat=false, skl=true, eqp=true, rtr=true,
     gsp=false, crw=true, stunPun=true,
@@ -116,7 +126,7 @@ Cfg.AutoSaveOnEdit = true
 Cfg.AutoSaveDebounce = 0.25
 
 local PERSIST = {
-    -- Combat core
+    -- Combat
     "AtkRange","AtkInterval","AtkIntMin","AtkIntMax","StunAtkInt","HitWindow",
     "RunSpeed","RetreatHP","CriticalHP","RetreatDelay","RetreatClearHP",
     "RetreatCooldown","ScanTTL","QuestCycleT","GCDWindow","ComboBurst","ComboGap",
@@ -127,6 +137,9 @@ local PERSIST = {
     "SynBossLootWait","SynMobLootWait","SynAutoTravel","SynTargetLock",
     "SynBossRotationT","SynMobCategory","SynTargetMob","SynRegionFilter",
     "SynSelectedBosses",
+    -- Faction
+    "FactionAuto","FactionManual","FactionIncludeNeutral",
+    "FactionPriorityUpper","FactionDetectInterval","FactionHashiraBoost",
     -- Chest
     "ChestEnabled","ChestLearnMode","ChestOnKill","ChestPassive",
     "ChestPassiveInterval","ChestRadius","ChestReachDist","ChestLootRadius",
@@ -143,6 +156,8 @@ local PERSIST = {
     "CrowMenuCooldown","CrowScanMinGap","CrowModelTTL","CrowCancelLabels",
     -- GUI
     "GuiPanicKey1","GuiPanicKey2","GuiConcealed","GuiPanicHide",
+    -- Hotbar
+    "HotbarSlots",
     -- Save
     "AutoSaveT","AutoSaveOnEdit","AutoSaveDebounce",
 }
