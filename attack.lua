@@ -1,6 +1,15 @@
 --[[
-    Dingus-Slayer · attack.lua v11
-    Hotbar mutex integration. Critical HP retreat. Chest passive tick.
+    Dingus-Slayer · attack.lua v12
+    Combo engine with 4 random skill orders. Uses every skill slot.
+    Retains: hotbar mutex, teleport chase, chest pass, critical retreat,
+    priority filter, damage-triggered block, hold-cast detection.
+
+    Combo engine:
+      - 4 distinct permutations of {1,2,3,4,5,6} generated at boot
+      - Rotation advances on each full combo completion
+      - Between GCD casts, the current combo's next skill fires
+      - Combo resets on target change OR when a full rotation completes
+      - Permutations reshuffle when all 4 have cycled once
 ]]--
 
 local A = {}
@@ -13,6 +22,9 @@ function A.init(Ctx)
     local L = Ctx.Lists
     local RunService = game:GetService("RunService")
 
+    --============================================================
+    -- CONFIG
+    --============================================================
     Cfg.AtkRange       = Cfg.AtkRange       or 8
     Cfg.AtkInterval    = Cfg.AtkInterval    or 0.38
     Cfg.AtkIntMin      = Cfg.AtkIntMin      or 0.22
@@ -28,9 +40,14 @@ function A.init(Ctx)
 
     Cfg.SkillKeys      = Cfg.SkillKeys      or { "F", "Z", "X", "C", "V", "B" }
     Cfg.SkillUnlocked  = Cfg.SkillUnlocked  or { true, true, true, true, true, true }
-    Cfg.RotationOrder  = Cfg.RotationOrder  or { 2, 3, 4, 5, 6 }
 
     Cfg.GCDWindow      = Cfg.GCDWindow      or 1.10
+
+    -- Combo engine
+    Cfg.ComboOrderCount = Cfg.ComboOrderCount or 4     -- how many distinct orders
+    Cfg.ComboReshuffleN = Cfg.ComboReshuffleN or 3     -- reshuffle after N full rotations
+    Cfg.ComboUseF       = Cfg.ComboUseF       ~= false -- include F (block slot) in combos?
+    Cfg.ComboBetweenGap = Cfg.ComboBetweenGap or 0.05 -- extra wait between skills
 
     Cfg.DetectHoldSkills    = Cfg.DetectHoldSkills    ~= false
     Cfg.HoldProbeDuration   = Cfg.HoldProbeDuration   or 1.30
@@ -59,7 +76,6 @@ function A.init(Ctx)
     Cfg.FKeyMode       = Cfg.FKeyMode       or "auto"
     Cfg.AutoBlock      = Cfg.AutoBlock      ~= false
     Cfg.BlockHoldTTL   = Cfg.BlockHoldTTL   or 0.4
-    Cfg.BlockProbeWait = Cfg.BlockProbeWait or 0.15
 
     Cfg.TeleportCd         = Cfg.TeleportCd         or 0.22
     Cfg.TeleportStrike     = Cfg.TeleportStrike     or 4.5
@@ -69,7 +85,6 @@ function A.init(Ctx)
 
     Cfg.ComboBurst         = Cfg.ComboBurst         or 4
     Cfg.ComboGap           = Cfg.ComboGap           or 0.11
-
     Cfg.DodgeCooldown      = Cfg.DodgeCooldown      or 0.65
     Cfg.InRangeChaseT      = Cfg.InRangeChaseT      or 0.22
     Cfg.TelegraphWindow    = Cfg.TelegraphWindow    or 0.45
@@ -77,6 +92,9 @@ function A.init(Ctx)
 
     Cfg.WeaponHotbarOrder  = Cfg.WeaponHotbarOrder  or { "3", "4", "1", "5" }
 
+    --============================================================
+    -- STATE
+    --============================================================
     St.rHt = {}
     St.gcdUntil = 0
     St.aiI = Cfg.AtkInterval
@@ -120,12 +138,122 @@ function A.init(Ctx)
     St.gcdMisses = 0
     St.holdFires = 0
     St.instantFires = 0
+    St.comboFires = 0
+    St.comboRotations = 0
 
     St.breathFrac = 1.0
     St.partySize = 1
 
     local SK_KEYS = Cfg.SkillKeys
+    local SKILL_COUNT = #SK_KEYS
 
+    --============================================================
+    -- COMBO ENGINE
+    --============================================================
+    -- Build a random permutation of skill indices.
+    -- If ComboUseF is false, skip index 1 when it maps to block.
+    local function buildPermutation()
+        local pool = {}
+        for i = 1, SKILL_COUNT do
+            -- If F is block, exclude it from combo
+            if St.fIsBlock and SK_KEYS[i] == "F" then
+                -- skip
+            elseif not Cfg.SkillUnlocked[i] then
+                -- skip locked skills
+            else
+                table.insert(pool, i)
+            end
+        end
+
+        -- Fisher-Yates shuffle
+        for i = #pool, 2, -1 do
+            local j = math.random(1, i)
+            pool[i], pool[j] = pool[j], pool[i]
+        end
+
+        return pool
+    end
+
+    -- Generate N distinct permutations
+    local function buildComboOrders()
+        local orders = {}
+        local seen = {}
+        local attempts = 0
+        while #orders < Cfg.ComboOrderCount and attempts < 50 do
+            attempts = attempts + 1
+            local perm = buildPermutation()
+            local key = table.concat(perm, ",")
+            if not seen[key] and #perm > 0 then
+                seen[key] = true
+                table.insert(orders, perm)
+            end
+        end
+        return orders
+    end
+
+    St.comboOrders = buildComboOrders()
+    St.comboOrderIdx = 1
+    St.comboPos = 1
+    St.comboRotations = 0
+
+    local function logCombos()
+        print("[Dingus][Atk] combo orders built:")
+        for i, order in ipairs(St.comboOrders) do
+            local names = {}
+            for _, idx in ipairs(order) do
+                table.insert(names, SK_KEYS[idx])
+            end
+            print(string.format("  order %d: %s", i, table.concat(names, " → ")))
+        end
+    end
+    logCombos()
+
+    local function currentOrder()
+        return St.comboOrders[St.comboOrderIdx]
+    end
+
+    local function advanceCombo()
+        local order = currentOrder()
+        if not order or #order == 0 then
+            St.comboOrderIdx = 1
+            St.comboPos = 1
+            return
+        end
+
+        St.comboPos = St.comboPos + 1
+
+        if St.comboPos > #order then
+            -- Full rotation complete
+            St.comboRotations = St.comboRotations + 1
+            St.comboOrderIdx = St.comboOrderIdx + 1
+            St.comboPos = 1
+
+            if St.comboOrderIdx > #St.comboOrders then
+                St.comboOrderIdx = 1
+                -- Reshuffle every N rotations
+                if St.comboRotations >= Cfg.ComboReshuffleN then
+                    St.comboOrders = buildComboOrders()
+                    St.comboRotations = 0
+                    print("[Dingus][Atk] combos reshuffled")
+                    logCombos()
+                end
+            end
+        end
+    end
+
+    local function nextSkillIdx()
+        local order = currentOrder()
+        if not order or #order == 0 then return nil end
+        return order[St.comboPos]
+    end
+
+    local function resetCombo()
+        St.comboPos = 1
+    end
+
+    --============================================================
+    -- MOVER SCRUB
+    --============================================================
     local function scrubMovers()
         local r = U.hrp()
         if not r then return end
@@ -147,10 +275,13 @@ function A.init(Ctx)
         St.blocking = false
         St.blockHoldUntil = 0
         St.fModeResolved = false
-        St.comboIndex = 0
         St.comboTargetName = nil
+        resetCombo()
     end)
 
+    --============================================================
+    -- ANIMATION READER
+    --============================================================
     local function readAttackAnim()
         local h = U.hum()
         if not h then return false end
@@ -181,6 +312,9 @@ function A.init(Ctx)
         return false
     end
 
+    --============================================================
+    -- HOLD-SKILL PROBE
+    --============================================================
     local function holdProbeOne(idx)
         local override = Cfg.HoldOverride[idx]
         if override ~= nil then return override end
@@ -209,7 +343,7 @@ function A.init(Ctx)
         St.holdDetecting = true
         print("[Dingus][Atk] probing hold-cast skills...")
         local hold, instant = {}, {}
-        for i = 1, #SK_KEYS do
+        for i = 1, SKILL_COUNT do
             local isHold = holdProbeOne(i)
             St.holdSkills[i] = isHold
             if isHold then table.insert(hold, i)
@@ -218,10 +352,21 @@ function A.init(Ctx)
         end
         print(string.format("[Dingus][Atk] hold: [%s] · instant: [%s]",
             table.concat(hold, ","), table.concat(instant, ",")))
+
+        -- Rebuild combos since F-mode may have resolved
+        St.comboOrders = buildComboOrders()
+        St.comboOrderIdx = 1
+        St.comboPos = 1
+        St.comboRotations = 0
+        logCombos()
+
         St.holdDetected = true
         St.holdDetecting = false
     end
 
+    --============================================================
+    -- BLOCK
+    --============================================================
     local function holdBlock()
         if St.blocking then return end
         St.blocking = true
@@ -234,6 +379,9 @@ function A.init(Ctx)
         U.keyUp("F")
     end
 
+    --============================================================
+    -- TOOL
+    --============================================================
     local function equippedTool()
         local c = U.Lp.Character
         if not c then return nil end
@@ -334,6 +482,9 @@ function A.init(Ctx)
         end)
     end
 
+    --============================================================
+    -- SKILL FIRING
+    --============================================================
     local function gcdReady(now) return now >= St.gcdUntil end
 
     local function fireSkill(idx, now)
@@ -366,7 +517,48 @@ function A.init(Ctx)
         St.gcdUntil = now + Cfg.GCDWindow
         St.gcdHits = St.gcdHits + 1
         St.skC = (St.skC or 0) + 1
+        St.comboFires = St.comboFires + 1
         return true
+    end
+
+    --============================================================
+    -- COMBO-AWARE ROTATION
+    -- Fires the next skill in the current combo order. Advances the
+    -- combo pointer on success. Rebuilds order on target change.
+    --============================================================
+    local function fireCombo(t, hpFrac, now)
+        if not St.skl then return end
+        if not gcdReady(now) then return end
+
+        local order = currentOrder()
+        if not order or #order == 0 then
+            -- No skills available — try to rebuild
+            St.comboOrders = buildComboOrders()
+            St.comboOrderIdx = 1
+            St.comboPos = 1
+            return
+        end
+
+        -- Iterate the current order starting at current position.
+        -- Try up to N skills to find one that fires (in case some are on
+        -- local cooldown or gated).
+        local startPos = St.comboPos
+        local tries = 0
+        local maxTries = #order
+
+        while tries < maxTries do
+            local idx = order[St.comboPos]
+            if idx and fireSkill(idx, now) then
+                St.comboFires = St.comboFires or 0
+                advanceCombo()
+                return true
+            end
+            advanceCombo()
+            tries = tries + 1
+        end
+
+        -- Full loop failed — nothing fires right now
+        return false
     end
 
     local function inPunishWindow(t)
@@ -377,24 +569,9 @@ function A.init(Ctx)
         return false
     end
 
-    local function fireRotation(t, hpFrac, now)
-        if not St.skl then return end
-        if not gcdReady(now) then return end
-
-        local emergency = St.emergency
-        local stunned = t and D.isEnemyStunned and D.isEnemyStunned(t)
-        local punish = inPunishWindow(t)
-        local notThreatened = (St.imm or 0) == 0
-
-        for _, idx in ipairs(Cfg.RotationOrder) do
-            local isUlt = idx >= 5
-            if not isUlt or emergency or stunned or punish or notThreatened then
-                if fireSkill(idx, now) then return true end
-            end
-        end
-        return false
-    end
-
+    --============================================================
+    -- SAFE CFrame
+    --============================================================
     local function safeCFrame(dest, lookAtPos)
         local dx = lookAtPos.X - dest.X
         local dz = lookAtPos.Z - dest.Z
@@ -408,6 +585,9 @@ function A.init(Ctx)
         return CFrame.new(dest)
     end
 
+    --============================================================
+    -- TELEPORT CHASE
+    --============================================================
     local function teleportChase(t, tPos, myPos)
         local r = U.hrp()
         if not r then return false end
@@ -505,6 +685,9 @@ function A.init(Ctx)
         return true
     end
 
+    --============================================================
+    -- CHAINED STRIKE (M1/M2)
+    --============================================================
     local function doChainedStrike(count)
         count = count or Cfg.ComboBurst
         local gap = math.max(Cfg.ComboGap, 1 / Cfg.M1MaxHz)
@@ -521,9 +704,13 @@ function A.init(Ctx)
         St.aAt = (St.aAt or 0) + 1
         local hpBefore = t.hm.Health
 
+        -- Reset combo engine on target change
         if St.comboTargetName ~= t.ch.Name then
             St.comboTargetName = t.ch.Name
-            St.comboIndex = 0
+            resetCombo()
+            print(string.format(
+                "[Dingus][Atk] combo reset for new target: %s",
+                t.ch.Name))
         end
         St.comboIndex = St.comboIndex + 1
 
@@ -562,6 +749,9 @@ function A.init(Ctx)
         return St.aiI * partyAdj
     end
 
+    --============================================================
+    -- BREATH / PARTY
+    --============================================================
     local function readBreath()
         local h = U.hum()
         if h then
@@ -582,6 +772,9 @@ function A.init(Ctx)
         return (ok and count) or 1
     end
 
+    --============================================================
+    -- CHEST COLLECTION
+    --============================================================
     local function isChestName(nm)
         if not nm then return false end
         local l = string.lower(nm)
@@ -686,19 +879,27 @@ function A.init(Ctx)
         end
     end
 
+    --============================================================
+    -- TARGET ACQUISITION
+    --============================================================
     local function acquireTarget()
         local tgt, kind = D.pickTarget()
         St.tgt = tgt
         St.tgtKind = kind
         if tgt then
-            St.comboTargetName = nil
-            St.comboIndex = 0
+            if St.comboTargetName ~= tgt.ch.Name then
+                St.comboTargetName = tgt.ch.Name
+                resetCombo()
+            end
             print(string.format("[Dingus] target %s (%s) @%.0f",
                 tgt.ch.Name, kind, tgt.d))
         end
         return tgt
     end
 
+    --============================================================
+    -- F-MODE
+    --============================================================
     local function resolveFMode()
         if St.fModeResolved then return end
         local mode = Cfg.FKeyMode or "auto"
@@ -711,6 +912,7 @@ function A.init(Ctx)
                 St.fModeResolved = true
                 St.fIsBlock = false
                 print("[Dingus][Atk] F-mode deferred — skill")
+                St.comboOrders = buildComboOrders()
                 return
             end
             local c = U.Lp.Character
@@ -727,13 +929,22 @@ function A.init(Ctx)
                     St.fIsBlock = false
                     print("[Dingus][Atk] F-mode = SKILL")
                 end
+                -- Rebuild combos now that F-mode is known
+                St.comboOrders = buildComboOrders()
+                St.comboOrderIdx = 1
+                St.comboPos = 1
+                logCombos()
             end
         elseif mode == "block" then
             St.fIsBlock = true
             print("[Dingus][Atk] F-mode = BLOCK (config)")
+            St.comboOrders = buildComboOrders()
+            logCombos()
         else
             St.fIsBlock = false
             print("[Dingus][Atk] F-mode = SKILL (config)")
+            St.comboOrders = buildComboOrders()
+            logCombos()
         end
         St.fModeResolved = true
     end
@@ -756,6 +967,9 @@ function A.init(Ctx)
         detectHoldSkills()
     end)
 
+    --============================================================
+    -- RETREAT
+    --============================================================
     local retreatRunning = false
 
     local function startRetreat(from, reason)
@@ -803,6 +1017,9 @@ function A.init(Ctx)
         end)
     end
 
+    --============================================================
+    -- COMBAT TICK
+    --============================================================
     function A.combatTick()
         if not St.cbt then
             St.cbtS = "IDLE"
@@ -825,6 +1042,7 @@ function A.init(Ctx)
         local now = U.clock()
         local hpFrac = h.Health / h.MaxHealth
 
+        -- Critical HP → hard retreat
         St.critical = hpFrac < Cfg.CriticalHP
         if St.critical and not retreatRunning then
             local nearest = St.ths and St.ths[1]
@@ -867,6 +1085,7 @@ function A.init(Ctx)
         end
         if retreatRunning then return end
 
+        -- Passive chest tick
         if Cfg.ChestEnabled
            and (now - St.lChestPassive) > Cfg.ChestPassiveT then
             St.lChestPassive = now
@@ -884,6 +1103,7 @@ function A.init(Ctx)
             end
         end
 
+        -- Target management
         if not St.tgt or not St.tgt.ch.Parent or St.tgt.hm.Health <= 0 then
             if St.tgt then
                 St.kll = (St.kll or 0) + 1
@@ -891,8 +1111,8 @@ function A.init(Ctx)
                 print(string.format("[Dingus] killed %s (%d)",
                     St.tgt.ch.Name, St.bKll))
                 St.tgt = nil
-                St.comboIndex = 0
                 St.comboTargetName = nil
+                resetCombo()
                 releaseBlock()
                 if Cfg.ChestEnabled then
                     pcall(tryCollectChest, now, true)
@@ -936,11 +1156,12 @@ function A.init(Ctx)
             St.threatPeak = now
         end
 
+        -- Long range → teleport
         if dist > Cfg.AtkRange then
             St.cbtS = "TELEPORT"
             releaseBlock()
             teleportChase(t, tPos, myPos)
-            fireRotation(t, hpFrac, now)
+            fireCombo(t, hpFrac, now)
             return
         end
 
@@ -966,6 +1187,7 @@ function A.init(Ctx)
         end
         if St.emergency then forceBlock = false end
 
+        -- Dodge on telegraph
         if not St.emergency then
             local canDodge = (now - St.lDodge) > Cfg.DodgeCooldown
             local telegraph = timeSinceThreat < Cfg.TelegraphWindow
@@ -980,7 +1202,7 @@ function A.init(Ctx)
         if forceBlock then
             St.cbtS = "BLOCK"
             holdBlock()
-            fireRotation(t, hpFrac, now)
+            fireCombo(t, hpFrac, now)
             return
         end
 
@@ -991,14 +1213,14 @@ function A.init(Ctx)
                 St.lAtk = now
                 strike(t, now)
             end
-            fireRotation(t, hpFrac, now)
+            fireCombo(t, hpFrac, now)
             return
         end
 
         if blocking then
             St.cbtS = "BREAK"
             releaseBlock()
-            fireRotation(t, hpFrac, now)
+            fireCombo(t, hpFrac, now)
             if now - St.lAtk > St.aiI * 1.2 then
                 St.lAtk = now
                 strike(t, now)
@@ -1012,9 +1234,12 @@ function A.init(Ctx)
             St.lAtk = now
             strike(t, now)
         end
-        fireRotation(t, hpFrac, now)
+        fireCombo(t, hpFrac, now)
     end
 
+    --============================================================
+    -- PUBLIC
+    --============================================================
     function A.forceScan()
         if D.invalidate then D.invalidate() end
         local list = D.scanBosses(nil, true)
@@ -1041,6 +1266,32 @@ function A.init(Ctx)
         }
     end
 
+    function A.comboInfo()
+        local order = currentOrder()
+        local names = {}
+        if order then
+            for _, idx in ipairs(order) do
+                table.insert(names, SK_KEYS[idx] or tostring(idx))
+            end
+        end
+        return {
+            orders = #St.comboOrders,
+            currentOrderIdx = St.comboOrderIdx,
+            currentPos = St.comboPos,
+            currentOrder = table.concat(names, " → "),
+            rotations = St.comboRotations,
+            totalFires = St.comboFires or 0,
+        }
+    end
+
+    function A.reshuffleCombos()
+        St.comboOrders = buildComboOrders()
+        St.comboOrderIdx = 1
+        St.comboPos = 1
+        St.comboRotations = 0
+        logCombos()
+    end
+
     function A.telemetry()
         local holder = "no-module"
         if Ctx.Hotbar and Ctx.Hotbar.isLocked then
@@ -1055,6 +1306,8 @@ function A.init(Ctx)
             gcdReady    = U.clock() >= St.gcdUntil,
             holdFires   = St.holdFires or 0,
             instantFires = St.instantFires or 0,
+            comboFires  = St.comboFires or 0,
+            comboRotations = St.comboRotations or 0,
             holdSkills  = St.holdSkills,
             emergency   = St.emergency,
             critical    = St.critical,
@@ -1082,7 +1335,7 @@ function A.init(Ctx)
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function() releaseBlock() end)
 
-    print("[Dingus][attack] v11 initialized")
+    print("[Dingus][attack] v12 initialized · combo engine active")
 end
 
 return A
