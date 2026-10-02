@@ -1,22 +1,22 @@
 --[[
-    Dingus-Slayer · quests.lua v1
-    Centralized quest logic. Reads game state, exposes quest routing.
+    Dingus-Slayer · quests.lua v2
+    Read-only quest router. No remotes — the game auto-assigns quests.
 
-    Paths discovered from recon (2026-10-02):
-      ReplicatedStorage.BossHunts              — configs 3-10+
-      ReplicatedStorage.Assets.Quests          — quest item templates
-      ReplicatedStorage.Assets.Chests          — chest templates
-      Players.<me>.PlayerGui.ComponentsHolder  — HUD (crow panel appears on demand)
+    Recon facts (2026-10-02):
+      ReplicatedStorage.BossHunts        — Configuration instances numbered 3-10+
+      ReplicatedStorage.Assets.Quests    — item templates (JewelryBox etc.)
+      ReplicatedStorage.Assets.Chests    — chest templates including World Events Chest
+      Crow panel: passive display, no accept button, timer auto-cycles at 5 slots
 
-    Remote handling:
-      Xeno blocks hookmetamethod. We can't spy.
-      Fallback: probe common remote paths on init, expose the first
-      one that exists. If none, quest acceptance must be manual.
+    Flow:
+      1. Periodically equip crow + M1 to open the menu
+      2. Read assigned quests ("Defeat X" rows)
+      3. Close menu
+      4. Expose priority boss list to attack.lua
+      5. Combat filters targets to priority bosses only
+      6. Menu reopens every QuestCycleT to pick up new assignments
 
-    Integration:
-      attack.lua reads Q.isPriority(bossName) to focus the target list.
-      main.lua calls Q.cycle() from a dedicated scheduler loop.
-      gui.lua can display Q.stats() in the Quests tab.
+    No remote is required. Rewards are auto-collected by the game on kill.
 ]]--
 
 local Q = {}
@@ -30,54 +30,110 @@ function Q.init(Ctx)
     --============================================================
     -- CONFIG
     --============================================================
-    Cfg.QuestAutoAccept       = Cfg.QuestAutoAccept ~= false
-    Cfg.QuestPriority         = Cfg.QuestPriority or "xp"      -- "xp" | "wen" | "time"
-    Cfg.QuestCycleT           = Cfg.QuestCycleT or 5.0
-    Cfg.QuestMaxActive        = Cfg.QuestMaxActive or 5
-    Cfg.QuestMinDuration      = Cfg.QuestMinDuration or 60      -- skip quests expiring in <60s
-    Cfg.QuestRemotePath       = Cfg.QuestRemotePath or ""       -- explicit override
-    Cfg.QuestLogStructure     = Cfg.QuestLogStructure ~= false  -- one-time log
+    Cfg.QuestCycleT         = Cfg.QuestCycleT         or 6.0
+    Cfg.QuestCrowHotbar     = Cfg.QuestCrowHotbar     or "5"
+    Cfg.QuestMenuWait       = Cfg.QuestMenuWait       or 2.0
+    Cfg.QuestLogStructure   = Cfg.QuestLogStructure   ~= false
+    Cfg.QuestPriorityStale  = Cfg.QuestPriorityStale  or 90
+    Cfg.QuestReadOnOpen     = Cfg.QuestReadOnOpen     ~= false
 
     --============================================================
     -- STATE
     --============================================================
-    St.questHunts          = {}
-    St.questAvailable      = {}
-    St.questActive         = {}
-    St.questPriorityBoss   = nil
-    St.questCycleCount     = 0
-    St.questLastCycle      = 0
-    St.questRemote         = nil
-    St.questRemoteName     = "?"
+    St.questPriorityBosses  = {}
+    St.questActiveList      = {}
+    St.questLastRead        = 0
+    St.questLastCycle       = 0
+    St.questCycleCount      = 0
     St.questStructureLogged = false
-    St.questTemplates      = {}
-    St.chestTemplates      = {}
-    St.questMinuteCooldown = 0
+    St.questAvailableCount  = 0
+    St.questMaxSlots        = 5
+    St.questNextMissionAt   = 0
+    St.questPanelOpened     = false
 
-    --============================================================
-    -- FOLDER RESOLUTION (lazy, cached)
-    --============================================================
     local rs = game:GetService("ReplicatedStorage")
-    local folders = {
-        bossHunts = nil,
-        assets    = nil,
-        quests    = nil,
-        chests    = nil,
-    }
 
-    local function resolveFolders()
-        if not folders.bossHunts then
-            folders.bossHunts = rs:FindFirstChild("BossHunts")
+    --============================================================
+    -- FOLDER RESOLUTION
+    --============================================================
+    local function bossHuntsFolder()
+        return rs:FindFirstChild("BossHunts")
+    end
+
+    local function assetsFolder()
+        return rs:FindFirstChild("Assets")
+    end
+
+    --============================================================
+    -- BOSS HUNTS READER
+    --============================================================
+    local function describeConfig(cfg)
+        local fields = {}
+        for _, child in ipairs(cfg:GetChildren()) do
+            local ok, v = pcall(function() return child.Value end)
+            if ok then
+                table.insert(fields, string.format("%s=%s", child.Name, tostring(v)))
+            else
+                table.insert(fields, string.format("%s<%s>", child.Name, child.ClassName))
+            end
         end
-        if not folders.assets then
-            folders.assets = rs:FindFirstChild("Assets")
+        return table.concat(fields, " ")
+    end
+
+    function Q.readHunts()
+        local folder = bossHuntsFolder()
+        if not folder then return {} end
+
+        local out = {}
+        local firstStructure = nil
+        for _, cfg in ipairs(folder:GetChildren()) do
+            if cfg:IsA("Configuration") then
+                local entry = {
+                    id = tonumber(cfg.Name) or cfg.Name,
+                    name = cfg.Name,
+                    fields = {},
+                    raw = cfg,
+                }
+                for _, child in ipairs(cfg:GetChildren()) do
+                    local ok, v = pcall(function() return child.Value end)
+                    entry.fields[child.Name] = ok and v or child.ClassName
+                end
+                entry.boss = entry.fields.Boss
+                    or entry.fields.BossName
+                    or entry.fields.Target
+                    or entry.fields.Name
+                entry.xp = tonumber(entry.fields.XP
+                    or entry.fields.Experience
+                    or entry.fields.Reward)
+                entry.wen = tonumber(entry.fields.Wen
+                    or entry.fields.Money
+                    or entry.fields.Currency)
+
+                if not firstStructure then
+                    firstStructure = describeConfig(cfg)
+                end
+                table.insert(out, entry)
+            end
         end
-        if folders.assets and not folders.quests then
-            folders.quests = folders.assets:FindFirstChild("Quests")
+
+        table.sort(out, function(a, b)
+            return (tonumber(a.id) or 0) < (tonumber(b.id) or 0)
+        end)
+
+        if Cfg.QuestLogStructure and not St.questStructureLogged
+           and firstStructure then
+            St.questStructureLogged = true
+            print("[Dingus][Quest] BossHunts structure: " .. firstStructure)
+            local ids = {}
+            for _, h in ipairs(out) do
+                table.insert(ids, tostring(h.id))
+            end
+            print(string.format("[Dingus][Quest] parsed %d hunts: %s",
+                #out, table.concat(ids, ", ")))
         end
-        if folders.assets and not folders.chests then
-            folders.chests = folders.assets:FindFirstChild("Chests")
-        end
+
+        St.questAvailableCount = #out
+        return out
     end
 
     --============================================================
@@ -85,7 +141,6 @@ function Q.init(Ctx)
     --============================================================
     function Q.readLevel()
         local ok, result = pcall(function()
-            -- Path 1: workspace.Humanoids.<me>.Progression.Level
             local hf = workspace:FindFirstChild("Humanoids")
             local me = hf and hf:FindFirstChild(U.Lp.Name)
             if me then
@@ -95,7 +150,6 @@ function Q.init(Ctx)
                     return lvl.Value
                 end
             end
-            -- Path 2: ReplicatedStorage.Player_Service.Data.<me>.slots.SlotN.Progression.Level
             local ps = rs:FindFirstChild("Player_Service")
             local data = ps and ps:FindFirstChild("Data")
             local me2 = data and data:FindFirstChild(U.Lp.Name)
@@ -115,141 +169,93 @@ function Q.init(Ctx)
     end
 
     --============================================================
-    -- BOSS HUNTS READER
-    -- Walks ReplicatedStorage.BossHunts. On first pass, logs the
-    -- full structure of one config so we can see field names.
+    -- CROW PANEL FINDERS
     --============================================================
-    local function describeConfig(cfg)
-        local fields = {}
-        for _, child in ipairs(cfg:GetChildren()) do
-            local ok, v = pcall(function() return child.Value end)
-            if ok then
-                table.insert(fields, string.format("%s=%s", child.Name, tostring(v)))
-            else
-                table.insert(fields, string.format("%s<%s>", child.Name, child.ClassName))
-            end
-        end
-        return table.concat(fields, " ")
-    end
+    -- Panel root detection: look for the "Here are your current tasks"
+    -- header text which is unique to the crow menu.
+    local function findPanelRoot()
+        local pg = U.Lp:FindFirstChildOfClass("PlayerGui")
+        if not pg then return nil end
 
-    function Q.readHunts()
-        resolveFolders()
-        if not folders.bossHunts then
-            return {}
-        end
-
-        local out = {}
-        local firstStructure = nil
-        for _, cfg in ipairs(folders.bossHunts:GetChildren()) do
-            if cfg:IsA("Configuration") then
-                local entry = {
-                    id = tonumber(cfg.Name) or cfg.Name,
-                    name = cfg.Name,
-                    fields = {},
-                    raw = cfg,
-                }
-                for _, child in ipairs(cfg:GetChildren()) do
-                    local ok, v = pcall(function() return child.Value end)
-                    entry.fields[child.Name] = ok and v or child.ClassName
+        local stack = { { pg, 0 } }
+        local iter = 0
+        while #stack > 0 do
+            local item = table.remove(stack)
+            local inst, d = item[1], item[2]
+            if inst and d <= 8 then
+                if inst:IsA("TextLabel") then
+                    local okT, txt = pcall(function() return inst.Text end)
+                    if okT and type(txt) == "string"
+                       and txt:find("current tasks", 1, true) then
+                        -- Walk up to a reasonable root
+                        local cur = inst
+                        for _ = 1, 5 do
+                            if cur and cur.Parent and cur.Parent:IsA("ScreenGui") then
+                                return cur.Parent
+                            end
+                            cur = cur.Parent
+                        end
+                        return inst.Parent or inst
+                    end
                 end
-                -- Try common field names for boss + xp + wen + duration
-                entry.boss = entry.fields.Boss
-                    or entry.fields.BossName
-                    or entry.fields.Target
-                    or entry.fields.Name
-                entry.xp = tonumber(entry.fields.XP
-                    or entry.fields.Experience
-                    or entry.fields.Reward)
-                entry.wen = tonumber(entry.fields.Wen
-                    or entry.fields.Money
-                    or entry.fields.Currency)
-                entry.side = tonumber(entry.fields.Side)
-                    or entry.fields.Side
-
-                if not firstStructure then
-                    firstStructure = describeConfig(cfg)
+                for _, k in ipairs(inst:GetChildren()) do
+                    table.insert(stack, { k, d + 1 })
                 end
-                table.insert(out, entry)
+                iter = iter + 1
+                if iter % 2000 == 0 then task.wait() end
             end
-        end
-
-        table.sort(out, function(a, b)
-            return (tonumber(a.id) or 0) < (tonumber(b.id) or 0)
-        end)
-
-        if Cfg.QuestLogStructure and not St.questStructureLogged and firstStructure then
-            St.questStructureLogged = true
-            print("[Dingus][Quest] BossHunts config structure: " .. firstStructure)
-            print(string.format("[Dingus][Quest] parsed %d hunts (ids: %s)",
-                #out, table.concat((function()
-                    local ids = {}
-                    for _, h in ipairs(out) do table.insert(ids, tostring(h.id)) end
-                    return ids
-                end)(), ", ")))
-        end
-
-        return out
-    end
-
-    --============================================================
-    -- TEMPLATE READERS
-    --============================================================
-    function Q.readQuestTemplates()
-        resolveFolders()
-        if not folders.quests then return {} end
-        local out = {}
-        for _, child in ipairs(folders.quests:GetChildren()) do
-            table.insert(out, {
-                name = child.Name,
-                class = child.ClassName,
-                inst = child,
-            })
-        end
-        return out
-    end
-
-    function Q.readChestTemplates()
-        resolveFolders()
-        if not folders.chests then return {} end
-        local out = {}
-        for _, child in ipairs(folders.chests:GetChildren()) do
-            if child:IsA("Folder") or child:IsA("Model") then
-                table.insert(out, {
-                    name = child.Name,
-                    class = child.ClassName,
-                    inst = child,
-                })
-            end
-        end
-        return out
-    end
-
-    --============================================================
-    -- CROW MENU ACTIVE QUESTS
-    -- Reads the currently open crow menu if visible. Returns a
-    -- list of { boss, xp, wen, timeLeft, element }.
-    --============================================================
-    local function parseTimeLeft(s)
-        -- Accepts "15:38" or "6:07" or "1:23:45"
-        if type(s) ~= "string" then return nil end
-        local parts = {}
-        for p in s:gmatch("%d+") do table.insert(parts, tonumber(p)) end
-        if #parts == 2 then
-            return parts[1] * 60 + parts[2]
-        elseif #parts == 3 then
-            return parts[1] * 3600 + parts[2] * 60 + parts[3]
         end
         return nil
     end
 
-    function Q.readActiveQuests()
-        local pg = U.Lp:FindFirstChildOfClass("PlayerGui")
-        if not pg then return {} end
-        local cc = pg:FindFirstChild("ComponentsHolder")
-        if not cc then return {} end
+    local function findCancelButton()
+        local root = findPanelRoot()
+        if not root then return nil end
+        local stack = { root }
+        local iter = 0
+        while #stack > 0 do
+            local inst = table.remove(stack)
+            if inst then
+                if inst:IsA("TextButton") then
+                    local okT, txt = pcall(function() return inst.Text end)
+                    if okT and type(txt) == "string" then
+                        local l = txt:lower():gsub("^%s+", ""):gsub("%s+$", "")
+                        if l == "cancel" or l == "close" then
+                            local okV, vis = pcall(function() return inst.Visible end)
+                            if okV and vis then return inst end
+                        end
+                    end
+                end
+                for _, k in ipairs(inst:GetChildren()) do
+                    table.insert(stack, k)
+                end
+                iter = iter + 1
+                if iter % 2000 == 0 then task.wait() end
+            end
+        end
+        return nil
+    end
 
-        local quests = {}
-        local stack = { cc }
+    --============================================================
+    -- QUEST ROW READER
+    -- Returns list of { boss, xp, wen, timeLeft, rawLabel }
+    --============================================================
+    local function parseTimeLeft(s)
+        if type(s) ~= "string" then return nil end
+        local parts = {}
+        for p in s:gmatch("%d+") do table.insert(parts, tonumber(p)) end
+        if #parts == 2 then return parts[1] * 60 + parts[2] end
+        if #parts == 3 then return parts[1] * 3600 + parts[2] * 60 + parts[3] end
+        return nil
+    end
+
+    local function readQuestsFromPanel()
+        local root = findPanelRoot()
+        if not root then return {} end
+
+        -- Collect all "Defeat X" labels
+        local labels = {}
+        local stack = { root }
         local iter = 0
         while #stack > 0 do
             local inst = table.remove(stack)
@@ -259,28 +265,12 @@ function Q.init(Ctx)
                     if okT and type(txt) == "string" then
                         local bossName = txt:match("^%s*Defeat%s+(.+)$")
                             or txt:match("^%s*Eliminate%s+(.+)$")
+                            or txt:match("^%s*Hunt%s+(.+)$")
                         if bossName then
                             bossName = bossName:gsub("%s+$", ""):gsub("^%s+", "")
-                            -- Walk up to find the container for this quest
-                            local container = inst.Parent
-                            local xp, wen, timeLeft
-                            for _ = 1, 4 do
-                                if not container then break end
-                                -- Search siblings for XP, Wen, time
-                                for _, sib in ipairs(container:GetChildren()) do
-                                    if sib ~= inst and sib:IsA("TextLabel") then
-                                        local s = sib.Text
-                                        if s:find("^%d+:%d+") or s:find("^%d+:%d+:%d+") then
-                                            timeLeft = parseTimeLeft(s)
-                                        end
-                                    end
-                                end
-                                container = container.Parent
-                            end
-                            table.insert(quests, {
+                            table.insert(labels, {
                                 boss = bossName,
-                                timeLeft = timeLeft,
-                                element = inst,
+                                inst = inst,
                             })
                         end
                     end
@@ -292,192 +282,151 @@ function Q.init(Ctx)
                 if iter % 2000 == 0 then task.wait() end
             end
         end
-        return quests
-    end
 
-    --============================================================
-    -- AVAILABLE QUESTS (level-filtered)
-    --============================================================
-    function Q.availableQuests()
-        local level = Q.readLevel()
-        local hunts = Q.readHunts()
+        -- For each quest label, walk up the ancestry tree looking for
+        -- sibling time + reward labels within a few levels.
         local out = {}
-        for _, h in ipairs(hunts) do
-            if not h.boss then
-                -- fall through to include entries without a boss field
+        for _, entry in ipairs(labels) do
+            local boss = entry.boss
+            local timeLeft, xp, wen = nil, nil, nil
+
+            local anchor = entry.inst
+            for up = 1, 4 do
+                anchor = anchor and anchor.Parent
+                if not anchor then break end
+                for _, sib in ipairs(anchor:GetChildren()) do
+                    if sib ~= entry.inst then
+                        if sib:IsA("TextLabel") then
+                            local txt = sib.Text
+                            local t = parseTimeLeft(txt)
+                            if t then timeLeft = t end
+                            local num = txt:match("([%d,]+)")
+                            if num then
+                                local clean = tonumber(num:gsub(",", ""))
+                                if clean and clean > 100 and not xp then
+                                    xp = clean
+                                elseif clean and clean > 10 and not wen then
+                                    wen = clean
+                                end
+                            end
+                        end
+                    end
+                end
             end
-            -- Level requirement: id <= floor(level/20) is the observed pattern
-            local req = tonumber(h.id) or 0
-            local levelGate = math.max(1, math.floor(level / 20))
-            if req <= levelGate or req == 0 then
-                table.insert(out, h)
-            end
+
+            table.insert(out, {
+                boss = boss,
+                timeLeft = timeLeft,
+                xp = xp,
+                wen = wen,
+                label = entry.inst,
+            })
         end
         return out
     end
 
     --============================================================
-    -- RANKING
+    -- MENU OPEN / CLOSE
     --============================================================
-    function Q.rankQuests(quests, by)
-        by = by or Cfg.QuestPriority or "xp"
-        local filtered = {}
-        for _, q in ipairs(quests) do
-            local ok = true
-            if q.timeLeft and q.timeLeft < Cfg.QuestMinDuration then
-                ok = false
-            end
-            if ok then table.insert(filtered, q) end
-        end
-        table.sort(filtered, function(a, b)
-            if by == "wen" then
-                return (a.wen or 0) > (b.wen or 0)
-            elseif by == "time" then
-                return (a.timeLeft or math.huge) < (b.timeLeft or math.huge)
-            else
-                return (a.xp or 0) > (b.xp or 0)
-            end
-        end)
-        return filtered
-    end
-
-    function Q.bestQuest(by)
-        return Q.rankQuests(Q.availableQuests(), by)[1]
-    end
-
-    --============================================================
-    -- PRIORITY BOSS ROUTING
-    -- attack.lua reads Q.isPriority(bossName) to filter its target list.
-    --============================================================
-    function Q.setPriority(bossName)
-        St.questPriorityBoss = bossName
-        if bossName then
-            print("[Dingus][Quest] priority target: " .. tostring(bossName))
-        end
-    end
-
-    function Q.isPriority(bossName)
-        if not bossName then return false end
-        if not St.questPriorityBoss then return true end  -- no priority set → all allowed
-        local lower = string.lower(bossName)
-        local target = string.lower(St.questPriorityBoss)
-        return lower:find(target, 1, true) ~= nil
-            or target:find(lower, 1, true) ~= nil
-    end
-
-    function Q.clearPriority()
-        St.questPriorityBoss = nil
-    end
-
-    --============================================================
-    -- REMOTE DISCOVERY
-    -- Xeno blocks hookmetamethod. We probe common paths instead.
-    --============================================================
-    local REMOTE_CANDIDATES = {
-        -- Full paths under ReplicatedStorage
-        { "Quest_Service", "AcceptQuest" },
-        { "Quest_Service", "TakeQuest" },
-        { "Quest_Service", "Accept" },
-        { "QuestService", "AcceptQuest" },
-        { "Remotes", "AcceptQuest" },
-        { "Remotes", "Quest", "Accept" },
-        { "Communication", "AcceptQuest" },
-        { "Communication", "Quest_Accept" },
-        { "Net", "Quest", "Accept" },
-        { "Net", "AcceptQuest" },
-        { "GameRemotes", "Quest", "Accept" },
-        { "Shared", "Remotes", "AcceptQuest" },
-        { "Packets", "AcceptQuest" },
-        { "Quest", "AcceptQuest" },
-        { "Events", "QuestAccept" },
-        { "RemoteEvents", "QuestAccept" },
-        { "RemoteEvents", "AcceptQuest" },
-    }
-
-    function Q.findQuestRemote()
-        if Cfg.QuestRemotePath and Cfg.QuestRemotePath ~= "" then
-            -- Explicit override: user pastes path
-            local parts = {}
-            for p in Cfg.QuestRemotePath:gmatch("[^%.]+") do
-                table.insert(parts, p)
-            end
-            local cur = game
-            for i, p in ipairs(parts) do
-                if i == 1 and p == "game" then
-                    -- skip
-                else
-                    local ok, next = pcall(function() return cur:FindFirstChild(p) end)
-                    if not ok or not next then
-                        cur = nil
-                        break
-                    end
-                    cur = next
-                end
-            end
-            if cur and (cur:IsA("RemoteEvent") or cur:IsA("RemoteFunction")) then
-                St.questRemote = cur
-                St.questRemoteName = Cfg.QuestRemotePath
-                return cur
-            end
-            print("[Dingus][Quest] override path not found: " .. Cfg.QuestRemotePath)
-        end
-
-        for _, path in ipairs(REMOTE_CANDIDATES) do
-            local cur = rs
-            local ok = true
-            for _, p in ipairs(path) do
-                local nxt = cur:FindFirstChild(p)
-                if not nxt then ok = false; break end
-                cur = nxt
-            end
-            if ok and cur and (cur:IsA("RemoteEvent") or cur:IsA("RemoteFunction")) then
-                St.questRemote = cur
-                St.questRemoteName = table.concat(path, ".")
-                print("[Dingus][Quest] found remote: ReplicatedStorage." .. St.questRemoteName)
-                return cur
+    local function crowToolEquipped()
+        local c = U.Lp.Character
+        if not c then return nil end
+        for _, t in ipairs(c:GetChildren()) do
+            if t:IsA("Tool") and Lists.isCrow and Lists.isCrow(t.Name) then
+                return t
             end
         end
-
-        print("[Dingus][Quest] no quest remote found by probing (path unknown)")
         return nil
     end
 
-    --============================================================
-    -- ACCEPT QUEST
-    --============================================================
-    function Q.acceptQuest(bossName)
-        if not Cfg.QuestAutoAccept then return false end
-        if not St.questRemote then
-            St.questRemote = Q.findQuestRemote()
-        end
-        if not St.questRemote then return false end
+    local function equipCrow()
+        local tool = crowToolEquipped()
+        if tool then return tool end
 
-        -- Guard: max active
-        if #St.questActive >= Cfg.QuestMaxActive then
-            return false
-        end
-
-        local ok, err = pcall(function()
-            if St.questRemote:IsA("RemoteEvent") then
-                St.questRemote:FireServer(bossName)
-            else
-                St.questRemote:InvokeServer(bossName)
+        -- Try scanner cache
+        if Ctx.Scan and Ctx.Scan.findCrowTool then
+            local t = Ctx.Scan.findCrowTool()
+            if t and t:IsA("Tool") then
+                local h = U.hum()
+                if h then
+                    pcall(function() h:EquipTool(t) end)
+                    task.wait(0.5)
+                    return crowToolEquipped()
+                end
             end
-        end)
-        if ok then
-            table.insert(St.questActive, {
-                boss = bossName,
-                acceptedAt = U.clock(),
-            })
-            print(string.format("[Dingus][Quest] accepted: %s", bossName))
+        end
+
+        -- Try hotbar key
+        pcall(function() U.tap(Cfg.QuestCrowHotbar) end)
+        task.wait(0.5)
+        return crowToolEquipped()
+    end
+
+    local function openMenu()
+        if findPanelRoot() then return true end
+        pcall(function() U.m1() end)
+        local deadline = U.clock() + Cfg.QuestMenuWait
+        while U.clock() < deadline do
+            if findPanelRoot() then return true end
+            task.wait(0.15)
+        end
+        -- Second attempt
+        pcall(function() U.m1() end)
+        task.wait(0.6)
+        return findPanelRoot() ~= nil
+    end
+
+    local function closeMenu()
+        local cancel = findCancelButton()
+        if cancel then
+            pcall(function() cancel:Activate() end)
+            task.wait(0.3)
             return true
         end
-        print("[Dingus][Quest] accept failed: " .. tostring(err))
+        -- Some panels close on M1 anywhere
+        pcall(function() U.m1() end)
+        task.wait(0.3)
         return false
     end
 
     --============================================================
-    -- CYCLE · periodic
+    -- PUBLIC · READ CYCLE
+    --============================================================
+    function Q.readActiveQuests()
+        if not Cfg.QuestReadOnOpen then return St.questActiveList end
+        local quests = readQuestsFromPanel()
+        if #quests > 0 then
+            St.questActiveList = quests
+            St.questLastRead = U.clock()
+        end
+        return quests
+    end
+
+    --============================================================
+    -- PUBLIC · PRIORITY EXPOSURE
+    -- attack.lua reads Q.isPriority(bossName).
+    --============================================================
+    function Q.isPriority(bossName)
+        if not bossName then return true end
+        local list = St.questPriorityBosses
+        if not list or #list == 0 then return true end  -- no filter = kill anything
+
+        local lower = string.lower(bossName)
+        for i = 1, #list do
+            local target = string.lower(list[i])
+            if lower:find(target, 1, true) or target:find(lower, 1, true) then
+                return true
+            end
+        end
+        return false
+    end
+
+    function Q.getPriorityBosses()
+        return St.questPriorityBosses
+    end
+
+    --============================================================
+    -- PUBLIC · CYCLE (called by main scheduler)
     --============================================================
     function Q.cycle()
         local now = U.clock()
@@ -485,35 +434,84 @@ function Q.init(Ctx)
         St.questLastCycle = now
         St.questCycleCount = St.questCycleCount + 1
 
-        -- Refresh hunts and level
-        St.questHunts = Q.readHunts()
+        -- Refresh available hunts + player level
+        Q.readHunts()
         St.playerLevel = Q.readLevel()
-        St.huntCount = #St.questHunts
 
-        -- Read active crow quests if menu visible
-        local active = Q.readActiveQuests()
-        if #active > 0 then
-            St.questActive = active
-        end
+        -- Refresh priorities if stale
+        local stale = (now - St.questLastRead) > Cfg.QuestPriorityStale
+        local slotsFull = #St.questPriorityBosses >= St.questMaxSlots
 
-        -- Pick best available quest
-        local available = Q.availableQuests()
-        local ranked = Q.rankQuests(available, Cfg.QuestPriority)
-        St.questAvailable = ranked
-
-        if #ranked > 0 then
-            local best = ranked[1]
-            local bossName = best.boss or ("hunt_" .. tostring(best.id))
-            Q.setPriority(bossName)
-            St.questTarget = bossName
-
-            -- Attempt auto-accept
-            if Cfg.QuestAutoAccept and #St.questActive < Cfg.QuestMaxActive then
-                Q.acceptQuest(bossName)
+        if stale or slotsFull or #St.questPriorityBosses == 0 then
+            local tool = equipCrow()
+            if tool then
+                local opened = openMenu()
+                if opened then
+                    St.questPanelOpened = true
+                    local quests = readQuestsFromPanel()
+                    if #quests > 0 then
+                        local names = {}
+                        for i = 1, #quests do
+                            table.insert(names, quests[i].boss)
+                        end
+                        St.questPriorityBosses = names
+                        St.questActiveList = quests
+                        St.questLastRead = now
+                        print(string.format("[Dingus][Quest] %d active · %s",
+                            #quests, table.concat(names, ", ")))
+                    end
+                    closeMenu()
+                    St.questPanelOpened = false
+                end
             end
-        else
-            Q.clearPriority()
         end
+    end
+
+    --============================================================
+    -- PUBLIC · STRUCTURE DUMP (for debugging)
+    --============================================================
+    function Q.dumpStructure()
+        local folder = bossHuntsFolder()
+        if folder then
+            print("[Dingus][Quest] BossHunts children:")
+            for _, cfg in ipairs(folder:GetChildren()) do
+                print(string.format("  %s (%s) — %s",
+                    cfg.Name, cfg.ClassName,
+                    cfg:IsA("Configuration") and describeConfig(cfg) or ""))
+            end
+        end
+        local assets = assetsFolder()
+        if assets then
+            local q = assets:FindFirstChild("Quests")
+            if q then
+                print("[Dingus][Quest] Assets.Quests:")
+                for _, c in ipairs(q:GetChildren()) do
+                    print(string.format("  %s (%s)", c.Name, c.ClassName))
+                end
+            end
+            local ch = assets:FindFirstChild("Chests")
+            if ch then
+                print("[Dingus][Quest] Assets.Chests:")
+                for _, c in ipairs(ch:GetChildren()) do
+                    print(string.format("  %s (%s)", c.Name, c.ClassName))
+                end
+            end
+        end
+    end
+
+    --============================================================
+    -- PUBLIC · STATS
+    --============================================================
+    function Q.stats()
+        return {
+            level = St.playerLevel or 0,
+            availableHunts = St.questAvailableCount or 0,
+            priorityCount = #(St.questPriorityBosses or {}),
+            priority = table.concat(St.questPriorityBosses or {}, ", "),
+            lastReadAge = U.clock() - (St.questLastRead or 0),
+            cycles = St.questCycleCount or 0,
+            panelOpen = St.questPanelOpened or false,
+        }
     end
 
     --============================================================
@@ -521,61 +519,14 @@ function Q.init(Ctx)
     --============================================================
     task.spawn(function()
         task.wait(3)
-        resolveFolders()
-
-        print("[Dingus][Quest] initializing...")
-
-        -- Log folder structure
-        if folders.bossHunts then
-            print(string.format("[Dingus][Quest] BossHunts: %d configs",
-                #folders.bossHunts:GetChildren()))
-        else
-            print("[Dingus][Quest] BossHunts folder NOT FOUND")
-        end
-
-        if folders.quests then
-            St.questTemplates = Q.readQuestTemplates()
-            print(string.format("[Dingus][Quest] Quests: %d templates", #St.questTemplates))
-        else
-            print("[Dingus][Quest] Assets.Quests NOT FOUND")
-        end
-
-        if folders.chests then
-            St.chestTemplates = Q.readChestTemplates()
-            print(string.format("[Dingus][Quest] Chests: %d templates", #St.chestTemplates))
-        else
-            print("[Dingus][Quest] Assets.Chests NOT FOUND")
-        end
-
-        -- Initial hunts read (logs structure on first call)
-        St.questHunts = Q.readHunts()
-
-        -- Probe for remote
-        Q.findQuestRemote()
-
-        print(string.format("[Dingus][Quest] ready · level=%d hunts=%d remote=%s",
-            Q.readLevel(), #St.questHunts, St.questRemoteName))
+        print("[Dingus][Quest] boot discovery...")
+        Q.readHunts()
+        St.playerLevel = Q.readLevel()
+        print(string.format("[Dingus][Quest] ready · level=%d hunts=%d",
+            St.playerLevel, St.questAvailableCount))
     end)
 
-    --============================================================
-    -- STATS
-    --============================================================
-    function Q.stats()
-        return {
-            level = Q.readLevel(),
-            hunts = #St.questHunts,
-            available = #St.questAvailable,
-            active = #St.questActive,
-            priority = St.questPriorityBoss,
-            remote = St.questRemoteName,
-            remoteFound = St.questRemote ~= nil,
-            cycles = St.questCycleCount,
-            chestTemplates = #St.chestTemplates,
-            questTemplates = #St.questTemplates,
-        }
-    end
-
-    print("[Dingus][quests] v1 initialized")
+    print("[Dingus][quests] v2 initialized · read-only router")
 end
 
 return Q
