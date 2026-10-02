@@ -1,17 +1,7 @@
 --[[
-    Dingus-Slayer · fly.lua v3
-    Noclip · network-owner claim · CFrame fallback · progress watchdog.
-
-    Diagnosis from runtime logs:
-      bv.Velocity = 85, hrp.AssemblyLinearVelocity ≈ 2-31
-      → server reconciliation rejects BodyVelocity motion.
-
-    Fixes:
-      - Noclip: character parts CanCollide = false, session-persistent
-      - SetNetworkOwner(player) attempted at start; logged on failure
-      - CFrame fallback: switches mode when BV fails for 20 ticks
-      - Progress trend in telemetry so stalls are visible in F9
-      - Reduced jitter (was causing micro-oscillation)
+    Dingus-Slayer · fly.lua v4
+    Aggressive noclip (persistent loop, defeats humanoid reset).
+    Physics state forced on start. Direct HRP velocity writes.
 ]]--
 
 local F = {}
@@ -33,6 +23,7 @@ function F.init(Ctx)
     Cfg.FlyArriveDist        = Cfg.FlyArriveDist or 10
     Cfg.FlyMinSpeed          = Cfg.FlyMinSpeed or 40
     Cfg.FlyNoclip            = Cfg.FlyNoclip ~= false
+    Cfg.FlyNoclipHz          = Cfg.FlyNoclipHz or 0.08
     Cfg.FlyClaimNetworkOwner = Cfg.FlyClaimNetworkOwner ~= false
     Cfg.FlyCFrameFallback    = Cfg.FlyCFrameFallback ~= false
     Cfg.FlyCFrameThreshold   = Cfg.FlyCFrameThreshold or 0.3
@@ -42,7 +33,7 @@ function F.init(Ctx)
     F.bv = nil
     F.bg = nil
     F.hrp = nil
-    F.mode = "bv"          -- "bv" | "cframe"
+    F.mode = "bv"
     F.velFailCount = 0
     F.lastPos = nil
     F.lastProgressTime = 0
@@ -59,31 +50,27 @@ function F.init(Ctx)
     F._lastLoggedDist = nil
 
     --============================================================
-    -- NOCLIP · session-persistent
+    -- NOCLIP · persistent loop
+    -- Runs continuously, forces CanCollide=false on every character
+    -- BasePart. Defeats the Humanoid state machine's collision reset.
     --============================================================
     if Cfg.FlyNoclip then
-        local function disableCollision(part)
-            if part and part:IsA("BasePart") then
-                pcall(function() part.CanCollide = false end)
+        task.spawn(function()
+            while St.run do
+                local char = U.Lp and U.Lp.Character
+                if char then
+                    local parts = char:GetDescendants()
+                    for i = 1, #parts do
+                        local p = parts[i]
+                        if p:IsA("BasePart") and p.CanCollide then
+                            pcall(function() p.CanCollide = false end)
+                        end
+                    end
+                end
+                task.wait(Cfg.FlyNoclipHz)
             end
-        end
-        local noclipConn = nil
-        local function bindNoclip(char)
-            if not char then return end
-            if noclipConn then
-                pcall(function() noclipConn:Disconnect() end)
-            end
-            for _, p in ipairs(char:GetDescendants()) do
-                disableCollision(p)
-            end
-            noclipConn = char.DescendantAdded:Connect(disableCollision)
-        end
-        bindNoclip(U.Lp.Character)
-        U.Lp.CharacterAdded:Connect(function(c)
-            task.wait(0.5)
-            bindNoclip(c)
         end)
-        print("[Dingus][Fly] noclip enabled")
+        print("[Dingus][Fly] noclip loop active")
     end
 
     --============================================================
@@ -109,6 +96,15 @@ function F.init(Ctx)
         if not ok then
             print("[Dingus][Fly] SetNetworkOwner failed: " .. tostring(err))
         end
+    end
+
+    local function forcePhysics()
+        local h = U.hum()
+        if not h then return end
+        pcall(function()
+            h:SetStateEnabled(Enum.HumanoidStateType.Physics, true)
+            h:ChangeState(Enum.HumanoidStateType.Physics)
+        end)
     end
 
     local function makeMovers()
@@ -173,6 +169,7 @@ function F.init(Ctx)
         St.FlyActive = true
 
         claimNetworkOwner()
+        forcePhysics()
         print("[Dingus][Fly] started")
         return true
     end
@@ -187,6 +184,9 @@ function F.init(Ctx)
         if h then
             h.PlatformStand = F._origPlatformStand or false
             h.WalkSpeed = F._origWalkSpeed or 16
+            pcall(function()
+                h:ChangeState(Enum.HumanoidStateType.Running)
+            end)
         end
         St.FlyActive = false
 
@@ -232,7 +232,6 @@ function F.init(Ctx)
         local goalDist = toGoal.Magnitude
         local distance = (targetPos - myPos).Magnitude
 
-        -- Arrived
         if goalDist < Cfg.FlyArriveDist then
             if F.mode == "bv" and F.bv then
                 F.bv.Velocity = F.bv.Velocity * 0.75
@@ -252,7 +251,6 @@ function F.init(Ctx)
 
         local dir = toGoal.Unit
 
-        -- Stall
         if not F.lastPos then
             F.lastPos = myPos
             F.lastProgressTime = now
@@ -274,7 +272,6 @@ function F.init(Ctx)
             speed = math.max(Cfg.FlyMinSpeed, speed * (goalDist / 40))
         end
 
-        -- Jitter (small)
         F.jitterPhase = F.jitterPhase + dt * Cfg.FlyJitterHz * 6.28318
         local jx = math.sin(F.jitterPhase) * Cfg.FlyJitter
         local jy = math.cos(F.jitterPhase * 0.7) * Cfg.FlyJitter * 0.6
@@ -288,7 +285,6 @@ function F.init(Ctx)
 
         local velocity = dir * speed + jitter
 
-        -- Apply
         if F.mode == "bv" then
             if not F.bv or not F.bv.Parent then
                 F.mode = "cframe"
@@ -310,12 +306,10 @@ function F.init(Ctx)
             end)
         end
 
-        -- Measure
         local measured = 0
         local okV, v = pcall(function() return hrp.AssemblyLinearVelocity.Magnitude end)
         if okV and v and v == v and v < math.huge then measured = v end
 
-        -- Fallback decision
         if F.mode == "bv" and Cfg.FlyCFrameFallback then
             if measured < speed * Cfg.FlyCFrameThreshold then
                 F.velFailCount = F.velFailCount + 1
@@ -335,12 +329,10 @@ function F.init(Ctx)
         F.avgSpeed = F.speedSum / F.speedSamples
         if measured > F.peakSpeed then F.peakSpeed = measured end
 
-        -- Telemetry with trend
         if now - F.lastLog > 0.5 then
             local trend = ""
             if F._lastLoggedDist then
-                local delta = distance - F._lastLoggedDist
-                trend = string.format(" | %+.0f", delta)
+                trend = string.format(" | %+.0f", distance - F._lastLoggedDist)
             end
             F._lastLoggedDist = distance
             F.lastLog = now
@@ -358,7 +350,7 @@ function F.init(Ctx)
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function() F.stop() end)
 
-    print("[Dingus][fly] v3 initialized")
+    print("[Dingus][fly] v4 initialized")
 end
 
 return F
