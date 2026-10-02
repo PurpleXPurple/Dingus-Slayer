@@ -1,6 +1,6 @@
 --[[
-    Dingus-Slayer · quests.lua v4
-    Custom-hotbar aware. Multi-path level reader. Auto-discover crow slot.
+    Dingus-Slayer · quests.lua v5
+    Hotbar mutex integration. Custom-hotbar aware. Multi-path level reader.
 ]]--
 
 local Q = {}
@@ -28,7 +28,6 @@ function Q.init(Ctx)
     St.questPanelOpened     = false
     St.questStructureLogged = St.questStructureLogged or false
     St.questLevelDumped     = St.questLevelDumped or false
-    St.questCrowSlotTried   = St.questCrowSlotTried or {}
 
     local rs = game:GetService("ReplicatedStorage")
 
@@ -39,7 +38,7 @@ function Q.init(Ctx)
     end
 
     --============================================================
-    -- LEVEL READER · 4 fallback paths
+    -- LEVEL READER
     --============================================================
     local function getSlots()
         local ps = rs:FindFirstChild("Player_Service")
@@ -52,13 +51,9 @@ function Q.init(Ctx)
     local function readLevelVerbose()
         local slots, me = getSlots()
         if not slots then
-            if Cfg.QuestVerbose then
-                log("level: slots folder not found under Player_Service.Data.<me>")
-            end
             return 0, "no slots"
         end
 
-        -- Path A: slots.<slot>.Progression.Level
         for _, slot in ipairs(slots:GetChildren()) do
             local prog = slot:FindFirstChild("Progression")
             local lvl = prog and prog:FindFirstChild("Level")
@@ -70,7 +65,6 @@ function Q.init(Ctx)
             end
         end
 
-        -- Path B: slots.<slot>.Level
         for _, slot in ipairs(slots:GetChildren()) do
             local lvl = slot:FindFirstChild("Level")
             if lvl then
@@ -81,7 +75,6 @@ function Q.init(Ctx)
             end
         end
 
-        -- Path C: deep walk inside each slot for any NumberValue named Level
         for _, slot in ipairs(slots:GetChildren()) do
             for _, d in ipairs(slot:GetDescendants()) do
                 if d.Name == "Level"
@@ -92,7 +85,6 @@ function Q.init(Ctx)
             end
         end
 
-        -- Path D: character attribute
         local char = U.Lp.Character
         if char then
             for _, attr in ipairs({"Level", "level", "PlayerLevel", "LVL"}) do
@@ -103,7 +95,6 @@ function Q.init(Ctx)
             end
         end
 
-        -- All failed — dump once for diagnosis
         if not St.questLevelDumped then
             St.questLevelDumped = true
             print("[Dingus][Quest] LEVEL NOT FOUND — dumping slots tree:")
@@ -211,7 +202,7 @@ function Q.init(Ctx)
     end
 
     --============================================================
-    -- CROW TOOL FINDER · Roblox Tool OR custom mesh
+    -- CROW TOOL FINDER
     --============================================================
     local CROW_NAMES = {
         "crow", "kasugai", "kasugai crow", "karasu",
@@ -233,7 +224,6 @@ function Q.init(Ctx)
     local function findCrowToolVerbose()
         local plr = U.Lp
 
-        -- Roblox Tool in character
         local char = plr.Character
         if char then
             for _, c in ipairs(char:GetChildren()) do
@@ -243,7 +233,6 @@ function Q.init(Ctx)
             end
         end
 
-        -- Roblox Tool in Backpack
         local bp = plr:FindFirstChildOfClass("Backpack")
         if bp then
             for _, c in ipairs(bp:GetChildren()) do
@@ -253,7 +242,6 @@ function Q.init(Ctx)
             end
         end
 
-        -- Custom mesh attached to character (hand / shoulder / anywhere)
         if char then
             for _, c in ipairs(char:GetDescendants()) do
                 if (c:IsA("Model") or c:IsA("MeshPart") or c:IsA("BasePart"))
@@ -267,24 +255,26 @@ function Q.init(Ctx)
     end
 
     --============================================================
-    -- HOTBAR SLOT PROBE
+    -- HOTBAR PROBE via mutex
     --============================================================
     local function hotbarSlotForCrow()
-        -- Ensure we don't infinitely probe. Skip last successful slot.
+        local H = Ctx.Hotbar
+        if not H then return nil, nil end
+
         local order = { Cfg.QuestCrowHotbar or "2", "1", "3", "4", "5", "6", "7", "8" }
         local tried = {}
         for _, k in ipairs(order) do
             if not tried[k] then
                 tried[k] = true
-                pcall(function() U.tap(k) end)
-                task.wait(0.45)
-                local tool, from = findCrowToolVerbose()
-                if tool then
-                    print(string.format(
-                        "[Dingus][Quest] crow found via hotbar '%s' (%s)",
-                        k, tostring(from)))
-                    Cfg.QuestCrowHotbar = k
-                    return tool, k
+                if H.tap("quest-crow-probe", k, 0.45) then
+                    local tool, from = findCrowToolVerbose()
+                    if tool then
+                        print(string.format(
+                            "[Dingus][Quest] crow found via hotbar '%s' (%s)",
+                            k, tostring(from)))
+                        Cfg.QuestCrowHotbar = k
+                        return tool, k
+                    end
                 end
             end
         end
@@ -292,13 +282,22 @@ function Q.init(Ctx)
     end
 
     local function equipCrow()
-        -- Already equipped?
         local tool, from = findCrowToolVerbose()
-        if tool and from == "CharacterTool" then
+        if tool and (from == "CharacterTool" or from == "CustomMesh") then
             return tool
         end
 
-        -- Try configured slot
+        local H = Ctx.Hotbar
+        if not H then return nil end
+
+        if not H.acquire("quest-crow", 3.0) then
+            if Cfg.QuestVerbose then
+                log("hotbar busy (" .. tostring(H.isLocked()) .. "), skipping crow equip")
+            end
+            return nil
+        end
+
+        local result = nil
         local slot = Cfg.QuestCrowHotbar or "2"
         if Cfg.QuestVerbose then
             log("equipping crow via hotbar '" .. slot .. "'")
@@ -308,18 +307,20 @@ function Q.init(Ctx)
 
         tool, from = findCrowToolVerbose()
         if tool then
-            return tool
+            result = tool
+        else
+            if Cfg.QuestVerbose then
+                log("configured slot failed, probing all hotbar slots")
+            end
+            result = select(1, hotbarSlotForCrow())
         end
 
-        -- Auto-discover
-        if Cfg.QuestVerbose then
-            log("configured slot failed, probing all hotbar slots")
-        end
-        return hotbarSlotForCrow()
+        H.release("quest-crow")
+        return result
     end
 
     --============================================================
-    -- PANEL DETECTION · walk whole PlayerGui
+    -- PANEL FINDERS
     --============================================================
     local function findPanelRoot()
         local pg = U.Lp:FindFirstChildOfClass("PlayerGui")
@@ -504,6 +505,13 @@ function Q.init(Ctx)
         local empty = #St.questPriorityBosses == 0
 
         if stale or empty then
+            if Ctx.Hotbar and Ctx.Hotbar.isLocked() then
+                if Cfg.QuestVerbose then
+                    log("hotbar locked by " .. tostring(Ctx.Hotbar.isLocked()) .. ", deferring")
+                end
+                return
+            end
+
             local tool = equipCrow()
             if tool then
                 St.crT = tool
@@ -561,9 +569,14 @@ function Q.init(Ctx)
 
     function Q.probeHotbar()
         print("[Dingus][Quest] probing hotbar slots for crow...")
+        local H = Ctx.Hotbar
         for _, k in ipairs({"1","2","3","4","5","6","7","8"}) do
-            pcall(function() U.tap(k) end)
-            task.wait(0.4)
+            if H then
+                H.tap("quest-probe", k, 0.4)
+            else
+                pcall(function() U.tap(k) end)
+                task.wait(0.4)
+            end
             local tool, from = findCrowToolVerbose()
             print(string.format("  slot %s: %s",
                 k, tool and (tool.Name .. " (" .. from .. ")") or "nothing"))
@@ -571,6 +584,10 @@ function Q.init(Ctx)
     end
 
     function Q.stats()
+        local holder = "no-module"
+        if Ctx.Hotbar and Ctx.Hotbar.isLocked then
+            holder = Ctx.Hotbar.isLocked() or "free"
+        end
         return {
             level = St.playerLevel or 0,
             availableHunts = St.questAvailableCount or 0,
@@ -581,6 +598,7 @@ function Q.init(Ctx)
             panelOpen = St.questPanelOpened or false,
             crowTool = St.crT and St.crT.Name or "not found",
             crowSlot = Cfg.QuestCrowHotbar,
+            hotbarHolder = holder,
         }
     end
 
@@ -589,7 +607,7 @@ function Q.init(Ctx)
     --============================================================
     task.spawn(function()
         task.wait(3)
-        print("[Dingus][Quest] v4 boot discovery")
+        print("[Dingus][Quest] v5 boot discovery")
         Q.readHunts()
         local lvl, which = readLevelVerbose()
         St.playerLevel = lvl
@@ -602,7 +620,7 @@ function Q.init(Ctx)
             St.questAvailableCount, Cfg.QuestCrowHotbar))
     end)
 
-    print("[Dingus][quests] v4 initialized · custom-hotbar aware")
+    print("[Dingus][quests] v5 initialized")
 end
 
 return Q
