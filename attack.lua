@@ -1,18 +1,17 @@
 --[[
-    Dingus-Slayer · attack.lua v15
-    Integrates with: hotbar v2 (item DB), quests v7 (priority), detect v4
-                     (isEnemyAttacking, isEnemyStunned, isEnemyBlocking),
-                     spoofers v3, optimizers v2, gui v32, config v6.
+    Dingus-Slayer · attack.lua v17
+    Unified combat & loot pipeline.
 
-    Highlights:
-      - Weapon equip via Ctx.Hotbar.equipFirstOf("weapon") — no blind taps
-      - Crow equip delegated to quests
-      - Target filtered by Ctx.Quest.isPriority
-      - Combo engine: 4 random orders, all 6 skill slots
-      - ProximityPrompt loot cycle on boss kill (8s deadline)
-      - Critical HP hard retreat + regular retreat threshold
-      - Damage-triggered auto-block + telegraph dodge
-      - Passive loot sweep while idle
+    Fixes:
+      - Boss scan range 2000 studs (was 500)
+      - Multi-source loot detection (Model name + ProximityPrompt + ClickDetector)
+      - Priority filter has a safety valve (auto-disables after 20 empty scans)
+      - fireproximityprompt + InputHold fallback + T/E key fallback
+      - Cached boss list, deep workspace walk with 60k cap
+      - Loot cycle: 12s deadline, 6 passes, wide 50-stud radius
+
+    Integrated: hotbar v2 (item DB), quests v7 (priority), detect v5 (multi-root scan),
+                config v6 (loot keys), scanners v4 (crow helpers)
 ]]--
 
 local A = {}
@@ -60,10 +59,10 @@ function A.init(Ctx)
     Cfg.EmergencyInterval   = Cfg.EmergencyInterval   or 0.15
 
     Cfg.ChestEnabled        = Cfg.ChestEnabled        ~= false
-    Cfg.LootRadius          = Cfg.LootRadius          or 30
-    Cfg.LootMaxPasses       = Cfg.LootMaxPasses       or 4
-    Cfg.LootPassDeadline    = Cfg.LootPassDeadline    or 8
-    Cfg.LootPromptDepth     = Cfg.LootPromptDepth     or 4
+    Cfg.LootRadius          = Cfg.LootRadius          or 50
+    Cfg.LootMaxPasses       = Cfg.LootMaxPasses       or 6
+    Cfg.LootPassDeadline    = Cfg.LootPassDeadline    or 12
+    Cfg.LootPromptDepth     = Cfg.LootPromptDepth     or 8
     Cfg.LootTargetCooldown  = Cfg.LootTargetCooldown  or 45
     Cfg.LootVerbose         = Cfg.LootVerbose         or false
     Cfg.ChestKeywords       = Cfg.ChestKeywords       or {
@@ -104,42 +103,30 @@ function A.init(Ctx)
     St.lDodge = 0; St.lTele = 0; St.lInRangeChase = 0
     St.lStateRefresh = 0; St.lChestScan = 0; St.lChestPassive = 0
 
-    St.eq = "none"
-    St.eqKey = nil
+    St.eq = "none"; St.eqKey = nil
     St.cbtS = "IDLE"
     St.comboIndex = 0
     St.comboTargetName = nil
     St.swapPending = false
     St.equipFailCount = 0
 
-    St.fIsBlock = false
-    St.fModeResolved = false
-    St.blocking = false
-    St.blockHoldUntil = 0
+    St.fIsBlock = false; St.fModeResolved = false
+    St.blocking = false; St.blockHoldUntil = 0
 
-    St.holdSkills = {}
-    St.holdDetected = false
-    St.holdDetecting = false
+    St.holdSkills = {}; St.holdDetected = false; St.holdDetecting = false
 
-    St.lastHp = 0
-    St.damageBlockUntil = 0
-    St.bossIdleSince = 0
-    St.emergency = false
-    St.critical = false
+    St.lastHp = 0; St.damageBlockUntil = 0; St.bossIdleSince = 0
+    St.emergency = false; St.critical = false
 
-    St.chestCollected = 0
-    St.lootCollected = 0
-    St.lootSkipped = 0
-    St.lootPasses = 0
-    St.lootTargetCooldowns = {}
+    St.chestCollected = 0; St.lootCollected = 0; St.lootSkipped = 0
+    St.lootPasses = 0; St.lootTargetCooldowns = {}
 
     St.teleCount = 0; St.teleFail = 0; St.dodgeCount = 0
     St.gcdHits = 0; St.gcdMisses = 0
     St.holdFires = 0; St.instantFires = 0
     St.comboFires = 0; St.comboRotations = 0
 
-    St.breathFrac = 1.0
-    St.partySize = 1
+    St.breathFrac = 1.0; St.partySize = 1
 
     local SK_KEYS = Cfg.SkillKeys
     local SKILL_COUNT = #SK_KEYS
@@ -150,8 +137,7 @@ function A.init(Ctx)
     local function buildPermutation()
         local pool = {}
         for i = 1, SKILL_COUNT do
-            if not (St.fIsBlock and SK_KEYS[i] == "F")
-               and Cfg.SkillUnlocked[i] then
+            if not (St.fIsBlock and SK_KEYS[i] == "F") and Cfg.SkillUnlocked[i] then
                 table.insert(pool, i)
             end
         end
@@ -177,17 +163,13 @@ function A.init(Ctx)
     end
 
     St.comboOrders = buildComboOrders()
-    St.comboOrderIdx = 1
-    St.comboPos = 1
-    St.comboRotations = 0
+    St.comboOrderIdx = 1; St.comboPos = 1; St.comboRotations = 0
 
     local function logCombos()
         print("[Dingus][Atk] combo orders:")
         for i, order in ipairs(St.comboOrders) do
             local names = {}
-            for _, idx in ipairs(order) do
-                table.insert(names, SK_KEYS[idx])
-            end
+            for _, idx in ipairs(order) do table.insert(names, SK_KEYS[idx]) end
             print(string.format("  %d: %s", i, table.concat(names, " → ")))
         end
     end
@@ -197,9 +179,7 @@ function A.init(Ctx)
 
     local function advanceCombo()
         local order = currentOrder()
-        if not order or #order == 0 then
-            St.comboOrderIdx = 1; St.comboPos = 1; return
-        end
+        if not order or #order == 0 then St.comboOrderIdx = 1; St.comboPos = 1; return end
         St.comboPos = St.comboPos + 1
         if St.comboPos > #order then
             St.comboRotations = St.comboRotations + 1
@@ -238,13 +218,9 @@ function A.init(Ctx)
     end
     scrubMovers()
     U.Lp.CharacterAdded:Connect(function()
-        task.wait(1)
-        scrubMovers()
-        St.blocking = false
-        St.blockHoldUntil = 0
-        St.fModeResolved = false
-        St.comboTargetName = nil
-        St.eqKey = nil
+        task.wait(1); scrubMovers()
+        St.blocking = false; St.blockHoldUntil = 0
+        St.fModeResolved = false; St.comboTargetName = nil; St.eqKey = nil
         resetCombo()
     end)
 
@@ -292,11 +268,9 @@ function A.init(Ctx)
         local prevGcd = St.gcdUntil
         St.gcdUntil = U.clock() + Cfg.GCDWindow
         local k = SK_KEYS[idx]
-        U.keyDown(k)
-        task.wait(Cfg.HoldProbeDuration)
+        U.keyDown(k); task.wait(Cfg.HoldProbeDuration)
         local ch = readAttackAnim()
-        U.keyUp(k)
-        task.wait(0.15)
+        U.keyUp(k); task.wait(0.15)
         if St.gcdUntil < prevGcd then St.gcdUntil = prevGcd end
         return ch
     end
@@ -318,8 +292,7 @@ function A.init(Ctx)
         St.comboOrders = buildComboOrders()
         St.comboOrderIdx = 1; St.comboPos = 1; St.comboRotations = 0
         logCombos()
-        St.holdDetected = true
-        St.holdDetecting = false
+        St.holdDetected = true; St.holdDetecting = false
     end
 
     --============================================================
@@ -327,18 +300,16 @@ function A.init(Ctx)
     --============================================================
     local function holdBlock()
         if St.blocking then return end
-        St.blocking = true
-        U.keyDown("F")
+        St.blocking = true; U.keyDown("F")
     end
 
     local function releaseBlock()
         if not St.blocking then return end
-        St.blocking = false
-        U.keyUp("F")
+        St.blocking = false; U.keyUp("F")
     end
 
     --============================================================
-    -- EQUIPPED TOOL READER · matches hotbar v2's logic
+    -- TOOL
     --============================================================
     local function equippedTool()
         local c = U.Lp.Character
@@ -350,12 +321,9 @@ function A.init(Ctx)
             local hand = c:FindFirstChild(handName)
             if hand then
                 for _, child in ipairs(hand:GetChildren()) do
-                    if child:IsA("BasePart")
-                       or child:IsA("MeshPart")
+                    if child:IsA("BasePart") or child:IsA("MeshPart")
                        or child:IsA("Model") then
-                        if not L.isCrow(child.Name) then
-                            return child
-                        end
+                        if not L.isCrow(child.Name) then return child end
                     end
                 end
             end
@@ -366,72 +334,46 @@ function A.init(Ctx)
     local function inventoryTools()
         local out = {}
         local c = U.Lp.Character
-        if c then
-            for _, t in ipairs(c:GetChildren()) do
-                if t:IsA("Tool") then table.insert(out, t) end
-            end
-        end
+        if c then for _, t in ipairs(c:GetChildren()) do
+            if t:IsA("Tool") then table.insert(out, t) end
+        end end
         local bp = U.Lp:FindFirstChildOfClass("Backpack")
-        if bp then
-            for _, t in ipairs(bp:GetChildren()) do
-                if t:IsA("Tool") then table.insert(out, t) end
-            end
-        end
+        if bp then for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") then table.insert(out, t) end
+        end end
         return out
     end
 
-    --============================================================
-    -- WEAPON EQUIP · delegates to Hotbar v2 item DB
-    --============================================================
     local function equipWeapon()
         if St.swapPending then return end
-
-        -- Skip while quest panel is open (would close it)
         if Ctx.Quest and Ctx.Quest.stats then
             local qs = Ctx.Quest.stats()
             if qs.panelOpen then return end
         end
-
-        -- Skip if hotbar mutex held by another subsystem
         local H = Ctx.Hotbar
         if H and H.isLocked() then return end
-
         local now = U.clock()
         if now - St.lEqp < 1.5 then return end
         St.lEqp = now
-
         local h = U.hum(); if not h then return end
         local current = equippedTool()
         if current and L.isWeapon(current.Name) then
-            St.eq = current.Name
-            return
+            St.eq = current.Name; return
         end
-
-        -- Roblox Tool path (rare on PS2)
         for _, t in ipairs(inventoryTools()) do
             if L.isWeapon(t.Name) then
                 St.swapPending = true
                 task.spawn(function()
                     pcall(function() h:EquipTool(t) end)
-                    St.eq = t.Name
-                    St.swapPending = false
+                    St.eq = t.Name; St.swapPending = false
                 end)
                 return
             end
         end
-
-        -- Custom hotbar path via Hotbar v2
         St.swapPending = true
         task.spawn(function()
-            if not H then
-                St.swapPending = false
-                return
-            end
-            if not H.acquire("attack-weapon", 3.0) then
-                St.swapPending = false
-                return
-            end
-
+            if not H then St.swapPending = false; return end
+            if not H.acquire("attack-weapon", 3.0) then St.swapPending = false; return end
             local ok, info = H.equipFirstOf("attack-weapon", "weapon", 0.5)
             if ok then
                 St.eq = info or "weapon"
@@ -441,14 +383,12 @@ function A.init(Ctx)
                     tostring(info), tostring(St.eqKey)))
             else
                 St.equipFailCount = (St.equipFailCount or 0) + 1
-                -- After 3 fails, force a scan on next attempt
                 if St.equipFailCount >= 3 then
                     if H.scanSlots then H.scanSlots("attack-refresh") end
                     St.equipFailCount = 0
                 end
             end
-            H.release("attack-weapon")
-            St.swapPending = false
+            H.release("attack-weapon"); St.swapPending = false
         end)
     end
 
@@ -458,27 +398,19 @@ function A.init(Ctx)
     local function gcdReady(now) return now >= St.gcdUntil end
 
     local function fireSkill(idx, now)
-        if not gcdReady(now) then
-            St.gcdMisses = St.gcdMisses + 1
-            return false
-        end
+        if not gcdReady(now) then St.gcdMisses = St.gcdMisses + 1; return false end
         if not Cfg.SkillUnlocked[idx] then return false end
         if St.fIsBlock and SK_KEYS[idx] == "F" then return false end
-        if not St.emergency and St.breathFrac and St.breathFrac < 0.12 then
-            return false
-        end
+        if not St.emergency and St.breathFrac and St.breathFrac < 0.12 then return false end
         local k = SK_KEYS[idx]
         local isHold = St.holdSkills[idx]
         if isHold then
             St.holdFires = St.holdFires + 1
             task.spawn(function()
-                U.keyDown(k)
-                task.wait(Cfg.HoldCastDuration)
-                U.keyUp(k)
+                U.keyDown(k); task.wait(Cfg.HoldCastDuration); U.keyUp(k)
             end)
         else
-            St.instantFires = St.instantFires + 1
-            U.tap(k)
+            St.instantFires = St.instantFires + 1; U.tap(k)
         end
         St.gcdUntil = now + Cfg.GCDWindow
         St.gcdHits = St.gcdHits + 1
@@ -493,16 +425,11 @@ function A.init(Ctx)
         local order = currentOrder()
         if not order or #order == 0 then
             St.comboOrders = buildComboOrders()
-            St.comboOrderIdx = 1; St.comboPos = 1
-            return
+            St.comboOrderIdx = 1; St.comboPos = 1; return
         end
         local idx = order[St.comboPos]
         if not idx then resetCombo(); return end
-        if fireSkill(idx, now) then
-            advanceCombo()
-        else
-            advanceCombo()
-        end
+        if fireSkill(idx, now) then advanceCombo() else advanceCombo() end
     end
 
     --============================================================
@@ -572,14 +499,11 @@ function A.init(Ctx)
 
     local function tryDodge(now)
         if now - St.lDodge < Cfg.DodgeCooldown then return false end
-        St.lDodge = now
-        St.dodgeCount = St.dodgeCount + 1
-        U.tap("Q")
-        return true
+        St.lDodge = now; St.dodgeCount = St.dodgeCount + 1; U.tap("Q"); return true
     end
 
     --============================================================
-    -- CHAINED STRIKE (M1/M2)
+    -- CHAINED STRIKE
     --============================================================
     local function doChainedStrike(count)
         count = count or Cfg.ComboBurst
@@ -597,8 +521,7 @@ function A.init(Ctx)
         St.aAt = (St.aAt or 0) + 1
         local hpBefore = t.hm.Health
         if St.comboTargetName ~= t.ch.Name then
-            St.comboTargetName = t.ch.Name
-            resetCombo()
+            St.comboTargetName = t.ch.Name; resetCombo()
         end
         St.comboIndex = St.comboIndex + 1
         local chain = Cfg.ComboBurst
@@ -613,8 +536,7 @@ function A.init(Ctx)
             local hit = t.hm.Health < hpBefore
             table.insert(St.rHt, hit)
             if #St.rHt > Cfg.HitWindow then table.remove(St.rHt, 1) end
-            if hit then St.aHi = (St.aHi or 0) + 1
-            else St.aMs = (St.aMs or 0) + 1 end
+            if hit then St.aHi = (St.aHi or 0) + 1 else St.aMs = (St.aMs or 0) + 1 end
         end)
     end
 
@@ -635,9 +557,7 @@ function A.init(Ctx)
             local ok, att = pcall(function() return h:GetAttribute("Breath") end)
             if ok and type(att) == "number" then
                 local maxOk, mx = pcall(function() return h:GetAttribute("MaxBreath") end)
-                if maxOk and type(mx) == "number" and mx > 0 then
-                    return att / mx
-                end
+                if maxOk and type(mx) == "number" and mx > 0 then return att / mx end
             end
         end
         return nil
@@ -650,10 +570,10 @@ function A.init(Ctx)
     end
 
     --============================================================
-    -- LOOT · ProximityPrompt-driven
+    -- LOOT · multi-source detection (Model name + prompt + click)
     --============================================================
     local function hasKeyword(str, list)
-        if not str then return false end
+        if not str or not list then return false end
         local l = string.lower(str)
         for i = 1, #list do
             if string.find(l, list[i], 1, true) then return true end
@@ -661,63 +581,69 @@ function A.init(Ctx)
         return false
     end
 
-    local function promptPos(prompt)
-        local parent = prompt.Parent
-        if not parent then return nil end
-        if parent:IsA("BasePart") then return parent.Position end
-        if parent:IsA("Attachment") and parent.Parent
-           and parent.Parent:IsA("BasePart") then
-            return parent.Parent.Position
+    local function modelPos(inst)
+        if not inst then return nil end
+        if inst:IsA("BasePart") then return inst.Position end
+        if inst:IsA("Attachment") and inst.Parent
+           and inst.Parent:IsA("BasePart") then
+            return inst.Parent.Position
         end
-        if parent:IsA("Model") then
-            if parent.PrimaryPart then return parent.PrimaryPart.Position end
-            local any = parent:FindFirstChildWhichIsA("BasePart")
+        if inst:IsA("Model") then
+            if inst.PrimaryPart then return inst.PrimaryPart.Position end
+            local any = inst:FindFirstChildWhichIsA("BasePart")
             if any then return any.Position end
+        end
+        if inst:IsA("ClickDetector") or inst:IsA("ProximityPrompt") then
+            return modelPos(inst.Parent)
         end
         return nil
     end
 
-    local function promptIsCooling(prompt, now)
-        local exp = St.lootTargetCooldowns[prompt]
-        if exp and now < exp then return true end
-        if exp and now >= exp then St.lootTargetCooldowns[prompt] = nil end
-        return false
+    local function classifyName(name)
+        if hasKeyword(name, Cfg.ChestKeywords) then return "chest" end
+        if hasKeyword(name, Cfg.LootKeywords) then return "loot" end
+        return nil
     end
 
-    local function scanPrompts(maxDist)
+    local function scanLootTargets(maxDist)
         local r = U.hrp()
         if not r then return {} end
         local myPos = r.Position
         local out = {}
+        local seen = {}
         local stack = { { workspace, 0 } }
         local iter = 0
+        local depthCap = math.max(Cfg.LootPromptDepth or 4, 8)
+
         while #stack > 0 do
             local item = table.remove(stack)
             local inst, depth = item[1], item[2]
-            if inst and depth <= (Cfg.LootPromptDepth or 4) then
-                if inst:IsA("ProximityPrompt") then
-                    local pos = promptPos(inst)
+            if inst and depth <= depthCap then
+                local kind, label = nil, nil
+                if inst:IsA("Model") or inst:IsA("Part") or inst:IsA("MeshPart") then
+                    kind = classifyName(inst.Name); label = inst.Name
+                end
+                if not kind and inst:IsA("ProximityPrompt") then
+                    local name = (inst.ObjectText or "") .. " " ..
+                                 (inst.ActionText or "") .. " " ..
+                                 (inst.Name or "")
+                    kind = classifyName(name); label = name
+                end
+                if not kind and inst:IsA("ClickDetector") then
+                    local name = inst.Name
+                    if inst.Parent then name = name .. " " .. inst.Parent.Name end
+                    kind = classifyName(name); label = name
+                end
+                if kind and not seen[inst] then
+                    local pos = modelPos(inst)
                     if pos then
                         local d = (pos - myPos).Magnitude
                         if d <= maxDist then
-                            local name = (inst.ObjectText or "")
-                                .. " " .. (inst.ActionText or "")
-                            local kind = nil
-                            if hasKeyword(name, Cfg.ChestKeywords) then
-                                kind = "chest"
-                            elseif hasKeyword(name, Cfg.LootKeywords) then
-                                kind = "loot"
-                            end
-                            if kind then
-                                table.insert(out, {
-                                    prompt = inst,
-                                    parent = inst.Parent,
-                                    dist = d,
-                                    kind = kind,
-                                    name = name,
-                                    pos = pos,
-                                })
-                            end
+                            seen[inst] = true
+                            table.insert(out, {
+                                inst = inst, pos = pos, dist = d,
+                                kind = kind, name = label or inst.Name,
+                            })
                         end
                     end
                 end
@@ -732,7 +658,7 @@ function A.init(Ctx)
         return out
     end
 
-    local function firePrompt(prompt)
+    local function tryFirePrompt(prompt)
         if type(fireproximityprompt) == "function" then
             local ok = pcall(fireproximityprompt, prompt)
             if ok then return true end
@@ -743,62 +669,71 @@ function A.init(Ctx)
             if prompt.InputHoldEnd then prompt:InputHoldEnd() end
         end)
         if ok then return true end
-        local r = U.hrp()
-        local pos = promptPos(prompt)
-        if r and pos then
-            pcall(function()
-                local flat = Vector3.new(pos.X - r.Position.X, 0, pos.Z - r.Position.Z)
-                if flat.Magnitude > 0.5 then
-                    local dest = r.Position + flat.Unit * math.max(0, flat.Magnitude - 3)
-                    r.CFrame = CFrame.new(Vector3.new(dest.X, r.Position.Y, dest.Z),
-                                          Vector3.new(pos.X, r.Position.Y, pos.Z))
-                end
-            end)
-            task.wait(0.1)
-            U.tap("T")
-            return true
+        return false
+    end
+
+    local function tryClick(detector)
+        if type(fireclickdetector) == "function" then
+            local ok = pcall(fireclickdetector, detector)
+            if ok then return true end
         end
         return false
     end
 
-    local function moveToPos(pos)
+    local function approachAndInteract(target)
         local r = U.hrp()
-        if not r or not pos then return end
-        local approach = pos - r.Position
-        local flat = Vector3.new(approach.X, 0, approach.Z)
-        if flat.Magnitude < 0.5 then return end
-        local dest = r.Position + flat.Unit * math.max(0, flat.Magnitude - 4)
-        dest = Vector3.new(dest.X, r.Position.Y, dest.Z)
-        local cf = safeCFrame(dest, pos)
-        pcall(function() r.CFrame = cf end)
-        task.wait(0.12)
+        if not r then return false end
+        local dest = target.pos
+        local dist = (dest - r.Position).Magnitude
+        if dist > 4 then
+            local approach = dest - r.Position
+            local flat = Vector3.new(approach.X, 0, approach.Z)
+            if flat.Magnitude > 0.1 then
+                local moveTo = r.Position + flat.Unit * math.max(0, flat.Magnitude - 3)
+                moveTo = Vector3.new(moveTo.X, r.Position.Y, moveTo.Z)
+                local cf = safeCFrame(moveTo, dest)
+                pcall(function() r.CFrame = cf end)
+                task.wait(0.15)
+            end
+        end
+        local inst = target.inst
+        if inst:IsA("ProximityPrompt") then
+            if tryFirePrompt(inst) then return true end
+        elseif inst:IsA("ClickDetector") then
+            if tryClick(inst) then return true end
+        end
+        local found = false
+        for _, child in ipairs(inst:GetDescendants()) do
+            if not found and child:IsA("ProximityPrompt") then
+                if tryFirePrompt(child) then found = true end
+            elseif not found and child:IsA("ClickDetector") then
+                if tryClick(child) then found = true end
+            end
+        end
+        if found then return true end
+        U.tap("T"); task.wait(0.1); U.tap("E")
+        return true
     end
 
     local function lootSweep(radius)
-        local now = U.clock()
-        local prompts = scanPrompts(radius)
-        if #prompts == 0 then return 0 end
+        local targets = scanLootTargets(radius)
+        if #targets == 0 then return 0 end
         local fired = 0
-        for i = 1, #prompts do
-            local p = prompts[i]
-            if p.prompt and p.prompt.Parent
-               and not promptIsCooling(p.prompt, now) then
-                moveToPos(p.pos)
-                local ok = firePrompt(p.prompt)
+        for i = 1, #targets do
+            local t = targets[i]
+            if t.inst and t.inst.Parent then
+                local ok = approachAndInteract(t)
                 if ok then
                     fired = fired + 1
-                    if p.kind == "chest" then
+                    if t.kind == "chest" then
                         St.chestCollected = (St.chestCollected or 0) + 1
-                        print(string.format("[Dingus][Loot] chest opened: %s",
-                            (p.name or ""):gsub("^%s+", "")))
+                        print(string.format("[Dingus][Loot] chest: %s @%.0f",
+                            tostring(t.name):gsub("^%s+", ""), t.dist))
                     else
                         St.lootCollected = (St.lootCollected or 0) + 1
                     end
-                else
-                    St.lootSkipped = (St.lootSkipped or 0) + 1
-                    St.lootTargetCooldowns[p.prompt] = now + (Cfg.LootTargetCooldown or 45)
                 end
-                task.wait(0.06)
+                task.wait(0.08)
             end
         end
         return fired
@@ -807,44 +742,33 @@ function A.init(Ctx)
     local function lootBossDrop()
         if not Cfg.ChestEnabled then return end
         local startT = U.clock()
-        local deadline = startT + (Cfg.LootPassDeadline or 8)
-        local totalFired = 0
-        local emptyPasses = 0
-        local pass = 0
-        local maxPasses = Cfg.LootMaxPasses or 4
-
-        while U.clock() < deadline and pass < maxPasses and emptyPasses < 2 do
+        local deadline = startT + (Cfg.LootPassDeadline or 12)
+        local totalFired, emptyPasses, pass = 0, 0, 0
+        local maxPasses = Cfg.LootMaxPasses or 6
+        print("[Dingus][Loot] boss dropped — collecting")
+        while U.clock() < deadline and pass < maxPasses and emptyPasses < 3 do
             pass = pass + 1
-            St.lootPasses = (St.lootPasses or 0) + 1
-            local fired = lootSweep(Cfg.LootRadius or 30)
+            local fired = lootSweep(Cfg.LootRadius or 50)
             totalFired = totalFired + fired
-            if fired == 0 then
-                emptyPasses = emptyPasses + 1
-            else
-                emptyPasses = 0
-            end
-            task.wait(0.3)
+            if fired == 0 then emptyPasses = emptyPasses + 1
+            else emptyPasses = 0 end
+            task.wait(0.4)
         end
-
-        if totalFired > 0 then
-            print(string.format("[Dingus][Loot] cycle done · fired=%d passes=%d",
-                totalFired, pass))
-        elseif Cfg.LootVerbose then
-            print("[Dingus][Loot] no loot found within radius")
-        end
+        print(string.format("[Dingus][Loot] done · fired=%d passes=%d",
+            totalFired, pass))
     end
 
     local function lootPassive()
         if not Cfg.ChestEnabled then return end
         if St.tgt then return end
-        local fired = lootSweep(Cfg.LootRadius or 30)
-        if fired > 0 and Cfg.LootVerbose then
+        local fired = lootSweep(Cfg.LootRadius or 50)
+        if fired > 0 then
             print(string.format("[Dingus][Loot] passive · %d", fired))
         end
     end
 
     --============================================================
-    -- TARGET ACQUISITION · uses Quest priority filter via detect
+    -- TARGET ACQUISITION
     --============================================================
     local function acquireTarget()
         local tgt, kind = D.pickTarget()
@@ -852,8 +776,7 @@ function A.init(Ctx)
         St.tgtKind = kind
         if tgt then
             if St.comboTargetName ~= tgt.ch.Name then
-                St.comboTargetName = tgt.ch.Name
-                resetCombo()
+                St.comboTargetName = tgt.ch.Name; resetCombo()
             end
             print(string.format("[Dingus] target %s (%s) @%.0f",
                 tgt.ch.Name, kind, tgt.d))
@@ -873,18 +796,14 @@ function A.init(Ctx)
                 task.wait(0.5); waited = waited + 0.5
             end
             if St.cbt then
-                St.fModeResolved = true
-                St.fIsBlock = false
-                print("[Dingus][Atk] F-mode deferred — skill")
-                return
+                St.fModeResolved = true; St.fIsBlock = false
+                print("[Dingus][Atk] F-mode deferred — skill"); return
             end
             local c = U.Lp.Character
             if c then
-                U.keyDown("F")
-                task.wait(0.15)
+                U.keyDown("F"); task.wait(0.15)
                 local ok1, v1 = pcall(function() return c:GetAttribute("IsBlocking") end)
-                U.keyUp("F")
-                task.wait(0.05)
+                U.keyUp("F"); task.wait(0.05)
                 if ok1 and v1 == true then
                     St.fIsBlock = true
                     print("[Dingus][Atk] F-mode = BLOCK")
@@ -893,8 +812,7 @@ function A.init(Ctx)
                     print("[Dingus][Atk] F-mode = SKILL")
                 end
                 St.comboOrders = buildComboOrders()
-                St.comboOrderIdx = 1; St.comboPos = 1
-                logCombos()
+                St.comboOrderIdx = 1; St.comboPos = 1; logCombos()
             end
         elseif mode == "block" then
             St.fIsBlock = true
@@ -932,8 +850,7 @@ function A.init(Ctx)
         if retreatRunning then return end
         retreatRunning = true
         St.rtrC = (St.rtrC or 0) + 1
-        St.cbtS = "RETREAT"
-        releaseBlock()
+        St.cbtS = "RETREAT"; releaseBlock()
         print(string.format("[Dingus][Atk] retreat (%s)", tostring(reason or "hp")))
         task.spawn(function()
             U.tap("Q"); task.wait(0.25)
@@ -954,16 +871,13 @@ function A.init(Ctx)
                 if not hh then break end
                 if hh.Health / hh.MaxHealth > Cfg.RetreatClearHP then break end
                 if hh.Health < lastHp then
-                    lastHp = hh.Health
-                    lastDamageT = U.clock()
+                    lastHp = hh.Health; lastDamageT = U.clock()
                 end
                 if U.clock() - lastDamageT > 1.5 and U.clock() > startT + 0.8 then break end
                 if U.clock() > hardCap then break end
-                h:Move(flat.Unit)
-                task.wait(0.05)
+                h:Move(flat.Unit); task.wait(0.05)
             end
-            retreatRunning = false
-            St.tgt = nil
+            retreatRunning = false; St.tgt = nil
             if D.invalidate then D.invalidate() end
         end)
     end
@@ -973,11 +887,9 @@ function A.init(Ctx)
     --============================================================
     function A.combatTick()
         if not St.cbt then
-            St.cbtS = "IDLE"
-            releaseBlock()
+            St.cbtS = "IDLE"; releaseBlock()
             if Cfg.ChestEnabled and (U.clock() - St.lChestPassive > 15) then
-                St.lChestPassive = U.clock()
-                pcall(lootPassive)
+                St.lChestPassive = U.clock(); pcall(lootPassive)
             end
             return
         end
@@ -990,15 +902,13 @@ function A.init(Ctx)
         local now = U.clock()
         local hpFrac = h.Health / h.MaxHealth
 
-        -- Critical HP hard retreat
         St.critical = hpFrac < Cfg.CriticalHP
         if St.critical and not retreatRunning then
             local nearest = St.ths and St.ths[1]
             local from = nearest and nearest.rp.Position
                 or (St.tgt and St.tgt.rp and St.tgt.rp.Position)
                 or r.Position
-            startRetreat(from, "critical")
-            return
+            startRetreat(from, "critical"); return
         end
 
         St.emergency = (not St.critical) and hpFrac < Cfg.EmergencyHP
@@ -1012,7 +922,6 @@ function A.init(Ctx)
             St.partySize = readPartySize()
         end
 
-        -- Damage detection → block trigger
         if St.lastHp > 0 and h.Health < St.lastHp - 0.5 then
             if St.fIsBlock and Cfg.AutoBlockOnDamage then
                 St.damageBlockUntil = now + Cfg.BlockReactionWindow
@@ -1022,7 +931,6 @@ function A.init(Ctx)
 
         if now - St.lBrt > 2.5 then St.lBrt = now; U.tap("L") end
 
-        -- Retreat at regular threshold
         if not St.emergency and St.rtr and hpFrac < Cfg.RetreatHP
            and not retreatRunning then
             local nearest = St.ths and St.ths[1]
@@ -1030,32 +938,21 @@ function A.init(Ctx)
         end
         if retreatRunning then return end
 
-        -- Passive loot while idle
-        if Cfg.ChestEnabled and not St.tgt
-           and (now - St.lChestPassive) > 15 then
-            St.lChestPassive = now
-            pcall(lootPassive)
+        if Cfg.ChestEnabled and not St.tgt and (now - St.lChestPassive) > 15 then
+            St.lChestPassive = now; pcall(lootPassive)
         end
 
-        -- Target management
         if not St.tgt or not St.tgt.ch.Parent or St.tgt.hm.Health <= 0 then
             if St.tgt then
                 St.kll = (St.kll or 0) + 1
                 St.bKll = (St.bKll or 0) + 1
                 print(string.format("[Dingus] killed %s (%d)",
                     St.tgt.ch.Name, St.bKll))
-                St.tgt = nil
-                St.comboTargetName = nil
-                resetCombo()
-                releaseBlock()
+                St.tgt = nil; St.comboTargetName = nil
+                resetCombo(); releaseBlock()
                 if D.invalidate then D.invalidate() end
-
-                -- Full loot cycle before next target
-                if Cfg.ChestEnabled then
-                    pcall(lootBossDrop)
-                end
+                if Cfg.ChestEnabled then pcall(lootBossDrop) end
             end
-
             acquireTarget()
             if not St.tgt then St.cbtS = "IDLE"; releaseBlock(); return end
         end
@@ -1075,17 +972,13 @@ function A.init(Ctx)
         if not (imminent or bossAttacking) then
             if St.bossIdleSince == 0 then St.bossIdleSince = now end
         else
-            St.bossIdleSince = 0
-            St.threatPeak = now
+            St.bossIdleSince = 0; St.threatPeak = now
         end
 
-        -- Long range → teleport
         if dist > Cfg.AtkRange then
-            St.cbtS = "TELEPORT"
-            releaseBlock()
+            St.cbtS = "TELEPORT"; releaseBlock()
             teleportChase(t, tPos, myPos)
-            fireCombo(t, hpFrac, now)
-            return
+            fireCombo(t, hpFrac, now); return
         end
 
         inRangeChase(t, tPos, myPos, now)
@@ -1108,43 +1001,32 @@ function A.init(Ctx)
         end
         if St.emergency then forceBlock = false end
 
-        -- Dodge on telegraph
         if not St.emergency then
             local canDodge = (now - St.lDodge) > Cfg.DodgeCooldown
             local telegraph = timeSinceThreat < Cfg.TelegraphWindow
             if (imminent or bossAttacking) and canDodge and telegraph then
-                St.cbtS = "DODGE"
-                releaseBlock()
-                tryDodge(now)
-                return
+                St.cbtS = "DODGE"; releaseBlock(); tryDodge(now); return
             end
         end
 
         if forceBlock then
-            St.cbtS = "BLOCK"
-            holdBlock()
-            fireCombo(t, hpFrac, now)
-            return
+            St.cbtS = "BLOCK"; holdBlock()
+            fireCombo(t, hpFrac, now); return
         end
 
         if stunned and St.stunPun then
-            St.cbtS = "PUNISH"
-            releaseBlock()
+            St.cbtS = "PUNISH"; releaseBlock()
             if now - St.lAtk >= Cfg.StunAtkInt then
-                St.lAtk = now
-                strike(t, now)
+                St.lAtk = now; strike(t, now)
             end
-            fireCombo(t, hpFrac, now)
-            return
+            fireCombo(t, hpFrac, now); return
         end
 
         if blocking then
-            St.cbtS = "BREAK"
-            releaseBlock()
+            St.cbtS = "BREAK"; releaseBlock()
             fireCombo(t, hpFrac, now)
             if now - St.lAtk > St.aiI * 1.2 then
-                St.lAtk = now
-                strike(t, now)
+                St.lAtk = now; strike(t, now)
             end
             return
         end
@@ -1152,8 +1034,7 @@ function A.init(Ctx)
         St.cbtS = St.emergency and "EMERGENCY" or "STRIKE"
         releaseBlock()
         if now - St.lAtk >= currentInterval() then
-            St.lAtk = now
-            strike(t, now)
+            St.lAtk = now; strike(t, now)
         end
         fireCombo(t, hpFrac, now)
     end
@@ -1178,11 +1059,7 @@ function A.init(Ctx)
     end
 
     function A.fModeInfo()
-        return {
-            resolved = St.fModeResolved,
-            isBlock = St.fIsBlock,
-            blocking = St.blocking,
-        }
+        return { resolved = St.fModeResolved, isBlock = St.fIsBlock, blocking = St.blocking }
     end
 
     function A.comboInfo()
@@ -1215,44 +1092,32 @@ function A.init(Ctx)
             holder = Ctx.Hotbar.isLocked() or "free"
         end
         return {
-            teleports = St.teleCount or 0,
-            dodges = St.dodgeCount or 0,
-            gcdHits = St.gcdHits or 0,
-            gcdMisses = St.gcdMisses or 0,
-            comboFires = St.comboFires or 0,
-            comboRotations = St.comboRotations or 0,
-            holdFires = St.holdFires or 0,
-            instantFires = St.instantFires or 0,
-            holdSkills = St.holdSkills,
-            emergency = St.emergency,
-            critical = St.critical,
-            blocking = St.blocking,
-            breathFrac = St.breathFrac or 1.0,
-            partySize = St.partySize or 1,
+            teleports = St.teleCount or 0, dodges = St.dodgeCount or 0,
+            gcdHits = St.gcdHits or 0, gcdMisses = St.gcdMisses or 0,
+            comboFires = St.comboFires or 0, comboRotations = St.comboRotations or 0,
+            holdFires = St.holdFires or 0, instantFires = St.instantFires or 0,
+            holdSkills = St.holdSkills, emergency = St.emergency,
+            critical = St.critical, blocking = St.blocking,
+            breathFrac = St.breathFrac or 1.0, partySize = St.partySize or 1,
             chestsCollected = St.chestCollected or 0,
             lootCollected = St.lootCollected or 0,
             lootSkipped = St.lootSkipped or 0,
             lootPasses = St.lootPasses or 0,
-            equipped = St.eq,
-            equipKey = St.eqKey,
+            equipped = St.eq, equipKey = St.eqKey,
             hotbarHolder = holder,
         }
     end
 
     function A.reprobeHoldSkills()
-        St.holdDetected = false
-        St.holdDetecting = false
-        St.holdSkills = {}
+        St.holdDetected = false; St.holdDetecting = false; St.holdSkills = {}
         detectHoldSkills()
     end
 
-    function A.lootNow()
-        pcall(lootBossDrop)
-    end
+    function A.lootNow() pcall(lootBossDrop) end
 
     function A.scanPromptsNow()
-        local list = scanPrompts(Cfg.LootRadius or 30)
-        print(string.format("[Dingus][Loot] %d prompts within radius:", #list))
+        local list = scanLootTargets(Cfg.LootRadius or 50)
+        print(string.format("[Dingus][Loot] %d targets within radius:", #list))
         for i = 1, math.min(#list, 15) do
             local p = list[i]
             print(string.format("  [%s] %s @ %.0f",
@@ -1262,14 +1127,13 @@ function A.init(Ctx)
     end
 
     function A.refreshWeapon()
-        St.lEqp = 0
-        St.equipFailCount = 0
+        St.lEqp = 0; St.equipFailCount = 0
     end
 
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function() releaseBlock() end)
 
-    print("[Dingus][attack] v15 initialized · integrated with hotbar v2")
+    print("[Dingus][attack] v17 initialized · unified pipeline")
 end
 
 return A
