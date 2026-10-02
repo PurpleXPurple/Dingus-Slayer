@@ -1,7 +1,6 @@
 --[[
-    Dingus-Slayer · main.lua v33
-    Ctx exposure for diagnostics. Quest loop polls at 0.5s.
-    Everything else unchanged from v32.
+    Dingus-Slayer · main.lua v34
+    Adds hotbar subsystem. All phases pcall-wrapped.
 ]]--
 
 local M = {}
@@ -34,7 +33,6 @@ function M.boot(Ctx)
         return
     end
 
-    -- Expose for diagnostics
     _G.Ctx = Ctx
     _G.St  = Ctx.St
 
@@ -52,9 +50,9 @@ function M.boot(Ctx)
         _G.St = St
     end
 
-    --============================================================
+    --================================================================
     -- PHASE 1 · STATE
-    --============================================================
+    --================================================================
     phase(1, "state")
     safeRun("state", function()
         St.run = true
@@ -126,9 +124,9 @@ function M.boot(Ctx)
         print("[Dingus][main] state initialized")
     end)
 
-    --============================================================
+    --================================================================
     -- PHASE 2 · SCRUB
-    --============================================================
+    --================================================================
     phase(2, "scrub")
     safeRun("scrub", function()
         local r = U.hrp()
@@ -154,9 +152,9 @@ function M.boot(Ctx)
         if n > 0 then print("[Dingus][main] scrubbed " .. n .. " movers") end
     end)
 
-    --============================================================
+    --================================================================
     -- PHASE 3 · CONFIG
-    --============================================================
+    --================================================================
     phase(3, "config")
     safeRun("config", function()
         if Cfg.setUtils then Cfg.setUtils(U) end
@@ -166,14 +164,15 @@ function M.boot(Ctx)
         end
     end)
 
-    --============================================================
+    --================================================================
     -- PHASE 4 · SUBSYSTEMS
-    --============================================================
+    --================================================================
     phase(4, "subsystems")
     safeRun("subsystems", function()
         local subsys = {
             { name = "detect",     mod = "Detect" },
             { name = "scanners",   mod = "Scan"   },
+            { name = "hotbar",     mod = "Hotbar" },
             { name = "spoofers",   mod = "Spoof"  },
             { name = "quests",     mod = "Quest"  },
             { name = "attack",     mod = "Atk"    },
@@ -201,19 +200,19 @@ function M.boot(Ctx)
         end
         print(string.format("[Dingus] %d/%d subsystems ok", okCount, #subsys))
 
-        -- Re-expose after subsys populate Ctx
         _G.Cfg    = Ctx.Cfg
         _G.Detect = Ctx.Detect
         _G.Scan   = Ctx.Scan
+        _G.Hotbar = Ctx.Hotbar
         _G.Quest  = Ctx.Quest
         _G.Atk    = Ctx.Atk
         _G.Spoof  = Ctx.Spoof
         _G.Gui    = Ctx.Gui
     end)
 
-    --============================================================
+    --================================================================
     -- PHASE 5 · SYSTEMS
-    --============================================================
+    --================================================================
     phase(5, "systems")
 
     local loops = {}
@@ -262,9 +261,9 @@ function M.boot(Ctx)
         print(string.format("[Dingus][main] %d scheduler loops", #loops))
     end)
 
-    --============================================================
+    --================================================================
     -- PHASE 6 · DEFERRED
-    --============================================================
+    --================================================================
     phase(6, "deferred")
     St.boot = true
     print("[Dingus] ready · RightShift to toggle UI")
@@ -296,9 +295,9 @@ function M.boot(Ctx)
         print("[Dingus] boot complete")
     end)
 
-    --============================================================
+    --================================================================
     -- MAIN SCHEDULER
-    --============================================================
+    --================================================================
     local ST = St
     task.spawn(function()
         while ST.run do
@@ -333,9 +332,9 @@ function M.boot(Ctx)
         end
     end)
 
-    --============================================================
+    --================================================================
     -- FPS
-    --============================================================
+    --================================================================
     pcall(function()
         game:GetService("RunService").RenderStepped:Connect(function(dt)
             if dt > 0 and dt < 1 then
@@ -348,9 +347,9 @@ function M.boot(Ctx)
         end)
     end)
 
-    --============================================================
+    --================================================================
     -- RESPAWN
-    --============================================================
+    --================================================================
     pcall(function()
         U.Lp.CharacterAdded:Connect(function()
             task.wait(2)
@@ -363,6 +362,9 @@ function M.boot(Ctx)
             St.lHp = 0; St.lHpT = 0; St.lDmg = 0
             St.cPrch = false
             St.FlyActive = false
+            if Ctx.Hotbar and Ctx.Hotbar.forceRelease then
+                pcall(Ctx.Hotbar.forceRelease)
+            end
             for i = 1, #loops do
                 loops[i].errors = 0
                 loops[i].disabled = false
@@ -371,9 +373,9 @@ function M.boot(Ctx)
         end)
     end)
 
-    --============================================================
+    --================================================================
     -- RIGHTSHIFT
-    --============================================================
+    --================================================================
     pcall(function()
         game:GetService("UserInputService").InputBegan:Connect(function(input, gp)
             if gp then return end
@@ -389,12 +391,13 @@ function M.boot(Ctx)
         end)
     end)
 
-    --============================================================
+    --================================================================
     -- UNLOAD
-    --============================================================
+    --================================================================
     Ctx.Unload = function()
         print("[Dingus] unloading...")
         if Ctx.Atk and Ctx.Atk.stopHover then pcall(Ctx.Atk.stopHover) end
+        if Ctx.Hotbar and Ctx.Hotbar.forceRelease then pcall(Ctx.Hotbar.forceRelease) end
         St.run = false
         St.boot = false
         pcall(function() if Cfg.save then Cfg.save("default") end end)
