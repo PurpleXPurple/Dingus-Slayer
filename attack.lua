@@ -1,11 +1,19 @@
 --[[
-    Dingus-Slayer · attack.lua v4
-    Self-contained config. Fly watchdog. Equip diagnostics.
-    F-key probe. Auto-block. Everything declared inline.
+    Dingus-Slayer · attack.lua v5
+    Teleport-based chase. Fly path removed entirely.
 
-    Config defaults are set at init if not already present in Cfg.
-    Add any of these to config.lua's PERSIST list to make them
-    persist across sessions. Otherwise they reset each boot.
+    Chase strategy:
+      - Target within AtkRange: strike
+      - Target beyond AtkRange: teleport behind, facing forward
+      - Teleport is rate-limited (TeleportCd), jittered, and blended
+        with a random walk command so position history looks normal
+
+    Config keys added (defaulted inline):
+      TeleportCd          seconds between teleport hops
+      TeleportBehindDist  studs behind boss to land
+      TeleportHeight      studs above target Y
+      TeleportJitter      random XY jitter per hop
+      TeleportWalkBlend   chance to send a small walk command post-hop
 ]]--
 
 local A = {}
@@ -19,40 +27,37 @@ function A.init(Ctx)
     local RunService = game:GetService("RunService")
 
     --============================================================
-    -- INLINE CONFIG DEFAULTS
+    -- INLINE CONFIG
     --============================================================
-    -- Combat tuning
     Cfg.AtkRange       = Cfg.AtkRange       or 8
     Cfg.AtkInterval    = Cfg.AtkInterval    or 0.55
     Cfg.AtkIntMin      = Cfg.AtkIntMin      or 0.35
     Cfg.AtkIntMax      = Cfg.AtkIntMax      or 0.75
     Cfg.StunAtkInt     = Cfg.StunAtkInt     or 0.28
     Cfg.HitWindow      = Cfg.HitWindow      or 12
-    Cfg.RunSpeed       = Cfg.RunSpeed       or 32
+    Cfg.RunSpeed       = Cfg.RunSpeed       or 16
 
-    -- Retreat
     Cfg.RetreatHP      = Cfg.RetreatHP      or 0.35
     Cfg.RetreatDelay   = Cfg.RetreatDelay   or 4.0
     Cfg.RetreatClearHP = Cfg.RetreatClearHP or 0.65
 
-    -- Skills (6 slots, F at index 1)
     Cfg.SkillKeys      = Cfg.SkillKeys      or { "F", "Z", "X", "C", "V", "B" }
     Cfg.SkillCooldowns = Cfg.SkillCooldowns or { 0.5, 1.2, 2.0, 2.8, 3.6, 6.0 }
     Cfg.RotationOrder  = Cfg.RotationOrder  or { 2, 3, 4, 5, 6 }
 
-    -- F-key behavior
     Cfg.FKeyMode       = Cfg.FKeyMode       or "auto"
     Cfg.AutoBlock      = Cfg.AutoBlock      ~= false
     Cfg.BlockHoldTTL   = Cfg.BlockHoldTTL   or 0.6
     Cfg.BlockProbeWait = Cfg.BlockProbeWait or 0.15
 
-    -- Fly watchdog
-    Cfg.FlyWatchdogT   = Cfg.FlyWatchdogT   or 3.0
-    Cfg.FlyWatchdogD   = Cfg.FlyWatchdogD   or 5
-    Cfg.FlyCooldownT   = Cfg.FlyCooldownT   or 5.0
+    -- Teleport
+    Cfg.TeleportCd         = Cfg.TeleportCd         or 0.22
+    Cfg.TeleportBehindDist = Cfg.TeleportBehindDist or 6
+    Cfg.TeleportHeight     = Cfg.TeleportHeight     or 3
+    Cfg.TeleportJitter     = Cfg.TeleportJitter     or 2
+    Cfg.TeleportWalkBlend  = Cfg.TeleportWalkBlend  or 0.4
 
-    -- Equip
-    Cfg.EquipDebugN    = Cfg.EquipDebugN    or 5
+    Cfg.EquipDebugN    = Cfg.EquipDebugN    or 3
 
     --============================================================
     -- STATE
@@ -60,43 +65,26 @@ function A.init(Ctx)
     St.rHt = {}
     St.skCd = { 0, 0, 0, 0, 0, 0 }
     St.aiI = Cfg.AtkInterval
-    St.lAtk = 0
-    St.lSkl = 0
-    St.lEqp = 0
-    St.lBrt = 0
-    St.lFac = 0
-    St.lMoveLog = 0
-    St.eq = "none"
-    St.lTl = false
+    St.lAtk = 0; St.lSkl = 0; St.lEqp = 0; St.lBrt = 0
+    St.lFac = 0; St.lMoveLog = 0; St.lTele = 0
+    St.eq = "none"; St.lTl = false
     St.cbtS = "IDLE"
-    St.lastPos = nil
-    St.lastPosTime = 0
+    St.lastPos = nil; St.lastPosTime = 0
     St.stuckWarnings = 0
-    St.lastComboTime = 0
-    St.comboIndex = 0
+    St.lastComboTime = 0; St.comboIndex = 0
     St.swapPending = false
-
-    -- Fly coordination
-    St.flyFailLogged   = false
-    St.flyEnterT       = 0
-    St.flyEnterDist    = 0
-    St.flyCooldownUntil = 0
-    St.flyWatchdogLogged = false
-
-    -- Equip diagnostics
     St.equipDebugLeft = Cfg.EquipDebugN
 
-    -- F-key state
-    St.fIsBlock      = false
+    St.fIsBlock = false
     St.fModeResolved = false
-    St.blocking      = false
+    St.blocking = false
     St.blockHoldUntil = 0
 
-    --============================================================
-    -- CONSTANTS FROM CONFIG
-    --============================================================
-    local SK_KEYS  = Cfg.SkillKeys
-    local SK_CDS   = Cfg.SkillCooldowns
+    -- Teleport counters
+    St.teleCount = 0
+
+    local SK_KEYS = Cfg.SkillKeys
+    local SK_CDS  = Cfg.SkillCooldowns
     local ROTATION = Cfg.RotationOrder
 
     local COMBO_AIR       = { "m1", "m2", "m1", "m2", "m1" }
@@ -116,8 +104,7 @@ function A.init(Ctx)
                 or c:IsA("BodyGyro") or c:IsA("BodyForce")
                 or c:IsA("LinearVelocity") or c:IsA("AlignOrientation")
                 or c:IsA("AlignPosition") then
-                c:Destroy()
-                n = n + 1
+                c:Destroy(); n = n + 1
             end
         end
         local h = U.hum()
@@ -134,9 +121,6 @@ function A.init(Ctx)
         St.blocking = false
         St.blockHoldUntil = 0
         St.fModeResolved = false
-        St.flyEnterT = 0
-        St.flyEnterDist = 0
-        St.flyWatchdogLogged = false
     end)
 
     --============================================================
@@ -189,7 +173,6 @@ function A.init(Ctx)
         if St.cbt then return nil end
 
         local baseWS = h.WalkSpeed
-
         U.keyDown("F")
         task.wait(Cfg.BlockProbeWait)
 
@@ -200,10 +183,8 @@ function A.init(Ctx)
             local h2 = U.hum()
             if h2 and h2.WalkSpeed < baseWS - 4 then isBlock = true end
         end
-
         U.keyUp("F")
         task.wait(0.05)
-
         return isBlock and "block" or "skill"
     end
 
@@ -250,9 +231,6 @@ function A.init(Ctx)
         return out
     end
 
-    --============================================================
-    -- EQUIP WEAPON (with diagnostics)
-    --============================================================
     local function equipWeapon()
         if St.swapPending then return end
         local now = U.clock()
@@ -270,36 +248,14 @@ function A.init(Ctx)
 
         if current and L.isWeapon(current.Name) then
             St.eq = current.Name
-            if debugThis then
-                print(string.format(
-                    "[Dingus][Equip] '%s' recognized as weapon — no swap",
-                    current.Name))
-            end
             return
-        end
-
-        local inv = inventoryTools()
-        if debugThis then
-            local names = {}
-            for i, t in ipairs(inv) do
-                if i > 10 then break end
-                names[#names+1] = t.Name
-            end
-            print(string.format("[Dingus][Equip] inventory (%d): %s",
-                #inv, table.concat(names, ", ")))
         end
 
         local target = nil
-        for _, t in ipairs(inv) do
+        for _, t in ipairs(inventoryTools()) do
             if L.isWeapon(t.Name) then target = t; break end
         end
-
-        if not target then
-            if debugThis then
-                print("[Dingus][Equip] no weapon matched")
-            end
-            return
-        end
+        if not target then return end
 
         St.swapPending = true
         task.spawn(function()
@@ -407,113 +363,69 @@ function A.init(Ctx)
     end
 
     --============================================================
-    -- FLY TRANSITION
+    -- TELEPORT CHASE
     --============================================================
-    local function tryEngageFly()
-        if not Ctx.Fly then return false end
-        if Ctx.Fly.active then return true end
-        if type(Ctx.Fly.start) ~= "function" then return false end
-
-        local ok, err = pcall(Ctx.Fly.start)
-        if not ok then
-            if not St.flyFailLogged then
-                St.flyFailLogged = true
-                print("[Dingus][Atk] fly start raised: " .. tostring(err))
-            end
-            return false
-        end
-        if not Ctx.Fly.active then
-            if not St.flyFailLogged then
-                St.flyFailLogged = true
-                print("[Dingus][Atk] fly start returned without activating")
-            end
-            return false
-        end
-        St.flyFailLogged = false
-        return true
-    end
-
-    local function tryDisengageFly()
-        if not Ctx.Fly or not Ctx.Fly.active then return end
-        if type(Ctx.Fly.stop) ~= "function" then return end
-        pcall(Ctx.Fly.stop)
-    end
-
-    local function groundChase(r, tPos)
-        local h = U.hum()
-        if not h then return end
-        local flat = Vector3.new(tPos.Position.X - r.Position.X, 0,
-                                tPos.Position.Z - r.Position.Z)
-        if flat.Magnitude < 0.1 then return end
-        h.WalkSpeed = Cfg.RunSpeed
-        h:Move(flat.Unit)
-    end
-
-    --============================================================
-    -- MOVEMENT TICK
-    --============================================================
-    local function movementTick(dt)
-        if not St.cbt then return end
-        if St.cbtS == "RETREAT" then return end
-        if St.FlyActive then return end
-        if not St.tgt or not St.tgt.ch.Parent or St.tgt.hm.Health <= 0 then return end
-
-        local h = U.hum()
+    local function teleportChase(t, tPos)
         local r = U.hrp()
-        if not h or not r then return end
-
-        local targetHRP = St.tgt.ch:FindFirstChild("HumanoidRootPart")
-        if not targetHRP then return end
-
-        local myPos = r.Position
-        local targetPos = targetHRP.Position
-        local dist = U.xzDist(myPos, targetPos)
-
-        if dist <= Cfg.AtkRange then
-            h:Move(Vector3.zero)
-            return
-        end
-
-        local dir = targetPos - myPos
-        local flatDir = Vector3.new(dir.X, 0, dir.Z)
-        if flatDir.Magnitude < 0.1 then return end
-        flatDir = flatDir.Unit
-
-        h.WalkSpeed = Cfg.RunSpeed
-        h:Move(flatDir)
+        if not r then return false end
 
         local now = U.clock()
-        if not St.lastPos then
-            St.lastPos = myPos
-            St.lastPosTime = now
-        else
-            local moved = (myPos - St.lastPos).Magnitude
-            if moved > 0.4 then
-                St.lastPos = myPos
-                St.lastPosTime = now
-            elseif now - St.lastPosTime > 1.2 then
-                local nudge = flatDir * 2.5
-                local newPos = myPos + nudge
+        if now - St.lTele < Cfg.TeleportCd then return false end
+        St.lTele = now
+
+        local targetPos = tPos.Position
+        local bossLook = tPos.CFrame.LookVector
+
+        -- Land behind the boss at configured height
+        local behindOffset = -bossLook * Cfg.TeleportBehindDist
+        local aboveOffset = Vector3.new(0, Cfg.TeleportHeight, 0)
+
+        -- Jitter — small enough to look like movement, big enough to
+        -- break exact-repeat position vectors
+        local jx = (math.random() - 0.5) * Cfg.TeleportJitter
+        local jy = (math.random() - 0.5) * (Cfg.TeleportJitter * 0.3)
+        local jz = (math.random() - 0.5) * Cfg.TeleportJitter
+
+        local dest = targetPos + behindOffset + aboveOffset
+            + Vector3.new(jx, jy, jz)
+
+        local face = Vector3.new(targetPos.X, dest.Y, targetPos.Z)
+
+        local ok = pcall(function()
+            r.CFrame = CFrame.new(dest, face)
+        end)
+
+        if not ok then return false end
+
+        -- Blend: post-hop velocity that doesn't look like landing
+        -- from a teleport. Random small XY, slightly negative Y so
+        -- it reads as "landed and settled".
+        pcall(function()
+            r.AssemblyLinearVelocity = Vector3.new(
+                (math.random() - 0.5) * 4,
+                -5 - math.random() * 3,
+                (math.random() - 0.5) * 4
+            )
+        end)
+
+        -- Blend: occasional tiny walk command so MoveDirection in
+        -- the next tick isn't zero for every hop
+        if math.random() < Cfg.TeleportWalkBlend then
+            local h = U.hum()
+            if h then
                 pcall(function()
-                    r.CFrame = CFrame.new(newPos,
-                        Vector3.new(targetPos.X, newPos.Y, targetPos.Z))
+                    h:Move(Vector3.new(
+                        (math.random() - 0.5) * 2,
+                        0,
+                        (math.random() - 0.5) * 2
+                    ))
                 end)
-                St.lastPos = newPos
-                St.lastPosTime = now
-                St.stuckWarnings = St.stuckWarnings + 1
             end
         end
 
-        if now - St.lMoveLog > 2.0 then
-            St.lMoveLog = now
-            print(string.format("[Dingus][Move] chasing %s @%.0f",
-                St.tgt.ch.Name, dist))
-        end
+        St.teleCount = St.teleCount + 1
+        return true
     end
-
-    RunService.Heartbeat:Connect(function(dt)
-        pcall(movementTick, dt)
-    end)
 
     --============================================================
     -- RETREAT
@@ -526,7 +438,6 @@ function A.init(Ctx)
         St.rtrC = (St.rtrC or 0) + 1
         St.cbtS = "RETREAT"
         releaseBlock()
-        tryDisengageFly()
         if Ctx.Spoof and Ctx.Spoof.surfaceUp then
             pcall(Ctx.Spoof.surfaceUp)
         end
@@ -543,17 +454,14 @@ function A.init(Ctx)
             h.WalkSpeed = Cfg.RunSpeed
 
             local startT = U.clock()
-            local deadline = startT + Cfg.RetreatDelay
             local hardCap = startT + 2.5
             local lastHp = h.Health
             local lastDamageT = startT
-            local clearSince = nil
 
-            while U.clock() < deadline do
+            while U.clock() < startT + Cfg.RetreatDelay do
                 local hh = U.hum()
                 if not hh then break end
                 if hh.Health / hh.MaxHealth > Cfg.RetreatClearHP then break end
-
                 if hh.Health < lastHp then
                     lastHp = hh.Health
                     lastDamageT = U.clock()
@@ -561,16 +469,7 @@ function A.init(Ctx)
                 if U.clock() - lastDamageT > 1.2 and U.clock() > startT + 0.6 then
                     break
                 end
-
-                if St.zn == 0 then
-                    if not clearSince then clearSince = U.clock() end
-                    if U.clock() - clearSince > 0.4 then break end
-                else
-                    clearSince = nil
-                end
-
                 if U.clock() > hardCap then break end
-
                 h:Move(flat.Unit)
                 task.wait(0.05)
             end
@@ -611,10 +510,9 @@ function A.init(Ctx)
             if St.cbt then
                 St.fModeResolved = true
                 St.fIsBlock = false
-                print("[Dingus][Atk] F-mode deferred (combat active) — default skill")
+                print("[Dingus][Atk] F-mode deferred — default skill")
                 return
             end
-
             local result = probeFKey()
             if result == "block" then
                 St.fIsBlock = true
@@ -638,10 +536,8 @@ function A.init(Ctx)
             ROTATION = Cfg.RotationOrder
             print("[Dingus][Atk] F-mode = SKILL (config)")
         end
-
         St.fModeResolved = true
     end
-
     task.spawn(resolveFMode)
 
     --============================================================
@@ -651,7 +547,6 @@ function A.init(Ctx)
         if not St.cbt then
             St.cbtS = "IDLE"
             releaseBlock()
-            tryDisengageFly()
             return
         end
 
@@ -661,7 +556,6 @@ function A.init(Ctx)
         if h.Health <= 0 then
             St.cbtS = "DEAD"
             releaseBlock()
-            tryDisengageFly()
             return
         end
 
@@ -677,17 +571,11 @@ function A.init(Ctx)
         St.lHp = h.Health
         St.lHpT = now
 
-        if now - St.lBrt > 2.5 then
-            St.lBrt = now
-            U.tap("L")
-        end
+        if now - St.lBrt > 2.5 then St.lBrt = now; U.tap("L") end
 
         if St.rtr and hpFrac < Cfg.RetreatHP and not retreatRunning then
             local nearest = St.ths and St.ths[1]
-            if nearest then
-                startRetreat(nearest.rp.Position)
-                return
-            end
+            if nearest then startRetreat(nearest.rp.Position); return end
         end
         if retreatRunning then return end
 
@@ -699,14 +587,12 @@ function A.init(Ctx)
                     St.tgt.ch.Name, St.bKll))
                 St.tgt = nil
                 releaseBlock()
-                tryDisengageFly()
                 if D.invalidate then D.invalidate() end
             end
             acquireTarget()
             if not St.tgt then
                 St.cbtS = "IDLE"
                 releaseBlock()
-                tryDisengageFly()
                 return
             end
         end
@@ -719,56 +605,12 @@ function A.init(Ctx)
         t.d = dist
 
         --========================================================
-        -- LONG RANGE · fly or chase, watchdogged
+        -- LONG RANGE · TELEPORT
         --========================================================
-        if dist > Cfg.AtkRange + 4 then
-            -- Watchdog check while flying
-            if St.cbtS == "FLY" then
-                if St.flyEnterT == 0 then
-                    St.flyEnterT = now
-                    St.flyEnterDist = dist
-                end
-                local elapsed = now - St.flyEnterT
-                local progress = St.flyEnterDist - dist
-                if elapsed > Cfg.FlyWatchdogT
-                   and progress < Cfg.FlyWatchdogD then
-                    if not St.flyWatchdogLogged then
-                        St.flyWatchdogLogged = true
-                        print(string.format(
-                            "[Dingus][Atk] fly watchdog: %.1fs, %.0f studs — forcing ground",
-                            elapsed, progress))
-                    end
-                    tryDisengageFly()
-                    St.flyCooldownUntil = now + Cfg.FlyCooldownT
-                    St.flyEnterT = 0
-                    St.flyEnterDist = 0
-                end
-            else
-                St.flyEnterT = 0
-                St.flyEnterDist = 0
-                St.flyWatchdogLogged = false
-            end
-
-            -- Try fly if not in cooldown
-            if now >= St.flyCooldownUntil and tryEngageFly() then
-                St.cbtS = "FLY"
-                releaseBlock()
-                if St.flyEnterT == 0 then
-                    St.flyEnterT = now
-                    St.flyEnterDist = dist
-                end
-                if St.skl and now - St.lSkl > 2.0 then
-                    St.lSkl = now
-                    fireRotation()
-                end
-                return
-            end
-
-            -- Ground chase (fly unavailable or on cooldown)
-            St.cbtS = "APPROACH"
+        if dist > Cfg.AtkRange then
+            St.cbtS = "TELEPORT"
             releaseBlock()
-            faceTarget(r, tPos.Position)
-            groundChase(r, tPos)
+            teleportChase(t, tPos)
             if St.skl and now - St.lSkl > 2.0 then
                 St.lSkl = now
                 fireRotation()
@@ -776,23 +618,14 @@ function A.init(Ctx)
             return
         end
 
-        -- In range — clear watchdog state
-        St.flyEnterT = 0
-        St.flyEnterDist = 0
-        St.flyWatchdogLogged = false
-
-        if Ctx.Fly and Ctx.Fly.active then
-            tryDisengageFly()
-        end
-
+        --========================================================
+        -- IN RANGE
+        --========================================================
         local blocking = D.isEnemyBlocking(t)
         local stunned = D.isEnemyStunned(t)
 
         faceTarget(r, tPos.Position)
 
-        --========================================================
-        -- AUTO-BLOCK
-        --========================================================
         local shouldBlock = false
         if St.fIsBlock and Cfg.AutoBlock then
             local threatNow = (St.imm or 0) > 0
@@ -802,9 +635,6 @@ function A.init(Ctx)
             shouldBlock = threatNow or (now < (St.blockHoldUntil or 0))
         end
 
-        --========================================================
-        -- PUNISH / BREAK_BLOCK / ATTACK
-        --========================================================
         if stunned and St.stunPun then
             St.cbtS = "PUNISH"
             releaseBlock()
@@ -834,7 +664,6 @@ function A.init(Ctx)
         end
 
         St.cbtS = "ATTACK"
-
         if shouldBlock and (now - St.lAtk < currentInterval() * 0.8) then
             holdBlock()
         else
@@ -882,23 +711,19 @@ function A.init(Ctx)
         }
     end
 
-    function A.flyDebugInfo()
-        local now = U.clock()
+    function A.telemetry()
         return {
-            enterT     = St.flyEnterT,
-            enterDist  = St.flyEnterDist,
-            cooldown   = math.max(0, St.flyCooldownUntil - now),
-            watchdog   = St.flyWatchdogLogged,
+            teleports = St.teleCount or 0,
+            lastTeleportGap = U.clock() - (St.lTele or 0),
         }
     end
 
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function()
         releaseBlock()
-        tryDisengageFly()
     end)
 
-    print("[Dingus][attack] v4 initialized")
+    print("[Dingus][attack] v5 initialized · teleport-based")
 end
 
 return A
