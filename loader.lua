@@ -1,8 +1,9 @@
--- Dingus-Slayer · loader.lua v40
--- Source sanitizer. Reports corrupt files by name and head-of-source.
--- GUI is loaded as an isolated step so a GUI failure cannot abort boot.
+-- Dingus-Slayer · loader.lua v41
+-- v41 fixes: loadModule now returns (mod, source, err) with err non-nil on
+-- failure. Prior version returned (mod, msg) and callers read position 3,
+-- hiding every real error behind a nil. Also prints head-of-source.
 
-local VERSION = "v40"
+local VERSION = "v41"
 local REPO_USER = "PurpleXPurple"
 local REPO_NAME = "Dingus-Slayer"
 local REPO_BRANCH = "main"
@@ -106,54 +107,51 @@ local function diskDelete(n)
 end
 
 --============================================================
--- SOURCE SANITIZER
+-- SANITIZE
 --============================================================
--- Rejects anything that isn't plausibly Lua source. Strips
--- UTF-8 BOM, leading markdown fences, trailing fences. Detects
--- HTML responses and 404 body pages.
+local function head(src)
+    if type(src) ~= "string" then return "<not-string>" end
+    local h = src:sub(1, 80)
+    h = h:gsub("[^\32-\126]", "?")
+    h = h:gsub("\n", "\\n")
+    return h
+end
+
 local function sanitize(src, name)
     if type(src) ~= "string" then return nil, "not-a-string" end
-    if #src < MIN_SRC then return nil, "too-short" end
+    if #src < MIN_SRC then return nil, "too-short(" .. #src .. ")" end
 
-    -- Strip UTF-8 BOM
-    if src:sub(1, 3) == "\239\187\191" then
-        src = src:sub(4)
-    end
+    if src:sub(1, 3) == "\239\187\191" then src = src:sub(4) end
 
     local fenceStripped = false
+    local stripped, count
 
-    -- Strip leading ```lang or ``` or ```  (any whitespace before)
-    local stripped, count = src:gsub("^%s*```[%a]*%s*\r?\n", "", 1)
+    stripped, count = src:gsub("^%s*```[%a]*%s*\r?\n", "", 1)
     if count > 0 then fenceStripped = true; src = stripped end
     stripped, count = src:gsub("^%s*```%s*\r?\n", "", 1)
     if count > 0 then fenceStripped = true; src = stripped end
     stripped, count = src:gsub("^%s*```", "", 1)
     if count > 0 then fenceStripped = true; src = stripped end
-
-    -- Strip trailing fence
     stripped, count = src:gsub("\r?\n```%s*$", "")
     if count > 0 then fenceStripped = true; src = stripped end
     stripped, count = src:gsub("```%s*$", "")
     if count > 0 then fenceStripped = true; src = stripped end
 
-    -- Reject HTML
-    local head = src:sub(1, 240):lower()
-    if head:find("<!doctype", 1, true) or head:find("<html", 1, true) then
+    local lhead = src:sub(1, 240):lower()
+    if lhead:find("<!doctype", 1, true)
+       or lhead:find("<html", 1, true) then
         return nil, "html-response"
     end
-
-    -- Reject GitHub 404 page text
-    if head:find("404: not found", 1, true)
-       or head:find("404 not found", 1, true) then
+    if lhead:find("404: not found", 1, true)
+       or lhead:find("404 not found", 1, true) then
         return nil, "not-found"
     end
 
-    -- Very weak Lua-shape check
-    local probe_zone = src:sub(1, 400)
-    if not probe_zone:find("local", 1, true)
-       and not probe_zone:find("return", 1, true)
-       and not probe_zone:find("function", 1, true)
-       and not probe_zone:find("--", 1, true) then
+    local zone = src:sub(1, 400)
+    if not zone:find("local", 1, true)
+       and not zone:find("return", 1, true)
+       and not zone:find("function", 1, true)
+       and not zone:find("--", 1, true) then
         return nil, "not-lua"
     end
 
@@ -215,46 +213,40 @@ local Ctx = {
 }
 
 --============================================================
--- MODULE LOADER
+-- MODULE LOADER (returns mod, source, err — err non-nil on failure)
 --============================================================
-local function head(src)
-    local h = src:sub(1, 80)
-    h = h:gsub("[^\32-\126]", "?")
-    h = h:gsub("\n", "\\n")
-    return h
-end
-
 local function loadModule(entry)
     local name = entry.name
 
-    -- 1. in-memory cache
     local cachedFn = _G.DINGUS_FN_CACHE[name]
     if cachedFn then
         Ctx.Boot.reused = Ctx.Boot.reused + 1
         local ok, mod = pcall(cachedFn)
-        if ok and type(mod) == "table" then return mod, "memory" end
+        if ok and type(mod) == "table" then
+            return mod, "memory", nil
+        end
         _G.DINGUS_FN_CACHE[name] = nil
     end
 
-    -- 2. source
     local src = diskRead(name)
     local source = "disk"
     if not src then
         local t0 = os.clock()
         src, source = fetchModule(name)
         Ctx.Boot.fetch = Ctx.Boot.fetch + (os.clock() - t0)
-        if not src then return nil, "fetch-fail" end
+        if not src then
+            return nil, nil, "fetch-fail"
+        end
     end
 
-    -- 3. sanitize
     local sanitized, note = sanitize(src, name)
     if not sanitized then
+        local h = head(src)
         diskDelete(name)
-        return nil, "sanitize:" .. tostring(note) .. "|" .. head(src)
+        return nil, nil, "sanitize:" .. tostring(note) .. " | " .. h
     end
     src = sanitized
 
-    -- 4. compile
     local tc = os.clock()
     local compiler = loadstring or load
     local fn, cerr = compiler(src, "@" .. name .. ".lua")
@@ -263,28 +255,27 @@ local function loadModule(entry)
         local h = head(src)
         src = nil
         diskDelete(name)
-        return nil, "compile:" .. tostring(cerr) .. "|" .. h
+        return nil, nil, "compile:" .. tostring(cerr) .. " | " .. h
     end
     src = nil
 
-    -- 5. execute
     local te = os.clock()
     local ok, mod = pcall(fn)
     Ctx.Boot.execute = Ctx.Boot.execute + (os.clock() - te)
     if not ok then
         diskDelete(name)
-        return nil, "runtime:" .. tostring(mod)
+        return nil, nil, "runtime:" .. tostring(mod)
     end
     if type(mod) ~= "table" then
         diskDelete(name)
-        return nil, "wrong-type:" .. type(mod)
+        return nil, nil, "wrong-type:" .. type(mod)
     end
 
     _G.DINGUS_FN_CACHE[name] = fn
     if note and not IS_REBOOT then
         print(string.format("  ~ %-12s markdown fences stripped", name))
     end
-    return mod, source
+    return mod, source, nil
 end
 
 --============================================================
@@ -340,13 +331,14 @@ for i = 1, #CORE_MANIFEST do
     else
         failed = failed + 1
         Ctx.Loaded[entry.name] = false
+        local errText = tostring(err or "unknown")
         table.insert(Ctx.Errors, {
-            stage = entry.name, msg = "?", detail = err })
+            stage = entry.name, msg = "load", detail = errText })
         if not IS_REBOOT then
             print(string.format("  [XX] %-12s %5dms  %s",
-                entry.name, math.floor(elapsed), tostring(err)))
+                entry.name, math.floor(elapsed), errText))
         else
-            warn2(entry.name .. " failed: " .. tostring(err))
+            warn2(entry.name .. " failed: " .. errText)
         end
     end
 
@@ -419,12 +411,10 @@ if not IS_REBOOT then
 end
 
 task.spawn(function()
-    -- Small delay so main scheduler has time to settle
     task.wait(0.5)
-
     local guiMod, source, err = loadModule(GUI_ENTRY)
     if not guiMod then
-        warn2("gui skipped (" .. tostring(source or err) .. ")")
+        warn2("gui skipped (" .. tostring(err) .. ")")
         return
     end
     Ctx.Gui = guiMod
