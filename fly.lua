@@ -1,39 +1,51 @@
--- Dingus-Slayer · fly.lua v6
--- Replaced with Synerox farm movement (Overhead/Underground/In Front).
--- Manages the anchored farm platform + HRP teleport per target.
--- Not a "fly" in the old sense — this is Synerox's ground-anchor model.
+-- Dingus-Slayer · fly.lua v7
+-- Fixes: F-01 (mode key sync), F-02 (double Heartbeat), F-03 (fingerprint name).
+-- Reads F.SynSafeMode as source of truth. No self-hook — main scheduler drives.
 
 local F = {}
 
 function F.init(Ctx)
-    local U, Cfg, St = Ctx.Util, Ctx.Cfg, Ctx.St
+    local U, F_, S = Ctx.Util, Ctx.Cfg, Ctx.St
 
     F.active = false
     F.platform = nil
     F.lastPos = nil
-    F.lastTarget = nil
-    St.SynFarmMode = St.SynFarmMode or "Overhead"
 
-    --============================================================
-    -- FARM PLATFORM (Synerox fn22)
-    --============================================================
+    --========================================================
+    -- HIDDEN ANCHOR FOLDER (obfuscates platform from workspace)
+    --========================================================
+    local function anchorFolder()
+        local folder = workspace:FindFirstChild("_dgAnchors")
+        if not folder then
+            folder = Instance.new("Folder")
+            folder.Name = "_dgAnchors"
+            folder.Parent = workspace
+        end
+        return folder
+    end
+
+    --========================================================
+    -- PLATFORM (renamed, parented to folder, non-descriptive)
+    --========================================================
     local function ensurePlatform()
         if F.platform and F.platform.Parent then return F.platform end
+        local hex = string.format("%06x", math.random(0, 0xFFFFFF))
         local p = Instance.new("Part")
-        p.Name = "SyneroxFarmPlatform"
+        p.Name = "_a" .. hex
         p.Size = Vector3.new(16, 1.2, 16)
         p.Transparency = 1
-        p.Anchored = true
         p.CanCollide = true
-        p.Parent = workspace
+        p.Anchored = true
+        p.Locked = true
+        p.Massless = true
+        p.CustomPhysicalProperties = PhysicalProperties.new(0, 0, 0, 0, 0)
+        p.Parent = anchorFolder()
         F.platform = p
         return p
     end
 
     local function movePlatform(cf)
         local p = ensurePlatform()
-        p.Size = Vector3.new(16, 1.2, 16)
-        p.CanCollide = true
         p.CFrame = CFrame.new(cf.Position.X, cf.Position.Y - 3.2, cf.Position.Z)
     end
 
@@ -42,19 +54,24 @@ function F.init(Ctx)
             pcall(function() F.platform:Destroy() end)
             F.platform = nil
         end
+        -- Clean empty folder
+        local folder = workspace:FindFirstChild("_dgAnchors")
+        if folder and #folder:GetChildren() == 0 then
+            pcall(function() folder:Destroy() end)
+        end
     end
 
     F.ensurePlatform = ensurePlatform
-    F.movePlatform = movePlatform
+    F.movePlatform   = movePlatform
     F.destroyPlatform = destroyPlatform
 
-    --============================================================
-    -- POSITION CALCULATOR (Synerox attack-position)
-    --============================================================
+    --========================================================
+    -- POSITION CALCULATOR — reads F.SynSafeMode (source of truth)
+    --========================================================
     function F.computeCF(targetRoot, mode, heightOffset, distance)
-        mode = mode or St.SynFarmMode or "Overhead"
-        heightOffset = heightOffset or (Cfg.SynHeightOffset or 3.8)
-        distance = distance or (Cfg.SynDistance or 2)
+        mode = mode or F_.SynSafeMode or "Overhead"
+        heightOffset = heightOffset or (F_.SynHeightOffset or 3.8)
+        distance = distance or (F_.SynDistance or 2)
         local pos = targetRoot.Position
         if mode == "Overhead" then
             return CFrame.new(pos + Vector3.new(0, heightOffset, 0), pos)
@@ -73,9 +90,6 @@ function F.init(Ctx)
         return CFrame.new(pos + Vector3.new(0, heightOffset, 0), pos)
     end
 
-    --============================================================
-    -- APPLY (teleport HRP + move platform)
-    --============================================================
     function F.apply(targetRoot, mode, heightOffset, distance)
         local hrp = U.hrp()
         if not hrp or not targetRoot then return end
@@ -88,14 +102,14 @@ function F.init(Ctx)
         return cf
     end
 
-    --============================================================
+    --========================================================
     -- PUBLIC
-    --============================================================
+    --========================================================
     function F.start()
         if F.active then return true end
         F.active = true
-        St.FlyActive = true
-        print("[Dingus][Farm] movement enabled · mode="..tostring(St.SynFarmMode))
+        S.FlyActive = true
+        print("[Dingus][Farm] movement enabled · mode="..tostring(F_.SynSafeMode))
         return true
     end
 
@@ -103,8 +117,7 @@ function F.init(Ctx)
         if not F.active then return end
         F.active = false
         destroyPlatform()
-        St.FlyActive = false
-        print("[Dingus][Farm] movement disabled")
+        S.FlyActive = false
     end
 
     function F.toggle()
@@ -112,32 +125,29 @@ function F.init(Ctx)
     end
 
     function F.setMode(mode)
-        St.SynFarmMode = mode
+        F_.SynSafeMode = mode
         print("[Dingus][Farm] mode = "..tostring(mode))
     end
 
-    --============================================================
-    -- TICK — heartbeat driven, keeps platform positioned while
-    -- target is locked and player is attacking.
-    --============================================================
+    --========================================================
+    -- TICK — driven by main.lua scheduler, NO self-Heartbeat
+    --========================================================
     function F.tick()
         if not F.active then return end
-        if not St.cbt then return end
-        if not St.lockedTarget then destroyPlatform(); return end
-        local t = St.lockedTarget
-        if not t.Root or not t.Root.Parent or not t.Humanoid or t.Humanoid.Health <= 0 then
-            destroyPlatform(); return end
+        if not S.cbt then return end
+        local t = S.lockedTarget
+        if not t or not t.Root or not t.Root.Parent
+            or not t.Humanoid or t.Humanoid.Health <= 0 then
+            destroyPlatform()
+            return
+        end
         F.apply(t.Root)
-    end
-
-    if U.Run then
-        U.Run.Heartbeat:Connect(function() pcall(F.tick) end)
     end
 
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function() F.stop() end)
 
-    print(string.format("[Dingus][fly] v6 · Synerox-farm-movement · %s", U.Platform))
+    print(string.format("[Dingus][fly] v7 · Synerox-farm · %s", U.Platform))
 end
 
 return F
