@@ -1,27 +1,17 @@
 --[[
-    Dingus-Slayer · spoofers.lua v4
-    Client-state repair kit. 31 methods, grouped.
+    Dingus-Slayer · spoofers.lua v5
+    40 methods total (31 retained + 9 new).
 
-    All methods assume a FilteredEnabled game. Anything that writes a
-    server-owned property is either a local echo (cosmetic) or a floor
-    (server can correct, we re-correct). Nothing here defeats a
-    server-side ban.
-
-    Xeno compatibility: no hookmetamethod dependencies except the two
-    guarded "advanced" methods. Every other method works with plain
-    property writes and pcall.
-
-    Categories:
-      A · Movement      (7)  walk, jump, hip, slow, freeze, fall, gravity
-      B · Combat state  (6)  block, maxHP, stun, ragdoll, knock, fling
-      C · Vision        (5)  blind, fog, dark, shake, color
-      D · Audio         (2)  deafen, scream
-      E · Position      (4)  sit, teleport-back, void, state
-      F · Persistence   (4)  afk, unequip, tool-drain, loadout
-      G · Visuals       (2)  nametag, highlight
-      H · Advanced      (1)  spectate (guarded)
-
-    = 31 total.
+    New category I · Environmental lock prevention:
+      antiZoom        — FOV reset if server debuffs the camera
+      antiCinematic   — CameraType reset if forced into Scriptable
+      antiWarp        — damps large position deltas from server
+      antiDisarm      — re-equips during combat when held tool is stripped
+      antiInvisible   — restores self Transparency if server hides us
+      antiForceField  — strips unwanted server ForceField instances
+      antiSeatLock    — force-unsits when stuck on a bench/vehicle
+      antiSoundSpam   — mutes rapid-fire sounds in a 2s window
+      antiShakeLock   — snaps camera back after forced shake drift
 ]]--
 
 local Sp = {}
@@ -47,49 +37,55 @@ function Sp.init(Ctx)
     Cfg.SpoofBaseJump         = Cfg.SpoofBaseJump         or nil
     Cfg.SpoofBaseGravity      = Cfg.SpoofBaseGravity      or nil
 
+    -- NEW
+    Cfg.SpoofBaseFOV          = Cfg.SpoofBaseFOV          or nil
+    Cfg.SpoofZoomTolerance    = Cfg.SpoofZoomTolerance    or 25
+    Cfg.SpoofWarpThreshold    = Cfg.SpoofWarpThreshold    or 80
+    Cfg.SpoofWarpDampen       = Cfg.SpoofWarpDampen       or 0.5
+    Cfg.SpoofSoundSpamWindow  = Cfg.SpoofSoundSpamWindow  or 2.0
+    Cfg.SpoofSoundSpamCount   = Cfg.SpoofSoundSpamCount   or 5
+    Cfg.SpoofShakeThreshold   = Cfg.SpoofShakeThreshold   or 15
+
     -- Per-method enable flags. Safe defaults on. Risky off.
     local D = {
         -- Movement
-        antiSlow          = true,
-        antiFreeze        = true,
-        antiFall          = true,
-        spoofWalkSpeed    = true,
-        spoofJumpPower    = true,
-        spoofHipHeight    = false,
-        spoofGravity      = false,
+        antiSlow = true, antiFreeze = true, antiFall = true,
+        spoofWalkSpeed = true, spoofJumpPower = true,
+        spoofHipHeight = false, spoofGravity = false,
         -- Combat
-        spoofBlock        = true,
-        spoofMaxHealth    = false,
-        antiStun          = true,
-        antiRagdoll       = false,
-        antiKnock         = false,
-        antiFling         = false,
+        spoofBlock = true, spoofMaxHealth = false,
+        antiStun = true, antiRagdoll = false,
+        antiKnock = false, antiFling = false,
         -- Vision
-        antiBlind         = true,
-        antiFog           = true,
-        antiDark          = true,
-        antiShake         = true,
-        antiColor         = true,
+        antiBlind = true, antiFog = true, antiDark = true,
+        antiShake = true, antiColor = true,
         -- Audio
-        antiDeafen        = false,
-        antiScream        = false,
+        antiDeafen = false, antiScream = false,
         -- Position / state
-        antiSit           = true,
-        antiTeleportBack  = false,
-        antiVoid          = true,
-        antiState         = true,
+        antiSit = true, antiTeleportBack = false,
+        antiVoid = true, antiState = true,
         -- Persistence
-        antiAFK           = true,
-        antiUnequip       = false,
-        antiToolDrain     = false,
-        antiLoadout       = false,
+        antiAFK = true, antiUnequip = false,
+        antiToolDrain = false, antiLoadout = false,
         -- Visuals
-        antiNametag       = false,
-        antiHighlight     = false,
+        antiNametag = false, antiHighlight = false,
         -- Advanced
-        antiSpectate      = true,
+        antiSpectate = true,
+        -- NEW v5
+        antiZoom = true,
+        antiCinematic = true,
+        antiWarp = true,
+        antiDisarm = true,
+        antiInvisible = true,
+        antiForceField = true,
+        antiSeatLock = true,
+        antiSoundSpam = false,
+        antiShakeLock = true,
     }
     Cfg.SpoofMethods = Cfg.SpoofMethods or D
+    for k, v in pairs(D) do
+        if Cfg.SpoofMethods[k] == nil then Cfg.SpoofMethods[k] = v end
+    end
 
     local enabled = function(name)
         local m = Cfg.SpoofMethods[name]
@@ -100,17 +96,20 @@ function Sp.init(Ctx)
     --================================================================
     -- STATE
     --================================================================
-    St.Spf = St.Spf or { hpC = 0, bkC = 0, spdC = 0, kbC = 0, jmpC = 0 }
+    St.Spf = St.Spf or { hpC=0, bkC=0, spdC=0, kbC=0, jmpC=0 }
     St.spoofFires = {}
     St.spoofErrs = {}
-    St.spoofConceded = {}
     St.spoofLastRun = {}
-    St.spoofRuntime = {}
     St.spoofActiveCount = 0
     St.spoofLastAFK = 0
     St.spoofLastTeleportCheck = nil
     St.spoofLastHp = 0
     St.spoofPrevGsp = St.gsp
+    St.spoofLastPos = nil
+    St.spoofLastPosT = 0
+    St.spoofLastCamCF = nil
+    St.spoofSoundHist = {}
+    St.spoofCinematicUntil = 0
 
     local baseWalk, baseJumpPower, baseJumpHeight, baseGravity
     local lastWrittenWalk, lastWrittenJump
@@ -121,9 +120,6 @@ function Sp.init(Ctx)
         St.Spf.spdC = St.Spf.spdC + 1
     end
 
-    --================================================================
-    -- GUARDED PCALL
-    --================================================================
     local function guard(fn, key)
         local ok, err = pcall(fn)
         if not ok then
@@ -170,9 +166,13 @@ function Sp.init(Ctx)
     local function snapshotBases()
         local h = U.hum()
         if not h then return end
-        baseWalk      = Cfg.SpoofBaseWalk or resolveBaseWalk()
+        baseWalk = Cfg.SpoofBaseWalk or resolveBaseWalk()
         baseJumpPower, baseJumpHeight = resolveBaseJump(h)
-        baseGravity   = Cfg.SpoofBaseGravity or workspace.Gravity
+        baseGravity = Cfg.SpoofBaseGravity or workspace.Gravity
+        if not Cfg.SpoofBaseFOV then
+            local cam = workspace.CurrentCamera
+            if cam then Cfg.SpoofBaseFOV = cam.FieldOfView or 70 end
+        end
     end
 
     local function restoreDefaults()
@@ -191,8 +191,6 @@ function Sp.init(Ctx)
     --================================================================
     -- CATEGORY A · MOVEMENT
     --================================================================
-
-    -- A1 · antiSlow — floor WalkSpeed at base × 0.95
     local function antiSlow()
         local h = U.hum()
         if not h or h.Health <= 0 then return end
@@ -206,7 +204,6 @@ function Sp.init(Ctx)
         end
     end
 
-    -- A2 · antiFreeze — total freeze recovery (WalkSpeed == 0)
     local function antiFreeze()
         local h = U.hum()
         if not h or h.Health <= 0 then return end
@@ -218,12 +215,10 @@ function Sp.init(Ctx)
         end
     end
 
-    -- A3 · antiFall — cancel Freefall when no upward intent
     local function antiFall()
         local h = U.hum()
         if not h or h.Health <= 0 then return end
-        local r = U.hrp()
-        if not r then return end
+        local r = U.hrp(); if not r then return end
         local ok, st = pcall(function() return h:GetState() end)
         if not ok or not st then return end
         if st == Enum.HumanoidStateType.Freefall then
@@ -235,7 +230,6 @@ function Sp.init(Ctx)
         end
     end
 
-    -- A4 · spoofWalkSpeed — reinforced slow drift up
     local function spoofWalkSpeed()
         local h = U.hum()
         if not h or h.Health <= 0 then return end
@@ -251,7 +245,6 @@ function Sp.init(Ctx)
         end
     end
 
-    -- A5 · spoofJumpPower — reinforced jump
     local function spoofJumpPower()
         local h = U.hum()
         if not h or h.Health <= 0 then return end
@@ -274,7 +267,6 @@ function Sp.init(Ctx)
         end
     end
 
-    -- A6 · spoofHipHeight — repair if server sets it to NaN/0
     local function spoofHipHeight()
         local h = U.hum()
         if not h or h.Health <= 0 then return end
@@ -285,7 +277,6 @@ function Sp.init(Ctx)
         end
     end
 
-    -- A7 · spoofGravity — floor Workspace.Gravity at base × 0.9
     local function spoofGravity()
         local g = workspace.Gravity
         if not baseGravity then snapshotBases() end
@@ -302,8 +293,6 @@ function Sp.init(Ctx)
     --================================================================
     -- CATEGORY B · COMBAT STATE
     --================================================================
-
-    -- B1 · spoofBlock — reinforce block bar (PS2 SHCS.Blocking)
     local function resolveBlockPath()
         local hf = workspace:FindFirstChild("Humanoids")
         if not hf then return nil end
@@ -331,7 +320,6 @@ function Sp.init(Ctx)
         end
     end
 
-    -- B2 · spoofMaxHealth — reinforce MaxHealth snapshot
     local function spoofMaxHealth()
         local h = U.hum()
         if not h or h.Health <= 0 then return end
@@ -344,7 +332,6 @@ function Sp.init(Ctx)
         end
     end
 
-    -- B3 · antiStun — FallingDown → Running
     local function antiStun()
         local h = U.hum()
         if not h or h.Health <= 0 then return end
@@ -357,7 +344,6 @@ function Sp.init(Ctx)
         end
     end
 
-    -- B4 · antiRagdoll — Ragdoll / Physics forced back to Running
     local function antiRagdoll()
         local h = U.hum()
         if not h or h.Health <= 0 then return end
@@ -371,11 +357,9 @@ function Sp.init(Ctx)
         end
     end
 
-    -- B5 · antiKnock — horizontal velocity clamp on high impulse
     local function antiKnock()
         if not Cfg.SpoofAntiKnock then return end
-        local r = U.hrp()
-        local h = U.hum()
+        local r = U.hrp(); local h = U.hum()
         if not r or not h or h.Health <= 0 then return end
         local ok, st = pcall(function() return h:GetState() end)
         if ok and st then
@@ -398,18 +382,12 @@ function Sp.init(Ctx)
         end
     end
 
-    -- B6 · antiFling — catastrophic velocity clamp
     local function antiFling()
-        local r = U.hrp()
-        if not r then return end
+        local r = U.hrp(); if not r then return end
         local v = r.AssemblyLinearVelocity
         if not v then return end
         if v.Magnitude > Cfg.SpoofFlingThreshold then
-            r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            if Cfg.SpoofVerbose then
-                print(string.format("[Dingus][Spoof] fling cancelled: %.0f",
-                    v.Magnitude))
-            end
+            r.AssemblyLinearVelocity = Vector3.zero
             bump("antiFling")
         end
     end
@@ -417,8 +395,6 @@ function Sp.init(Ctx)
     --================================================================
     -- CATEGORY C · VISION
     --================================================================
-
-    -- C1 · antiBlind — clear full-screen overlays on PlayerGui
     local function antiBlind()
         local pg = U.Lp:FindFirstChildOfClass("PlayerGui")
         if not pg then return end
@@ -428,7 +404,8 @@ function Sp.init(Ctx)
                 local btr = c:FindFirstChild("Background", true)
                 if btr and btr:IsA("Frame") then
                     local sz = btr.Size
-                    if sz.X.Scale >= 1 and sz.Y.Scale >= 1 and btr.BackgroundTransparency < 0.3 then
+                    if sz.X.Scale >= 1 and sz.Y.Scale >= 1
+                       and btr.BackgroundTransparency < 0.3 then
                         btr.BackgroundTransparency = 1
                         bump("antiBlind")
                     end
@@ -437,7 +414,6 @@ function Sp.init(Ctx)
         end
     end
 
-    -- C2 · antiFog — clamp FogEnd when server drops it as a debuff
     local function antiFog()
         local L = game:GetService("Lighting")
         if L.FogEnd < 500 and L.FogEnd > 0 then
@@ -446,7 +422,6 @@ function Sp.init(Ctx)
         end
     end
 
-    -- C3 · antiDark — brightness / ambient floor
     local function antiDark()
         local L = game:GetService("Lighting")
         if L.Brightness < 1 then
@@ -459,7 +434,6 @@ function Sp.init(Ctx)
         end
     end
 
-    -- C4 · antiShake — reset camera offset from random shake
     local function antiShake()
         local cam = workspace.CurrentCamera
         if not cam then return end
@@ -472,7 +446,6 @@ function Sp.init(Ctx)
         end
     end
 
-    -- C5 · antiColor — reset ColorCorrection saturation/contrast to neutral
     local function antiColor()
         local L = game:GetService("Lighting")
         for _, c in ipairs(L:GetChildren()) do
@@ -491,23 +464,16 @@ function Sp.init(Ctx)
     --================================================================
     -- CATEGORY D · AUDIO
     --================================================================
-
-    -- D1 · antiDeafen — restore SoundService ambient volume
     local function antiDeafen()
         local ss = game:GetService("SoundService")
         if ss.AmbientReverb ~= Enum.ReverbType.NoReverb then
             ss.AmbientReverb = Enum.ReverbType.NoReverb
             bump("antiDeafen")
         end
-        if ss.RespectFilteringEnabled == false then
-            ss.RespectFilteringEnabled = true
-        end
     end
 
-    -- D2 · antiScream — mute very loud short sounds near character
     local function antiScream()
-        local r = U.hrp()
-        if not r then return end
+        local r = U.hrp(); if not r then return end
         local myPos = r.Position
         for _, s in ipairs(workspace:GetChildren()) do
             if s:IsA("Sound") and s.IsPlaying and s.Volume > 3 then
@@ -525,8 +491,6 @@ function Sp.init(Ctx)
     --================================================================
     -- CATEGORY E · POSITION / STATE
     --================================================================
-
-    -- E1 · antiSit — force-unsit if server sitted the character
     local function antiSit()
         local h = U.hum()
         if not h then return end
@@ -536,10 +500,8 @@ function Sp.init(Ctx)
         end
     end
 
-    -- E2 · antiTeleportBack — log server position snaps (no repair)
     local function antiTeleportBack()
-        local r = U.hrp()
-        if not r then return end
+        local r = U.hrp(); if not r then return end
         local now = U.clock()
         local last = St.spoofLastTeleportCheck
         if last then
@@ -549,8 +511,7 @@ function Sp.init(Ctx)
                 if dist > 100 then
                     if Cfg.SpoofVerbose then
                         print(string.format(
-                            "[Dingus][Spoof] teleport-back detected: %.0f studs in %.2fs",
-                            dist, dt))
+                            "[Dingus][Spoof] teleport-back: %.0f studs", dist))
                     end
                     bump("antiTeleportBack")
                 end
@@ -559,23 +520,18 @@ function Sp.init(Ctx)
         St.spoofLastTeleportCheck = { t = now, p = r.Position }
     end
 
-    -- E3 · antiVoid — rescue from below-world
     local function antiVoid()
-        local r = U.hrp()
-        if not r then return end
+        local r = U.hrp(); if not r then return end
         if r.Position.Y < Cfg.SpoofVoidYThreshold then
-            local ok, cf = pcall(function()
-                return CFrame.new(0, 50, 0)
-            end)
+            local ok, cf = pcall(function() return CFrame.new(0, 50, 0) end)
             if ok and cf then
                 r.CFrame = cf
                 bump("antiVoid")
-                print("[Dingus][Spoof] void rescue triggered")
+                print("[Dingus][Spoof] void rescue")
             end
         end
     end
 
-    -- E4 · antiState — force Running when enabled and not intentionally airborne
     local function antiState()
         local h = U.hum()
         if not h or h.Health <= 0 then return end
@@ -596,16 +552,13 @@ function Sp.init(Ctx)
     --================================================================
     -- CATEGORY F · PERSISTENCE
     --================================================================
-
-    -- F1 · antiAFK — micro-motion every N seconds to defeat idle kick
     local function antiAFK()
         local now = U.clock()
         if now - (St.spoofLastAFK or 0) < (Cfg.SpoofAFKInterval or 25) then return end
         St.spoofLastAFK = now
-        local h = U.hum()
-        if not h then return end
+        local h = U.hum(); if not h then return end
         if h.MoveDirection.Magnitude > 0.1 then return end
-        if St.cbt then return end  -- combat already generating input
+        if St.cbt then return end
         pcall(function()
             h:Move(Vector3.new(
                 (math.random() - 0.5) * 2, 0,
@@ -619,12 +572,9 @@ function Sp.init(Ctx)
         bump("antiAFK")
     end
 
-    -- F2 · antiUnequip — re-equip the last weapon if server strips it
     local function antiUnequip()
-        local h = U.hum()
-        if not h then return end
-        local c = U.Lp.Character
-        if not c then return end
+        local h = U.hum(); if not h then return end
+        local c = U.Lp.Character; if not c then return end
         local eq = nil
         for _, t in ipairs(c:GetChildren()) do
             if t:IsA("Tool") then eq = t; break end
@@ -641,18 +591,15 @@ function Sp.init(Ctx)
         end
     end
 
-    -- F3 · antiToolDrain — detect Backpack tools dropped to 0 unexpectedly
     local function antiToolDrain()
         local bp = U.Lp:FindFirstChildOfClass("Backpack")
         if not bp then return end
         local count = 0
-        for _, _ in ipairs(bp:GetChildren()) do
-            count = count + 1
-        end
+        for _ in ipairs(bp:GetChildren()) do count = count + 1 end
         if not St.spoofLastToolCount then
             St.spoofLastToolCount = count
         elseif count < St.spoofLastToolCount - 3 then
-            print(string.format("[Dingus][Spoof] tool count dropped: %d -> %d",
+            print(string.format("[Dingus][Spoof] tool count: %d -> %d",
                 St.spoofLastToolCount, count))
             St.spoofLastToolCount = count
             bump("antiToolDrain")
@@ -661,13 +608,10 @@ function Sp.init(Ctx)
         end
     end
 
-    -- F4 · antiLoadout — enforce a saved loadout (equipped tool name)
     local function antiLoadout()
         if not Cfg.SpoofLoadoutTool then return end
-        local h = U.hum()
-        if not h then return end
-        local c = U.Lp.Character
-        if not c then return end
+        local h = U.hum(); if not h then return end
+        local c = U.Lp.Character; if not c then return end
         for _, t in ipairs(c:GetChildren()) do
             if t:IsA("Tool") and t.Name == Cfg.SpoofLoadoutTool then return end
         end
@@ -683,11 +627,8 @@ function Sp.init(Ctx)
     --================================================================
     -- CATEGORY G · VISUALS
     --================================================================
-
-    -- G1 · antiNametag — clamp DisplayDistance on the local character
     local function antiNametag()
-        local h = U.hum()
-        if not h then return end
+        local h = U.hum(); if not h then return end
         if h.NameDisplayDistance > 0 then
             h.NameDisplayDistance = 0
             h.HealthDisplayDistance = 0
@@ -695,10 +636,8 @@ function Sp.init(Ctx)
         end
     end
 
-    -- G2 · antiHighlight — remove Highlight instances attached to self
     local function antiHighlight()
-        local c = U.Lp.Character
-        if not c then return end
+        local c = U.Lp.Character; if not c then return end
         for _, ch in ipairs(c:GetChildren()) do
             if ch:IsA("Highlight") then
                 ch:Destroy()
@@ -710,20 +649,259 @@ function Sp.init(Ctx)
     --================================================================
     -- CATEGORY H · ADVANCED
     --================================================================
-
-    -- H1 · antiSpectate — force CameraSubject back to own humanoid
     local function antiSpectate()
         local cam = workspace.CurrentCamera
         if not cam then return end
-        local h = U.hum()
-        if not h then return end
+        local h = U.hum(); if not h then return end
         if cam.CameraSubject ~= h then
-            -- Only repair if we're not already flying (which changes subject)
             if not St.FlyActive then
                 pcall(function() cam.CameraSubject = h end)
                 bump("antiSpectate")
             end
         end
+    end
+
+    --================================================================
+    -- CATEGORY I · LOCK PREVENTION (NEW v5)
+    --================================================================
+
+    -- Restore FOV if the server debuffs the camera zoom
+    local function antiZoom()
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        if not Cfg.SpoofBaseFOV then snapshotBases() end
+        local base = Cfg.SpoofBaseFOV or 70
+        local fov = cam.FieldOfView
+        if type(fov) ~= "number" or fov ~= fov then
+            cam.FieldOfView = base
+            bump("antiZoom")
+            return
+        end
+        local tol = Cfg.SpoofZoomTolerance or 25
+        if math.abs(fov - base) > tol then
+            cam.FieldOfView = base
+            bump("antiZoom")
+        end
+    end
+
+    -- Reset CameraType if forced into Scriptable for non-cutscene reasons
+    local function antiCinematic()
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        if St.FlyActive then return end
+        -- Let user-triggered cinematics through: allow Scriptable for
+        -- up to 15s after they happen, then revert.
+        if cam.CameraType == Enum.CameraType.Scriptable then
+            if St.spoofCinematicUntil == 0 then
+                St.spoofCinematicUntil = U.clock() + 15
+                return
+            end
+            if U.clock() > St.spoofCinematicUntil then
+                cam.CameraType = Enum.CameraType.Custom
+                St.spoofCinematicUntil = 0
+                bump("antiCinematic")
+            end
+        else
+            St.spoofCinematicUntil = 0
+        end
+    end
+
+    -- Damp large position jumps between ticks that aren't from our teleport
+    local function antiWarp()
+        local r = U.hrp(); if not r then return end
+        local now = U.clock()
+        if not St.spoofLastPos then
+            St.spoofLastPos = r.Position
+            St.spoofLastPosT = now
+            return
+        end
+        local dt = now - St.spoofLastPosT
+        if dt <= 0 or dt > 1.0 then
+            St.spoofLastPos = r.Position
+            St.spoofLastPosT = now
+            return
+        end
+        local jump = (r.Position - St.spoofLastPos).Magnitude
+        local threshold = Cfg.SpoofWarpThreshold or 80
+        -- Our teleport-chase is intentional, so ignore jumps under 30
+        -- after a known teleport flag.
+        if jump > threshold and not St.lTele or (St.lTele and now - St.lTele > 0.3) then
+            -- Attempt to damp velocity if the server is warping us
+            local v = r.AssemblyLinearVelocity
+            if v and v.Magnitude > 50 then
+                local scale = Cfg.SpoofWarpDampen or 0.5
+                r.AssemblyLinearVelocity = v * scale
+                bump("antiWarp")
+            end
+        end
+        St.spoofLastPos = r.Position
+        St.spoofLastPosT = now
+    end
+
+    -- Re-equip during combat when held tool is stripped
+    local function antiDisarm()
+        if not St.cbt then return end
+        local h = U.hum(); if not h or h.Health <= 0 then return end
+        local c = U.Lp.Character; if not c then return end
+        local hasTool = false
+        for _, t in ipairs(c:GetChildren()) do
+            if t:IsA("Tool") then hasTool = true; break end
+        end
+        if hasTool then return end
+        local bp = U.Lp:FindFirstChildOfClass("Backpack")
+        if not bp then return end
+        for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") then
+                pcall(function() h:EquipTool(t) end)
+                bump("antiDisarm")
+                return
+            end
+        end
+    end
+
+    -- Restore self Transparency if the server hides the character
+    local function antiInvisible()
+        local c = U.Lp.Character; if not c then return end
+        for _, p in ipairs(c:GetChildren()) do
+            if p:IsA("BasePart") then
+                local t = p.LocalTransparencyModifier
+                if type(t) == "number" and t > 0.9 and t <= 1 then
+                    -- Only repair if not intentionally hidden (stealth VFX)
+                    local hasStealthVFX = false
+                    for _, ch in ipairs(c:GetChildren()) do
+                        if ch.Name:find("Invis", 1, true)
+                           or ch.Name:find("Stealth", 1, true) then
+                            hasStealthVFX = true
+                            break
+                        end
+                    end
+                    if not hasStealthVFX then
+                        p.LocalTransparencyModifier = 0
+                        p.Transparency = 0
+                        bump("antiInvisible")
+                    end
+                end
+            end
+        end
+    end
+
+    -- Remove server ForceField instances that weren't player-requested
+    local function antiForceField()
+        local c = U.Lp.Character; if not c then return end
+        for _, ch in ipairs(c:GetChildren()) do
+            if ch:IsA("ForceField") then
+                -- Only strip if we're in combat and past spawn grace
+                local inSpawnGrace = (U.clock() - (St.spawnTime or 0)) < 5
+                if St.cbt and not inSpawnGrace then
+                    pcall(function() ch:Destroy() end)
+                    bump("antiForceField")
+                end
+            end
+        end
+    end
+
+    -- Force unsit when stuck on a bench/vehicle
+    local function antiSeatLock()
+        local h = U.hum(); if not h then return end
+        if not h.Sit then return end
+        -- Only force-unsit if we've been sitting for >2s and aren't moving
+        if not St.spoofSitStart then
+            St.spoofSitStart = U.clock()
+            return
+        end
+        if U.clock() - St.spoofSitStart < 2.0 then return end
+        -- If user is not actively pressing movement keys, unsit
+        local uis = U.UIS
+        local pressing = false
+        if uis then
+            local keys = { Enum.KeyCode.W, Enum.KeyCode.A,
+                           Enum.KeyCode.S, Enum.KeyCode.D,
+                           Enum.KeyCode.Space }
+            for _, k in ipairs(keys) do
+                if uis:IsKeyDown(k) then pressing = true; break end
+            end
+        end
+        if not pressing then
+            h.Sit = false
+            bump("antiSeatLock")
+        end
+        St.spoofSitStart = 0
+    end
+
+    -- Mute repeated sounds clustered within a short window
+    local function antiSoundSpam()
+        local r = U.hrp(); if not r then return end
+        local now = U.clock()
+        local window = Cfg.SpoofSoundSpamWindow or 2.0
+        local limit = Cfg.SpoofSoundSpamCount or 5
+        -- Prune history
+        for i = #St.spoofSoundHist, 1, -1 do
+            if now - St.spoofSoundHist[i].t > window then
+                table.remove(St.spoofSoundHist, i)
+            end
+        end
+        -- Count sounds playing near us
+        local soundsNear = {}
+        for _, s in ipairs(workspace:GetChildren()) do
+            if s:IsA("Sound") and s.IsPlaying and s.Volume > 1 then
+                local parent = s.Parent
+                if parent and parent:IsA("BasePart") then
+                    if (parent.Position - r.Position).Magnitude < 25 then
+                        soundsNear[s.Name] = (soundsNear[s.Name] or 0) + 1
+                    end
+                end
+            end
+        end
+        for name, count in pairs(soundsNear) do
+            if count >= limit then
+                -- Track it and mute for a bit
+                table.insert(St.spoofSoundHist, { t = now, name = name })
+                for _, s in ipairs(workspace:GetChildren()) do
+                    if s:IsA("Sound") and s.Name == name and s.IsPlaying then
+                        local parent = s.Parent
+                        if parent and parent:IsA("BasePart")
+                           and (parent.Position - r.Position).Magnitude < 25 then
+                            s.Volume = 0
+                        end
+                    end
+                end
+                bump("antiSoundSpam")
+            end
+        end
+    end
+
+    -- Snap camera back after a forced shake offset
+    local function antiShakeLock()
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        if St.FlyActive then return end
+        local cf = cam.CFrame
+        if not St.spoofLastCamCF then
+            St.spoofLastCamCF = cf
+            return
+        end
+        -- Get the rotational delta between frames
+        local prev = St.spoofLastCamCF
+        local dot = prev.LookVector:Dot(cf.LookVector)
+        local angleDelta = math.deg(math.acos(math.clamp(dot, -1, 1)))
+        local threshold = Cfg.SpoofShakeThreshold or 15
+        -- If camera rotated > threshold degrees in one tick without input,
+        -- snap it back
+        if angleDelta > threshold then
+            local uis = U.UIS
+            local mouseDelta = false
+            if uis then
+                local md = uis:GetMouseDelta()
+                if md and (math.abs(md.X) > 3 or math.abs(md.Y) > 3) then
+                    mouseDelta = true
+                end
+            end
+            if not mouseDelta then
+                pcall(function() cam.CFrame = prev end)
+                bump("antiShakeLock")
+            end
+        end
+        St.spoofLastCamCF = cam.CFrame
     end
 
     --================================================================
@@ -769,9 +947,18 @@ function Sp.init(Ctx)
         { key = "antiHighlight",    fn = antiHighlight,    hz = 2 },
         -- H · Advanced
         { key = "antiSpectate",     fn = antiSpectate,     hz = 2 },
+        -- I · Lock prevention (v5)
+        { key = "antiZoom",         fn = antiZoom,         hz = 4 },
+        { key = "antiCinematic",    fn = antiCinematic,    hz = 2 },
+        { key = "antiWarp",         fn = antiWarp,         hz = 10 },
+        { key = "antiDisarm",       fn = antiDisarm,       hz = 2 },
+        { key = "antiInvisible",    fn = antiInvisible,    hz = 4 },
+        { key = "antiForceField",   fn = antiForceField,   hz = 2 },
+        { key = "antiSeatLock",     fn = antiSeatLock,     hz = 2 },
+        { key = "antiSoundSpam",    fn = antiSoundSpam,    hz = 4 },
+        { key = "antiShakeLock",    fn = antiShakeLock,    hz = 20 },
     }
 
-    -- Precompute intervals
     for _, a in ipairs(ACTIONS) do
         a.interval = 1 / math.max(0.1, a.hz)
         St.spoofLastRun[a.key] = 0
@@ -784,20 +971,25 @@ function Sp.init(Ctx)
         U.Lp.CharacterAdded:Connect(function()
             task.wait(1.5)
             baseWalk, baseJumpPower, baseJumpHeight = nil, nil, nil
-            lastWrittenWalk = nil
-            lastWrittenJump = nil
+            lastWrittenWalk, lastWrittenJump = nil, nil
             blockPath = nil
             St.spoofLastToolCount = nil
             St.spoofLastTeleportCheck = nil
+            St.spoofLastPos = nil
+            St.spoofLastCamCF = nil
+            St.spoofSoundHist = {}
+            St.spoofSitStart = 0
+            St.spoofCinematicUntil = 0
+            St.spawnTime = U.clock()
             St.mxH = 0
         end)
     end
+    St.spawnTime = U.clock()
 
     --================================================================
     -- TICK
     --================================================================
     function Sp.tick()
-        -- Master toggle
         if not St.gsp then
             if St.spoofPrevGsp then
                 St.spoofPrevGsp = false
@@ -811,7 +1003,6 @@ function Sp.init(Ctx)
 
         local now = U.clock()
         local active = 0
-
         for i = 1, #ACTIONS do
             local a = ACTIONS[i]
             if enabled(a.key) then
@@ -822,7 +1013,6 @@ function Sp.init(Ctx)
                 end
             end
         end
-
         St.spoofActiveCount = active
     end
 
@@ -843,10 +1033,9 @@ function Sp.init(Ctx)
     --================================================================
     function Sp.stats()
         local out = {
-            enabled        = St.gsp,
-            activeMethods  = St.spoofActiveCount or 0,
-            totalMethods   = #ACTIONS,
-            conceded       = false,
+            enabled = St.gsp,
+            activeMethods = St.spoofActiveCount or 0,
+            totalMethods = #ACTIONS,
         }
         for _, a in ipairs(ACTIONS) do
             out[a.key] = {
@@ -859,7 +1048,11 @@ function Sp.init(Ctx)
     end
 
     function Sp.setMethod(name, on)
-        if Cfg.SpoofMethods[name] == nil then return false end
+        if Cfg.SpoofMethods[name] == nil then
+            -- Allow adding new keys dynamically
+            Cfg.SpoofMethods[name] = not not on
+            return true
+        end
         Cfg.SpoofMethods[name] = not not on
         return true
     end
@@ -868,28 +1061,17 @@ function Sp.init(Ctx)
         local out = {}
         for i = 1, #ACTIONS do
             local a = ACTIONS[i]
-            out[i] = {
-                key = a.key,
-                hz  = a.hz,
-                on  = enabled(a.key),
-            }
+            out[i] = { key = a.key, hz = a.hz, on = enabled(a.key) }
         end
         return out
     end
 
-    --================================================================
-    -- BOOT
-    --================================================================
     if St.gsp then
         print(string.format(
-            "[Dingus][Spoof] v4 loaded · %d methods registered",
-            #ACTIONS))
-        print("[Dingus][Spoof] NOTE: gsp is ON. Client writes are " ..
-              "local echoes; server retains authority. Disable via " ..
-              "St.gsp = false if you see rubber-banding.")
+            "[Dingus][Spoof] v5 loaded · %d methods registered", #ACTIONS))
     else
         print(string.format(
-            "[Dingus][Spoof] v4 loaded · %d methods registered · master OFF",
+            "[Dingus][Spoof] v5 loaded · %d methods registered · master OFF",
             #ACTIONS))
     end
 end
