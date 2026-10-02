@@ -1,10 +1,14 @@
 --[[
-    Dingus-Slayer · chest.lua v5
-    Learn-mode default. Whitelist-approval. Cluster honeypot detection.
-    Session killswitch.
+    Dingus-Slayer · chest.lua v6
+    Boss-anchored collection. Jittered delays. Bounded attempt count.
 
-    Nothing fires until you add a name to F.ChestWhitelist manually.
-    Learn mode logs what it sees so you can build the list safely.
+    Flow on boss kill:
+      1. Boss dies → attack calls Chest.collectAtBoss(pos, name)
+      2. Chest waits 3–9s (random jitter)
+      3. Scans a 15-stud radius around the boss corpse only
+      4. Counts found items
+      5. Attempts exactly that many — no more, no retries
+      6. Moves on regardless of success rate
 ]]--
 
 local Chest = {}
@@ -16,11 +20,16 @@ function Chest.init(Ctx)
     -- CONFIG
     --============================================================
     F.ChestEnabled              = F.ChestEnabled              ~= false
-    F.ChestLearnMode            = F.ChestLearnMode            ~= false   -- SAFE BY DEFAULT
+    F.ChestLearnMode            = F.ChestLearnMode            ~= false
     F.ChestOnKill               = F.ChestOnKill               ~= false
     F.ChestPassive              = F.ChestPassive              ~= false
-    F.ChestPassiveInterval      = F.ChestPassiveInterval      or 25
+    F.ChestPassiveInterval      = F.ChestPassiveInterval      or 30
     F.ChestRadius               = F.ChestRadius               or 10
+    F.ChestBossLootRadius       = F.ChestBossLootRadius       or 15
+    F.ChestBossLootDelayMin     = F.ChestBossLootDelayMin     or 3.0
+    F.ChestBossLootDelayMax     = F.ChestBossLootDelayMax     or 9.0
+    F.ChestBossInterItemMin     = F.ChestBossInterItemMin     or 1.5
+    F.ChestBossInterItemMax     = F.ChestBossInterItemMax     or 3.0
     F.ChestReachDist            = F.ChestReachDist            or 4
     F.ChestMinInteractGap       = F.ChestMinInteractGap       or 3.0
     F.ChestMaxInteractionsPerMin = F.ChestMaxInteractionsPerMin or 10
@@ -28,14 +37,11 @@ function Chest.init(Ctx)
     F.ChestMaxPasses            = F.ChestMaxPasses            or 2
     F.ChestPassDeadline        = F.ChestPassDeadline         or 5
     F.ChestPerTargetCooldown    = F.ChestPerTargetCooldown    or 90
-    F.ChestHoneypotThreshold    = F.ChestHoneypotThreshold    or 3   -- cluster size
+    F.ChestHoneypotThreshold    = F.ChestHoneypotThreshold    or 3
     F.ChestVerbose              = F.ChestVerbose              or true
 
-    -- EMPTY BY DEFAULT. You populate this yourself after seeing items
-    -- in-game. Format: exact case-sensitive name string.
     F.ChestWhitelist = F.ChestWhitelist or {}
 
-    -- Honeypot reject signatures — never fire on these no matter what.
     F.ChestRejectSignatures = F.ChestRejectSignatures or {
         "grimore", "grimoire", "book",
         "/", "\\",
@@ -55,12 +61,11 @@ function Chest.init(Ctx)
     S.chestKilled          = false
     S.chestLastTargets     = {}
     S.chestLastScanTs      = 0
-    S.chestSeen            = S.chestSeen            or {}    -- learn-mode accumulator
+    S.chestSeen            = S.chestSeen            or {}
     S.chestRunning         = false
+    S.chestBossCycles      = 0
+    S.chestLastBossName    = nil
 
-    --============================================================
-    -- HELPERS
-    --============================================================
     local function rejectedName(name)
         if not name then return true end
         local l = string.lower(name)
@@ -78,31 +83,12 @@ function Chest.init(Ctx)
         return false
     end
 
-    local function modelPos(inst)
-        if not inst then return nil end
-        if inst:IsA("BasePart") then return inst.Position end
-        if inst:IsA("Attachment") and inst.Parent
-           and inst.Parent:IsA("BasePart") then
-            return inst.Parent.Position
-        end
-        if inst:IsA("Model") then
-            if inst.PrimaryPart then return inst.PrimaryPart.Position end
-            local any = inst:FindFirstChildWhichIsA("BasePart")
-            if any then return any.Position end
-        end
-        if inst:IsA("ClickDetector") or inst:IsA("ProximityPrompt") then
-            return modelPos(inst.Parent)
-        end
-        return nil
-    end
-
     local function promptValid(p)
         if not p or not p.Parent then return false end
         if p.Enabled == false then return false end
         local mad = p.MaxActivationDistance or 0
         if type(mad) ~= "number" or mad <= 0 then return false end
         if p.Visible == false then return false end
-        -- Reject if any ancestor up to 6 hops has a Humanoid
         local par = p.Parent
         for _ = 1, 6 do
             if not par then break end
@@ -121,32 +107,22 @@ function Chest.init(Ctx)
         return true
     end
 
-    --============================================================
-    -- KILLSWITCH
-    --============================================================
     local function checkKillswitch()
         if S.chestKilled then return false end
         if S.chestSessionCount >= (F.ChestSessionInteractionCap or 40) then
             S.chestKilled = true
-            warn("[Dingus][Chest] SESSION CAP HIT — module disabled. "..
-                 "Reset via Chest.resetKillswitch() after verifying safe.")
+            warn("[Dingus][Chest] SESSION CAP — module disabled. "..
+                 "Chest.resetKillswitch() to re-enable.")
             return false
         end
         return true
     end
 
-    -- rate limit: N interactions per 60s
     local function rateLimited()
         local now = U.clock()
         local win = S.chestMinuteWindow
-        while #win > 0 and now - win[1] > 60 do
-            table.remove(win, 1)
-        end
-        local cap = F.ChestMaxInteractionsPerMin or 10
-        if #win >= cap then
-            if F.ChestVerbose then
-                print(string.format("[Dingus][Chest] rate limit: %d/min reached", cap))
-            end
+        while #win > 0 and now - win[1] > 60 do table.remove(win, 1) end
+        if #win >= (F.ChestMaxInteractionsPerMin or 10) then
             return true
         end
         return false
@@ -160,25 +136,20 @@ function Chest.init(Ctx)
     end
 
     --============================================================
-    -- CLUSTER HONEYPOT DETECTION
+    -- HONEYPOT CLUSTER DETECTION
     --============================================================
-    -- If N+ instances within radius share a base-name pattern, that's a trap.
-    -- Real loot doesn't spawn as 12 identical clones named Plane.007,
-    -- Plane.008, Plane.011 ...
     local function hasHoneypotCluster(candidates)
         if #candidates < (F.ChestHoneypotThreshold or 3) then return false end
-        -- Group by normalized base name (strip .NNN suffix)
         local groups = {}
         for i = 1, #candidates do
             local n = candidates[i].name or ""
-            -- strip trailing .NNN or _NNN
             local base = n:gsub("%.[0-9]+$", ""):gsub("_[0-9]+$", "")
             groups[base] = (groups[base] or 0) + 1
         end
         for base, count in pairs(groups) do
             if count >= (F.ChestHoneypotThreshold or 3) then
                 print(string.format(
-                    "[Dingus][Chest] HONEYPOT DETECTED — %d clones of %q — refusing all",
+                    "[Dingus][Chest] HONEYPOT CLUSTER — %d clones of %q — refusing",
                     count, base))
                 return true
             end
@@ -187,77 +158,98 @@ function Chest.init(Ctx)
     end
 
     --============================================================
-    -- SCAN (proximity only, no workspace walk)
+    -- SCAN AROUND A POSITION (not the player)
     --============================================================
-    function Chest.scan(radius)
-        radius = radius or F.ChestRadius or 10
-        local r = U.hrp()
-        if not r then return {} end
-        local mp = r.Position
+    local function scanAround(centerPos, radius)
         local out, seen = {}, {}
+        if not centerPos then return out end
+        local maxSq = radius * radius
 
-        -- Tight proximity walk: only parts physically near the player.
         local params = OverlapParams.new()
         params.FilterType = Enum.RaycastFilterType.Exclude
         params.FilterDescendantsInstances = { U.Lp.Character }
-        params.MaxParts = 40
+        params.MaxParts = 80
 
         local ok, parts = pcall(function()
-            return workspace:GetPartBoundsInRadius(mp, radius, params)
+            return workspace:GetPartBoundsInRadius(centerPos, radius, params)
         end)
-        if not ok or not parts then return {} end
+        if not ok or not parts then return out end
 
         for i = 1, #parts do
             local part = parts[i]
             if part and not seen[part] then
                 local name = part.Name
                 if isWhitelisted(name) then
-                    seen[part] = true
-                    table.insert(out, {
-                        inst = part, pos = part.Position,
-                        d = (part.Position - mp).Magnitude,
-                        kind = "part", name = name,
-                    })
+                    local dx = part.Position.X - centerPos.X
+                    local dy = part.Position.Y - centerPos.Y
+                    local dz = part.Position.Z - centerPos.Z
+                    local dSq = dx*dx + dy*dy + dz*dz
+                    if dSq <= maxSq then
+                        seen[part] = true
+                        table.insert(out, {
+                            inst = part, pos = part.Position,
+                            d = math.sqrt(dSq),
+                            kind = "part", name = name,
+                        })
+                    end
                 end
                 for _, ch in ipairs(part:GetChildren()) do
                     if not seen[ch] then
                         if ch:IsA("ProximityPrompt") and promptValid(ch) then
-                            seen[ch] = true
-                            local label = part.Name
-                            if ch.ObjectText and #ch.ObjectText > 0 then
-                                label = ch.ObjectText
+                            if isWhitelisted(part.Name) then
+                                local dx = part.Position.X - centerPos.X
+                                local dy = part.Position.Y - centerPos.Y
+                                local dz = part.Position.Z - centerPos.Z
+                                local dSq = dx*dx + dy*dy + dz*dz
+                                if dSq <= maxSq then
+                                    seen[ch] = true
+                                    table.insert(out, {
+                                        inst = ch, pos = part.Position,
+                                        d = math.sqrt(dSq),
+                                        kind = "prompt", name = part.Name,
+                                        parentName = part.Name,
+                                    })
+                                end
                             end
-                            table.insert(out, {
-                                inst = ch, pos = part.Position,
-                                d = (part.Position - mp).Magnitude,
-                                kind = "prompt", name = label,
-                                parentName = part.Name,
-                            })
                         elseif ch:IsA("ClickDetector") then
-                            seen[ch] = true
-                            table.insert(out, {
-                                inst = ch, pos = part.Position,
-                                d = (part.Position - mp).Magnitude,
-                                kind = "click", name = part.Name,
-                            })
+                            if isWhitelisted(part.Name) then
+                                local dx = part.Position.X - centerPos.X
+                                local dy = part.Position.Y - centerPos.Y
+                                local dz = part.Position.Z - centerPos.Z
+                                local dSq = dx*dx + dy*dy + dz*dz
+                                if dSq <= maxSq then
+                                    seen[ch] = true
+                                    table.insert(out, {
+                                        inst = ch, pos = part.Position,
+                                        d = math.sqrt(dSq),
+                                        kind = "click", name = part.Name,
+                                    })
+                                end
+                            end
                         end
                     end
                 end
             end
         end
-
         table.sort(out, function(a, b) return a.d < b.d end)
+        return out
+    end
+
+    --============================================================
+    -- SCAN AROUND PLAYER (passive / learn mode)
+    --============================================================
+    function Chest.scan(radius)
+        radius = radius or F.ChestRadius or 10
+        local r = U.hrp(); if not r then return {} end
+        local out = scanAround(r.Position, radius)
         S.chestLastTargets = out
         S.chestLastScanTs = U.clock()
-
-        -- Learn mode: record everything seen
         if F.ChestLearnMode then
             for i = 1, #out do
                 local t = out[i]
                 S.chestSeen[t.name] = (S.chestSeen[t.name] or 0) + 1
             end
         end
-
         return out
     end
 
@@ -281,9 +273,7 @@ function Chest.init(Ctx)
         local r = U.hrp()
         if r and target.pos then
             local d = (r.Position - target.pos).Magnitude
-            if d > (F.ChestReachDist or 4) + 1 then
-                return false
-            end
+            if d > (F.ChestReachDist or 4) + 1 then return false end
         end
 
         if inst:IsA("ProximityPrompt") and promptValid(inst) then
@@ -329,73 +319,202 @@ function Chest.init(Ctx)
     end
 
     --============================================================
-    -- SWEEP
+    -- APPROACH
+    --============================================================
+    local function approach(pos, reach)
+        local r = U.hrp(); if not r or not pos then return end
+        local dx = pos.X - r.Position.X
+        local dz = pos.Z - r.Position.Z
+        local d = math.sqrt(dx*dx + dz*dz)
+        if d <= reach - 0.5 then return end
+        local flat = Vector3.new(dx, 0, dz)
+        if flat.Magnitude < 0.1 then return end
+        local dest = r.Position + flat.Unit * math.max(0, flat.Magnitude - reach + 1)
+        dest = Vector3.new(dest.X, r.Position.Y, dest.Z)
+        local ok, cf = pcall(function()
+            return CFrame.new(dest, Vector3.new(pos.X, dest.Y, pos.Z))
+        end)
+        if ok and cf then r.CFrame = cf end
+        task.wait(0.2)
+    end
+
+    --============================================================
+    -- BOSS-ANCHORED COLLECTION
+    --============================================================
+    -- Called from attack.lua with the boss corpse position.
+    -- Wait jittered 3-9s, scan around corpse, attempt exactly N.
+    -- Never retries, never wanders.
+    function Chest.collectAtBoss(bossPos, bossName)
+        if F.ChestLearnMode then
+            print("[Dingus][Chest] learn mode — skipping boss loot cycle")
+            return 0, 0
+        end
+        if not F.ChestEnabled or not F.ChestOnKill then return 0, 0 end
+        if not checkKillswitch() then return 0, 0 end
+
+        if S.chestRunning then return 0, 0 end
+        S.chestRunning = true
+        S.chestBossCycles = S.chestBossCycles + 1
+        S.chestLastBossName = bossName
+
+        local r = U.hrp()
+        if not bossPos and r then bossPos = r.Position end
+        if not bossPos then S.chestRunning = false; return 0, 0 end
+
+        local delay = (F.ChestBossLootDelayMin or 3.0)
+            + math.random() * ((F.ChestBossLootDelayMax or 9.0)
+                             - (F.ChestBossLootDelayMin or 3.0))
+
+        print(string.format(
+            "[Dingus][Chest] %s died — waiting %.1fs then scanning corpse",
+            tostring(bossName or "boss"), delay))
+
+        -- Hold up the cycle while jittering. Cancel-aware.
+        local waited = 0
+        while waited < delay do
+            if S.chestAbortRequest then
+                print("[Dingus][Chest] abort requested — loot cycle cancelled")
+                S.chestRunning = false
+                S.chestAbortRequest = false
+                return 0, 0
+            end
+            local step = math.min(0.4, delay - waited)
+            task.wait(step)
+            waited = waited + step
+        end
+
+        -- Scan around boss corpse only
+        local radius = F.ChestBossLootRadius or 15
+        local targets = scanAround(bossPos, radius)
+
+        if #targets == 0 then
+            if F.ChestVerbose then
+                print(string.format(
+                    "[Dingus][Chest] nothing found in %d-stud radius of %s corpse",
+                    radius, tostring(bossName or "boss")))
+            end
+            S.chestRunning = false
+            return 0, 0
+        end
+
+        -- Honeypot guard
+        if hasHoneypotCluster(targets) then
+            print("[Dingus][Chest] honeypot at boss corpse — aborting cycle")
+            for i = 1, #targets do
+                S.chestCooldowns[targets[i].inst] = U.clock() + 600
+            end
+            S.chestRunning = false
+            return 0, #targets
+        end
+
+        -- Cap the number of attempts to what we saw at scan time
+        local attemptsAllowed = #targets
+        print(string.format(
+            "[Dingus][Chest] %d items at corpse — attempting exactly %d",
+            attemptsAllowed, attemptsAllowed))
+
+        local collected = 0
+        local attempted = 0
+
+        for i = 1, attemptsAllowed do
+            if S.chestAbortRequest then
+                print("[Dingus][Chest] abort mid-cycle — stopping")
+                break
+            end
+            if not checkKillswitch() then break end
+
+            -- Re-scan for the nearest live target not on cooldown
+            local live = scanAround(bossPos, radius)
+            local target = nil
+            for j = 1, #live do
+                local t = live[j]
+                if t.inst and t.inst.Parent and not cooling(t.inst) then
+                    target = t
+                    break
+                end
+            end
+
+            if not target then
+                print("[Dingus][Chest] no more live targets — ending cycle")
+                break
+            end
+
+            attempted = attempted + 1
+            approach(target.pos, F.ChestReachDist or 4)
+
+            if tryFire(target) then
+                collected = collected + 1
+                S.chestCollected = S.chestCollected + 1
+                print(string.format(
+                    "[Dingus][Chest] collected %s (attempt %d/%d)",
+                    target.name, i, attemptsAllowed))
+            else
+                S.chestFailed = S.chestFailed + 1
+                print(string.format(
+                    "[Dingus][Chest] skip %s (attempt %d/%d — %d collected so far)",
+                    target.name, i, attemptsAllowed, collected))
+                S.chestCooldowns[target.inst] = U.clock()
+                    + (F.ChestPerTargetCooldown or 90)
+            end
+
+            -- Jittered inter-item delay so the cadence isn't machine-uniform
+            if i < attemptsAllowed then
+                local gap = (F.ChestBossInterItemMin or 1.5)
+                    + math.random() * ((F.ChestBossInterItemMax or 3.0)
+                                     - (F.ChestBossInterItemMin or 1.5))
+                local gwaited = 0
+                while gwaited < gap do
+                    if S.chestAbortRequest then break end
+                    local step = math.min(0.3, gap - gwaited)
+                    task.wait(step)
+                    gwaited = gwaited + step
+                end
+            end
+        end
+
+        print(string.format(
+            "[Dingus][Chest] corpse cycle done · %d/%d collected · moving to next boss",
+            collected, attemptsAllowed))
+
+        S.chestAbortRequest = false
+        S.chestRunning = false
+        return collected, attemptsAllowed
+    end
+
+    --============================================================
+    -- LEGACY SWEEP (still used for passive/learn)
     --============================================================
     function Chest.sweep(radius)
-        radius = radius or F.ChestRadius or 10
         if not checkKillswitch() then return 0 end
-
+        radius = radius or F.ChestRadius or 10
         local targets = Chest.scan(radius)
         if #targets == 0 then return 0 end
-
-        -- honeypot cluster check before any interaction
         if hasHoneypotCluster(targets) then
-            S.chestSkipped = S.chestSkipped + #targets
             for i = 1, #targets do
                 S.chestCooldowns[targets[i].inst] = U.clock() + 300
             end
             return 0
         end
-
-        -- learn mode: log and return, no firing
         if F.ChestLearnMode then
-            print(string.format(
-                "[Dingus][Chest][learn] %d target(s) in range — NOT firing:",
-                #targets))
+            print(string.format("[Dingus][Chest][learn] %d targets — not firing", #targets))
             for i = 1, math.min(#targets, 8) do
                 local t = targets[i]
-                print(string.format("  [%s] %q @%.1f (parent=%q)",
-                    t.kind, t.name, t.d, t.parentName or "?"))
+                print(string.format("  [%s] %q @%.1f",
+                    t.kind, t.name, t.d))
             end
             return 0
         end
-
         local fired = 0
         for i = 1, #targets do
             local t = targets[i]
             if t.inst and t.inst.Parent and not cooling(t.inst) then
-                -- Approach within reach
-                local r = U.hrp()
-                if r and t.pos then
-                    local dx = t.pos.X - r.Position.X
-                    local dz = t.pos.Z - r.Position.Z
-                    local d = math.sqrt(dx*dx + dz*dz)
-                    local reach = F.ChestReachDist or 4
-                    if d > reach - 0.5 and d <= radius then
-                        local flat = Vector3.new(dx, 0, dz)
-                        if flat.Magnitude > 0.1 then
-                            local dest = r.Position
-                                + flat.Unit * math.max(0, flat.Magnitude - reach + 1)
-                            dest = Vector3.new(dest.X, r.Position.Y, dest.Z)
-                            local ok, cf = pcall(function()
-                                return CFrame.new(dest, Vector3.new(t.pos.X, dest.Y, t.pos.Z))
-                            end)
-                            if ok and cf then r.CFrame = cf end
-                            task.wait(0.2)
-                        end
-                    end
-                end
-
+                approach(t.pos, F.ChestReachDist or 4)
                 if tryFire(t) then
                     fired = fired + 1
                     if string.find(t.name, "Chest", 1, true) then
                         S.chestCollected = S.chestCollected + 1
-                        print(string.format("[Dingus][Chest] opened %s @%.0f",
-                            t.name, t.d))
                     else
                         S.chestLootCollected = S.chestLootCollected + 1
-                        print(string.format("[Dingus][Chest] loot %s @%.0f",
-                            t.name, t.d))
                     end
                     task.wait(F.ChestMinInteractGap or 3.0)
                 else
@@ -408,10 +527,7 @@ function Chest.init(Ctx)
     end
 
     function Chest.collectAll(radius, maxPasses, deadline)
-        if F.ChestLearnMode then
-            print("[Dingus][Chest] learn mode — collectAll is a no-op")
-            return 0, 0
-        end
+        if F.ChestLearnMode then return 0, 0 end
         if not checkKillswitch() then return 0, 0 end
         radius = radius or F.ChestRadius or 10
         maxPasses = maxPasses or F.ChestMaxPasses or 2
@@ -432,27 +548,21 @@ function Chest.init(Ctx)
         return total, pass
     end
 
-    function Chest.collectBossDrop()
-        if F.ChestLearnMode then return end
-        if not F.ChestEnabled or not F.ChestOnKill then return end
-        task.wait(1.5)
-        local fired, pass = Chest.collectAll()
-        if fired > 0 or F.ChestVerbose then
-            print(string.format("[Dingus][Chest] kill cycle fired=%d pass=%d", fired, pass))
-        end
-    end
-
+    --============================================================
+    -- PASSIVE — skipped while boss cycle is running
+    --============================================================
     function Chest.collectPassive()
         if F.ChestLearnMode then return end
         if not F.ChestEnabled or not F.ChestPassive then return end
+        if S.chestRunning then return end
         local t = U.clock()
-        if t - (S.chestLastPassive or 0) < (F.ChestPassiveInterval or 25) then return end
+        if t - (S.chestLastPassive or 0) < (F.ChestPassiveInterval or 30) then return end
         S.chestLastPassive = t
         Chest.sweep(F.ChestRadius or 10)
     end
 
     --============================================================
-    -- PUBLIC
+    -- CONTROL
     --============================================================
     function Chest.setEnabled(v) F.ChestEnabled = not not v end
     function Chest.setLearnMode(v)
@@ -466,18 +576,15 @@ function Chest.init(Ctx)
         S.chestMinuteWindow = {}
         print("[Dingus][Chest] killswitch reset")
     end
+    function Chest.abort() S.chestAbortRequest = true end
 
     function Chest.approve(name)
-        -- add to whitelist
         for i = 1, #F.ChestWhitelist do
-            if F.ChestWhitelist[i] == name then
-                print("[Dingus][Chest] already approved: " .. name)
-                return false
-            end
+            if F.ChestWhitelist[i] == name then return false end
         end
         table.insert(F.ChestWhitelist, name)
         print("[Dingus][Chest] approved: " .. name ..
-              " (whitelist size " .. #F.ChestWhitelist .. ")")
+              " (whitelist=" .. #F.ChestWhitelist .. ")")
         return true
     end
 
@@ -485,7 +592,6 @@ function Chest.init(Ctx)
         for i = #F.ChestWhitelist, 1, -1 do
             if F.ChestWhitelist[i] == name then
                 table.remove(F.ChestWhitelist, i)
-                print("[Dingus][Chest] unapproved: " .. name)
                 return true
             end
         end
@@ -493,7 +599,7 @@ function Chest.init(Ctx)
     end
 
     function Chest.listSeen()
-        print("[Dingus][Chest] learn-mode observations:")
+        print("[Dingus][Chest] learn observations:")
         local names = {}
         for n in pairs(S.chestSeen or {}) do table.insert(names, n) end
         table.sort(names)
@@ -512,9 +618,8 @@ function Chest.init(Ctx)
 
     function Chest.dump()
         local list = Chest.scan(F.ChestRadius or 10)
-        print(string.format("[Dingus][Chest] %d targets in %d studs (learn=%s, killed=%s):",
-            #list, F.ChestRadius or 10,
-            tostring(F.ChestLearnMode), tostring(S.chestKilled)))
+        print(string.format("[Dingus][Chest] %d targets (learn=%s killed=%s)",
+            #list, tostring(F.ChestLearnMode), tostring(S.chestKilled)))
         for i = 1, math.min(#list, 20) do
             local t = list[i]
             local wl = false
@@ -535,16 +640,19 @@ function Chest.init(Ctx)
             learnMode = F.ChestLearnMode,
             onKill = F.ChestOnKill,
             passive = F.ChestPassive,
-            radius = F.ChestRadius or 10,
+            bossRadius = F.ChestBossLootRadius or 15,
+            bossDelayMin = F.ChestBossLootDelayMin or 3.0,
+            bossDelayMax = F.ChestBossLootDelayMax or 9.0,
             reach = F.ChestReachDist or 4,
-            gap = F.ChestMinInteractGap or 3.0,
             whitelistSize = #F.ChestWhitelist,
-            rejectCount = #F.ChestRejectSignatures,
             sessionCount = S.chestSessionCount or 0,
             sessionCap = F.ChestSessionInteractionCap or 40,
             minuteCount = #(S.chestMinuteWindow or {}),
             minuteCap = F.ChestMaxInteractionsPerMin or 10,
             killed = S.chestKilled,
+            running = S.chestRunning,
+            bossCycles = S.chestBossCycles or 0,
+            lastBoss = S.chestLastBossName,
             collected = S.chestCollected or 0,
             lootCollected = S.chestLootCollected or 0,
             failed = S.chestFailed or 0,
@@ -555,11 +663,11 @@ function Chest.init(Ctx)
     end
 
     --============================================================
-    -- AUTO-LEARN LOG
+    -- LEARN SCAN LOOP
     --============================================================
     task.spawn(function()
         while S.run do
-            if F.ChestLearnMode and S.boot then
+            if F.ChestLearnMode and S.boot and not S.chestRunning then
                 pcall(function() Chest.scan(F.ChestRadius or 10) end)
             end
             task.wait(4)
@@ -570,14 +678,15 @@ function Chest.init(Ctx)
         U.Lp.CharacterAdded:Connect(function()
             task.wait(2)
             Chest.resetCooldowns()
+            S.chestAbortRequest = true
         end)
     end
 
     print(string.format(
-        "[Dingus][chest] v5 · LEARN=%s · whitelist=%d · cap=%d/min, %d/session",
+        "[Dingus][chest] v6 · LEARN=%s · WL=%d · boss-delay=%.1f-%.1fs · radius=%d",
         tostring(F.ChestLearnMode), #F.ChestWhitelist,
-        F.ChestMaxInteractionsPerMin or 10,
-        F.ChestSessionInteractionCap or 40))
+        F.ChestBossLootDelayMin or 3.0, F.ChestBossLootDelayMax or 9.0,
+        F.ChestBossLootRadius or 15))
 end
 
 return Chest
