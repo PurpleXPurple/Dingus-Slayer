@@ -71,16 +71,48 @@ Cfg.LootPassDeadline    = 8
 Cfg.LootPromptDepth     = 4
 Cfg.LootTargetCooldown  = 45
 Cfg.LootVerbose         = false
+--============================================================
+-- CHEST DETECTION
+-- Matched against ProximityPrompt ObjectText + ActionText.
+--============================================================
 Cfg.ChestKeywords       = {
-    "chest", "common chest", "demon chest", "ice chest",
-    "lost chest", "ouwigahara chest", "rare chest",
-    "sealed chest", "snow chest", "world events chest",
-    "cache", "crate",
+    -- Standard map chests
+    "chest", "common chest", "rare chest", "lost chest",
+    -- Biome chests
+    "ice chest", "snow chest", "sealed chest",
+    -- Boss drops
+    "demon chest", "ouwigahara chest", "world events chest",
+    -- Generic containers
+    "cache", "crate", "chestbox", "lootbox",
 }
+
+--============================================================
+-- LOOT DETECTION
+-- Every item, material, currency, accessory, consumable
+-- and event drop that appears as a ground ProximityPrompt
+-- after a chest opens or a boss dies.
+--============================================================
 Cfg.LootKeywords        = {
-    "coin", "pouch", "metal scrap", "refinement", "silk thread",
-    "ore", "relic", "orb", "scroll", "totem",
-    "drop", "loot", "pick up", "pickup",
+    -- Currency
+    "coin", "wen", "yen", "pouch", "coin pouch", "wen pouch",
+    -- Materials
+    "ore", "metal scrap", "scrap", "refinement", "refinement ore",
+    "silk thread", "silk", "iron ingot", "forged ingot",
+    "plating", "weaver", "crystal", "ingot",
+    -- Consumables
+    "elixir", "potion", "gourd", "regen",
+    -- Accessories + equipment (World Events Chest drops)
+    "lantern", "demonic lantern",
+    "haori", "stylish haori",
+    "robe", "necklace", "earring", "ring", "mask", "circlet",
+    "accessory", "accessories", "cosmetic",
+    -- Event / reroll tokens
+    "token", "reroll", "voucher", "ticket",
+    -- Legacy / generic
+    "relic", "orb", "scroll", "totem", "artifact",
+    -- Generic pickup verbs (fallback matching)
+    "pickup", "pick up", "drop", "loot", "item", "collect",
+    "bag", "satchel", "bundle",
 }
 
 Cfg.FKeyMode       = "auto"
