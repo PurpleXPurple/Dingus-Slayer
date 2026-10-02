@@ -1,8 +1,3 @@
---[[
-    Dingus-Slayer · quests.lua v5
-    Hotbar mutex integration. Custom-hotbar aware. Multi-path level reader.
-]]--
-
 local Q = {}
 
 function Q.init(Ctx)
@@ -11,8 +6,10 @@ function Q.init(Ctx)
     local St    = Ctx.St
     local Lists = Ctx.Lists
 
+    -- HARDCODED to slot 5, no auto-probe
+    Cfg.QuestCrowHotbar     = "5"
+
     Cfg.QuestCycleT         = Cfg.QuestCycleT         or 6.0
-    Cfg.QuestCrowHotbar     = Cfg.QuestCrowHotbar     or "2"
     Cfg.QuestMenuWait       = Cfg.QuestMenuWait       or 2.5
     Cfg.QuestLogStructure   = Cfg.QuestLogStructure   ~= false
     Cfg.QuestPriorityStale  = Cfg.QuestPriorityStale  or 90
@@ -50,9 +47,7 @@ function Q.init(Ctx)
 
     local function readLevelVerbose()
         local slots, me = getSlots()
-        if not slots then
-            return 0, "no slots"
-        end
+        if not slots then return 0, "no slots" end
 
         for _, slot in ipairs(slots:GetChildren()) do
             local prog = slot:FindFirstChild("Progression")
@@ -77,9 +72,7 @@ function Q.init(Ctx)
 
         for _, slot in ipairs(slots:GetChildren()) do
             for _, d in ipairs(slot:GetDescendants()) do
-                if d.Name == "Level"
-                   and (d:IsA("NumberValue") or d:IsA("IntValue"))
-                   and d.Value > 0 then
+                if d.Name == "Level" and (d:IsA("NumberValue") or d:IsA("IntValue")) and d.Value > 0 then
                     return d.Value, "deep:" .. d:GetFullName()
                 end
             end
@@ -102,8 +95,7 @@ function Q.init(Ctx)
                 print(string.format("  slot: %s (%s)", slot.Name, slot.ClassName))
                 for _, d in ipairs(slot:GetDescendants()) do
                     if d:IsA("NumberValue") or d:IsA("IntValue") then
-                        print(string.format("    %s = %s",
-                            d:GetFullName(), tostring(d.Value)))
+                        print(string.format("    %s = %s", d:GetFullName(), tostring(d.Value)))
                     end
                 end
             end
@@ -114,13 +106,10 @@ function Q.init(Ctx)
                 end
             end
         end
-
         return 0, "no match"
     end
 
-    function Q.readLevel()
-        return (readLevelVerbose())
-    end
+    function Q.readLevel() return (readLevelVerbose()) end
 
     --============================================================
     -- BOSS HUNTS
@@ -151,52 +140,33 @@ function Q.init(Ctx)
         for _, cfg in ipairs(folder:GetChildren()) do
             if cfg:IsA("Configuration") then
                 if not firstConfig then firstConfig = cfg end
-                local entry = {
-                    id = tonumber(cfg.Name) or cfg.Name,
-                    name = cfg.Name,
-                    fields = {},
-                    raw = cfg,
-                }
+                local entry = { id = tonumber(cfg.Name) or cfg.Name, name = cfg.Name, fields = {}, raw = cfg }
                 for _, child in ipairs(cfg:GetChildren()) do
                     local ok, v = pcall(function() return child.Value end)
                     entry.fields[child.Name] = ok and v or child.ClassName
                 end
-                entry.boss = entry.fields.Boss
-                    or entry.fields.BossName
-                    or entry.fields.Target
-                    or entry.fields.NPC
-                    or entry.fields.Name
-                entry.xp = tonumber(entry.fields.XP
-                    or entry.fields.Experience
-                    or entry.fields.Reward
-                    or entry.fields.RewardXP)
-                entry.wen = tonumber(entry.fields.Wen
-                    or entry.fields.Money
-                    or entry.fields.Currency)
+                entry.boss = entry.fields.Boss or entry.fields.BossName or entry.fields.Target or entry.fields.NPC or entry.fields.Name
+                entry.xp = tonumber(entry.fields.XP or entry.fields.Experience or entry.fields.Reward or entry.fields.RewardXP)
+                entry.wen = tonumber(entry.fields.Wen or entry.fields.Money or entry.fields.Currency)
                 table.insert(out, entry)
             end
         end
 
-        table.sort(out, function(a, b)
-            return (tonumber(a.id) or 0) < (tonumber(b.id) or 0)
-        end)
+        table.sort(out, function(a, b) return (tonumber(a.id) or 0) < (tonumber(b.id) or 0) end)
 
         if Cfg.QuestLogStructure and not St.questStructureLogged and firstConfig then
             St.questStructureLogged = true
             local fields = {}
             for _, c in ipairs(firstConfig:GetChildren()) do
                 local ok, v = pcall(function() return c.Value end)
-                table.insert(fields, string.format("%s=%s",
-                    c.Name, ok and tostring(v) or "<"..c.ClassName..">"))
+                table.insert(fields, string.format("%s=%s", c.Name, ok and tostring(v) or "<"..c.ClassName..">"))
             end
             print("[Dingus][Quest] BossHunts at " .. tostring(path))
             print("[Dingus][Quest] sample config: " .. table.concat(fields, " "))
             local ids = {}
             for _, h in ipairs(out) do table.insert(ids, tostring(h.id)) end
-            print(string.format("[Dingus][Quest] parsed %d hunts: %s",
-                #out, table.concat(ids, ", ")))
+            print(string.format("[Dingus][Quest] parsed %d hunts: %s", #out, table.concat(ids, ", ")))
         end
-
         St.questAvailableCount = #out
         return out
     end
@@ -204,84 +174,43 @@ function Q.init(Ctx)
     --============================================================
     -- CROW TOOL FINDER
     --============================================================
-    local CROW_NAMES = {
-        "crow", "kasugai", "kasugai crow", "karasu",
-        "crow tool", "crowt", "the crow", "bird",
-    }
+    local CROW_NAMES = { "crow", "kasugai", "kasugai crow", "karasu", "crow tool", "crowt", "the crow", "bird" }
 
     local function isCrowish(name)
         if not name then return false end
         local l = string.lower(name)
-        for _, n in ipairs(CROW_NAMES) do
-            if l == n then return true end
-        end
-        if l:find("crow", 1, true) or l:find("kasugai", 1, true) then
-            return true
-        end
+        for _, n in ipairs(CROW_NAMES) do if l == n then return true end end
+        if l:find("crow", 1, true) or l:find("kasugai", 1, true) then return true end
         return false
     end
 
     local function findCrowToolVerbose()
         local plr = U.Lp
-
         local char = plr.Character
         if char then
             for _, c in ipairs(char:GetChildren()) do
-                if c:IsA("Tool") and isCrowish(c.Name) then
-                    return c, "CharacterTool"
-                end
+                if c:IsA("Tool") and isCrowish(c.Name) then return c, "CharacterTool" end
             end
         end
-
         local bp = plr:FindFirstChildOfClass("Backpack")
         if bp then
             for _, c in ipairs(bp:GetChildren()) do
-                if c:IsA("Tool") and isCrowish(c.Name) then
-                    return c, "BackpackTool"
-                end
+                if c:IsA("Tool") and isCrowish(c.Name) then return c, "BackpackTool" end
             end
         end
-
         if char then
             for _, c in ipairs(char:GetDescendants()) do
-                if (c:IsA("Model") or c:IsA("MeshPart") or c:IsA("BasePart"))
-                   and isCrowish(c.Name) then
-                    return c, "CustomMesh"
-                end
-            end
-        end
-
-        return nil, nil
-    end
-
-    --============================================================
-    -- HOTBAR PROBE via mutex
-    --============================================================
-    local function hotbarSlotForCrow()
-        local H = Ctx.Hotbar
-        if not H then return nil, nil end
-
-        local order = { Cfg.QuestCrowHotbar or "2", "1", "3", "4", "5", "6", "7", "8" }
-        local tried = {}
-        for _, k in ipairs(order) do
-            if not tried[k] then
-                tried[k] = true
-                if H.tap("quest-crow-probe", k, 0.45) then
-                    local tool, from = findCrowToolVerbose()
-                    if tool then
-                        print(string.format(
-                            "[Dingus][Quest] crow found via hotbar '%s' (%s)",
-                            k, tostring(from)))
-                        Cfg.QuestCrowHotbar = k
-                        return tool, k
-                    end
-                end
+                if (c:IsA("Model") or c:IsA("MeshPart") or c:IsA("BasePart")) and isCrowish(c.Name) then return c, "CustomMesh" end
             end
         end
         return nil, nil
     end
 
+    --============================================================
+    -- EQUIP CROW (using slot 5)
+    --============================================================
     local function equipCrow()
+        -- Already equipped?
         local tool, from = findCrowToolVerbose()
         if tool and (from == "CharacterTool" or from == "CustomMesh") then
             return tool
@@ -290,33 +219,26 @@ function Q.init(Ctx)
         local H = Ctx.Hotbar
         if not H then return nil end
 
+        -- Use the mutex to prevent conflict with weapon equip
         if not H.acquire("quest-crow", 3.0) then
-            if Cfg.QuestVerbose then
-                log("hotbar busy (" .. tostring(H.isLocked()) .. "), skipping crow equip")
-            end
+            if Cfg.QuestVerbose then log("hotbar busy, skipping crow equip") end
             return nil
         end
 
-        local result = nil
-        local slot = Cfg.QuestCrowHotbar or "2"
-        if Cfg.QuestVerbose then
-            log("equipping crow via hotbar '" .. slot .. "'")
-        end
+        local slot = "5" -- HARDCODED slot 5
+        if Cfg.QuestVerbose then log("equipping crow via hotbar slot '5'") end
+
         pcall(function() U.tap(slot) end)
         task.wait(0.45)
 
+        -- Verify
         tool, from = findCrowToolVerbose()
-        if tool then
-            result = tool
-        else
-            if Cfg.QuestVerbose then
-                log("configured slot failed, probing all hotbar slots")
-            end
-            result = select(1, hotbarSlotForCrow())
+        if not tool then
+            if Cfg.QuestVerbose then log("slot 5 did not equip crow") end
         end
 
         H.release("quest-crow")
-        return result
+        return tool
     end
 
     --============================================================
@@ -333,14 +255,11 @@ function Q.init(Ctx)
             if inst and d <= 10 then
                 if inst:IsA("TextLabel") then
                     local okT, txt = pcall(function() return inst.Text end)
-                    if okT and type(txt) == "string"
-                       and txt:find("current tasks", 1, true) then
+                    if okT and type(txt) == "string" and txt:find("current tasks", 1, true) then
                         return inst.Parent or inst
                     end
                 end
-                for _, k in ipairs(inst:GetChildren()) do
-                    table.insert(stack, { k, d + 1 })
-                end
+                for _, k in ipairs(inst:GetChildren()) do table.insert(stack, { k, d + 1 }) end
                 iter = iter + 1
                 if iter % 2000 == 0 then task.wait() end
             end
@@ -366,9 +285,7 @@ function Q.init(Ctx)
                         end
                     end
                 end
-                for _, k in ipairs(inst:GetChildren()) do
-                    table.insert(stack, k)
-                end
+                for _, k in ipairs(inst:GetChildren()) do table.insert(stack, k) end
                 iter = iter + 1
                 if iter % 2000 == 0 then task.wait() end
             end
@@ -397,18 +314,14 @@ function Q.init(Ctx)
                 if inst:IsA("TextLabel") then
                     local okT, txt = pcall(function() return inst.Text end)
                     if okT and type(txt) == "string" then
-                        local boss = txt:match("^%s*Defeat%s+(.+)$")
-                            or txt:match("^%s*Eliminate%s+(.+)$")
-                            or txt:match("^%s*Hunt%s+(.+)$")
+                        local boss = txt:match("^%s*Defeat%s+(.+)$") or txt:match("^%s*Eliminate%s+(.+)$") or txt:match("^%s*Hunt%s+(.+)$")
                         if boss then
                             boss = boss:gsub("%s+$", ""):gsub("^%s+", "")
                             table.insert(labels, { boss = boss, inst = inst })
                         end
                     end
                 end
-                for _, k in ipairs(inst:GetChildren()) do
-                    table.insert(stack, k)
-                end
+                for _, k in ipairs(inst:GetChildren()) do table.insert(stack, k) end
                 iter = iter + 1
                 if iter % 2000 == 0 then task.wait() end
             end
@@ -427,11 +340,7 @@ function Q.init(Ctx)
                     end
                 end
             end
-            table.insert(out, {
-                boss = entry.boss,
-                timeLeft = timeLeft,
-                label = entry.inst,
-            })
+            table.insert(out, { boss = entry.boss, timeLeft = timeLeft, label = entry.inst })
         end
         return out
     end
@@ -468,19 +377,14 @@ function Q.init(Ctx)
     function Q.readActiveQuests()
         if not Cfg.QuestReadOnOpen then return St.questActiveList end
         local qs = readQuestsFromPanel()
-        if #qs > 0 then
-            St.questActiveList = qs
-            St.questLastRead = U.clock()
-        end
+        if #qs > 0 then St.questActiveList = qs; St.questLastRead = U.clock() end
         return qs
     end
 
     function Q.isPriority(bossName)
         local list = St.questPriorityBosses
         if not list or #list == 0 then return true end
-        if (U.clock() - (St.questLastRead or 0)) > (Cfg.QuestPriorityStale * 2) then
-            return true
-        end
+        if (U.clock() - (St.questLastRead or 0)) > (Cfg.QuestPriorityStale * 2) then return true end
         local l = string.lower(bossName or "")
         for i = 1, #list do
             local t = string.lower(list[i])
@@ -506,9 +410,7 @@ function Q.init(Ctx)
 
         if stale or empty then
             if Ctx.Hotbar and Ctx.Hotbar.isLocked() then
-                if Cfg.QuestVerbose then
-                    log("hotbar locked by " .. tostring(Ctx.Hotbar.isLocked()) .. ", deferring")
-                end
+                if Cfg.QuestVerbose then log("hotbar locked by " .. tostring(Ctx.Hotbar.isLocked()) .. ", deferring") end
                 return
             end
 
@@ -526,24 +428,17 @@ function Q.init(Ctx)
                         St.questPriorityBosses = names
                         St.questActiveList = qs
                         St.questLastRead = now
-                        print(string.format("[Dingus][Quest] %d active · %s",
-                            #qs, table.concat(names, ", ")))
+                        print(string.format("[Dingus][Quest] %d active · %s", #qs, table.concat(names, ", ")))
                     else
-                        if Cfg.QuestVerbose then
-                            log("crow panel open but no quest labels found")
-                        end
+                        if Cfg.QuestVerbose then log("crow panel open but no quest labels found") end
                     end
                     closeMenu()
                     St.questPanelOpened = false
                 else
-                    if Cfg.QuestVerbose then
-                        log("crow menu failed to open after M1")
-                    end
+                    if Cfg.QuestVerbose then log("crow menu failed to open after M1") end
                 end
             else
-                if Cfg.QuestVerbose then
-                    log("no crow found in any hotbar slot")
-                end
+                if Cfg.QuestVerbose then log("crow not equipped (slot 5 failed)") end
             end
         end
     end
@@ -557,8 +452,7 @@ function Q.init(Ctx)
                 if cfg:IsA("Configuration") then
                     for _, c in ipairs(cfg:GetChildren()) do
                         local ok, v = pcall(function() return c.Value end)
-                        print(string.format("    · %s = %s",
-                            c.Name, ok and tostring(v) or "?"))
+                        print(string.format("    · %s = %s", c.Name, ok and tostring(v) or "?"))
                     end
                 end
             end
@@ -567,27 +461,9 @@ function Q.init(Ctx)
         end
     end
 
-    function Q.probeHotbar()
-        print("[Dingus][Quest] probing hotbar slots for crow...")
-        local H = Ctx.Hotbar
-        for _, k in ipairs({"1","2","3","4","5","6","7","8"}) do
-            if H then
-                H.tap("quest-probe", k, 0.4)
-            else
-                pcall(function() U.tap(k) end)
-                task.wait(0.4)
-            end
-            local tool, from = findCrowToolVerbose()
-            print(string.format("  slot %s: %s",
-                k, tool and (tool.Name .. " (" .. from .. ")") or "nothing"))
-        end
-    end
-
     function Q.stats()
         local holder = "no-module"
-        if Ctx.Hotbar and Ctx.Hotbar.isLocked then
-            holder = Ctx.Hotbar.isLocked() or "free"
-        end
+        if Ctx.Hotbar and Ctx.Hotbar.isLocked then holder = Ctx.Hotbar.isLocked() or "free" end
         return {
             level = St.playerLevel or 0,
             availableHunts = St.questAvailableCount or 0,
@@ -607,7 +483,7 @@ function Q.init(Ctx)
     --============================================================
     task.spawn(function()
         task.wait(3)
-        print("[Dingus][Quest] v5 boot discovery")
+        print("[Dingus][Quest] v6 boot discovery (slot 5)")
         Q.readHunts()
         local lvl, which = readLevelVerbose()
         St.playerLevel = lvl
@@ -616,11 +492,10 @@ function Q.init(Ctx)
         else
             print("[Dingus][Quest] level: NO PATH WORKED — see dump above")
         end
-        print(string.format("[Dingus][Quest] ready · hunts=%d · crowSlot=%s",
-            St.questAvailableCount, Cfg.QuestCrowHotbar))
+        print(string.format("[Dingus][Quest] ready · hunts=%d · crowSlot=5", St.questAvailableCount))
     end)
 
-    print("[Dingus][quests] v5 initialized")
+    print("[Dingus][quests] v6 initialized (slot 5)")
 end
 
 return Q
