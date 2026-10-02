@@ -1,12 +1,7 @@
 --[[
-    Dingus-Slayer · attack.lua v9
-    Combat with priority-aware targeting, hold-cast, damage-block,
-    emergency mode, chest collection.
-
-    Changes from v8:
-      - acquireTarget relies on detect.scanBosses priority filtering
-      - Cleaner target acquisition
-      - isEnemyAttacking available from detect v4
+    Dingus-Slayer · attack.lua v10
+    Custom-hotbar aware. Mesh-based tool detection. Deep chest walk.
+    Passive chest tick. Critical HP retreat. Priority filter retained.
 ]]--
 
 local A = {}
@@ -30,9 +25,10 @@ function A.init(Ctx)
     Cfg.HitWindow      = Cfg.HitWindow      or 15
     Cfg.RunSpeed       = Cfg.RunSpeed       or 16
 
-    Cfg.RetreatHP      = Cfg.RetreatHP      or 0.20
-    Cfg.RetreatDelay   = Cfg.RetreatDelay   or 2.5
-    Cfg.RetreatClearHP = Cfg.RetreatClearHP or 0.55
+    Cfg.RetreatHP       = Cfg.RetreatHP       or 0.55
+    Cfg.CriticalHP      = Cfg.CriticalHP      or 0.15
+    Cfg.RetreatDelay    = Cfg.RetreatDelay    or 2.5
+    Cfg.RetreatClearHP  = Cfg.RetreatClearHP  or 0.75
 
     Cfg.SkillKeys      = Cfg.SkillKeys      or { "F", "Z", "X", "C", "V", "B" }
     Cfg.SkillUnlocked  = Cfg.SkillUnlocked  or { true, true, true, true, true, true }
@@ -53,9 +49,11 @@ function A.init(Ctx)
     Cfg.EmergencyInterval   = Cfg.EmergencyInterval   or 0.15
 
     Cfg.ChestEnabled        = Cfg.ChestEnabled        ~= false
-    Cfg.ChestRange          = Cfg.ChestRange          or 14
+    Cfg.ChestRange          = Cfg.ChestRange          or 20
     Cfg.ChestVerifyDelay    = Cfg.ChestVerifyDelay    or 0.55
     Cfg.ChestSkipDuration   = Cfg.ChestSkipDuration   or 45
+    Cfg.ChestPassiveT       = Cfg.ChestPassiveT       or 3.0
+    Cfg.ChestSafeRadius     = Cfg.ChestSafeRadius     or 40
     Cfg.ChestKeywords       = Cfg.ChestKeywords       or {
         "chest", "common chest", "demon chest", "ice chest",
         "lost chest", "ouwigahara chest", "rare chest",
@@ -64,6 +62,8 @@ function A.init(Ctx)
 
     Cfg.FKeyMode       = Cfg.FKeyMode       or "auto"
     Cfg.AutoBlock      = Cfg.AutoBlock      ~= false
+    Cfg.BlockHoldTTL   = Cfg.BlockHoldTTL   or 0.4
+    Cfg.BlockProbeWait = Cfg.BlockProbeWait or 0.15
 
     Cfg.TeleportCd         = Cfg.TeleportCd         or 0.22
     Cfg.TeleportStrike     = Cfg.TeleportStrike     or 4.5
@@ -79,6 +79,8 @@ function A.init(Ctx)
     Cfg.TelegraphWindow    = Cfg.TelegraphWindow    or 0.45
     Cfg.M1MaxHz            = Cfg.M1MaxHz            or 10
 
+    Cfg.WeaponHotbarOrder  = Cfg.WeaponHotbarOrder  or { "3", "4", "1", "5" }
+
     --============================================================
     -- STATE
     --============================================================
@@ -88,8 +90,7 @@ function A.init(Ctx)
 
     St.lAtk = 0; St.lSkl = 0; St.lEqp = 0; St.lBrt = 0
     St.lDodge = 0; St.lTele = 0; St.lInRangeChase = 0
-    St.lStateRefresh = 0
-    St.lChestScan = 0
+    St.lStateRefresh = 0; St.lChestScan = 0; St.lChestPassive = 0
 
     St.eq = "none"
     St.cbtS = "IDLE"
@@ -101,7 +102,6 @@ function A.init(Ctx)
     St.fModeResolved = false
     St.blocking = false
     St.blockHoldUntil = 0
-    St.blockHeldSince = 0
 
     St.holdSkills = {}
     St.holdDetected = false
@@ -113,6 +113,7 @@ function A.init(Ctx)
     St.bossIdleSince = 0
 
     St.emergency = false
+    St.critical = false
 
     St.chestFails = {}
     St.chestCollected = 0
@@ -243,26 +244,44 @@ function A.init(Ctx)
     local function holdBlock()
         if St.blocking then return end
         St.blocking = true
-        St.blockHeldSince = U.clock()
         U.keyDown("F")
     end
 
     local function releaseBlock()
         if not St.blocking then return end
         St.blocking = false
-        St.blockHeldSince = 0
         U.keyUp("F")
     end
 
     --============================================================
-    -- TOOL
+    -- TOOL · Roblox Tool OR custom hotbar mesh
     --============================================================
     local function equippedTool()
         local c = U.Lp.Character
         if not c then return nil end
+
+        -- Roblox Tool
         for _, t in ipairs(c:GetChildren()) do
             if t:IsA("Tool") and not L.isCrow(t.Name) then return t end
         end
+
+        -- Custom mesh attached to hand
+        for _, handName in ipairs({"RightHand", "LeftHand"}) do
+            local hand = c:FindFirstChild(handName)
+            if hand then
+                for _, child in ipairs(hand:GetChildren()) do
+                    if child:IsA("BasePart")
+                       or child:IsA("MeshPart")
+                       or child:IsA("Model") then
+                        if not L.isCrow(child.Name) then
+                            return child
+                        end
+                    end
+                end
+            end
+        end
+
+        return nil
     end
 
     local function inventoryTools()
@@ -295,23 +314,35 @@ function A.init(Ctx)
             return
         end
 
-        local target = nil
+        -- Roblox Tool path first
         for _, t in ipairs(inventoryTools()) do
-            if L.isWeapon(t.Name) then target = t; break end
+            if L.isWeapon(t.Name) then
+                St.swapPending = true
+                task.spawn(function()
+                    pcall(function() h:EquipTool(t) end)
+                    St.eq = t.Name
+                    St.swapPending = false
+                    print("[Dingus] equipped " .. t.Name)
+                end)
+                return
+            end
         end
-        if not target then return end
 
+        -- Custom hotbar: tap weapon slots in order, verify mesh appears
         St.swapPending = true
         task.spawn(function()
-            pcall(function()
-                if current then
-                    pcall(function() h:UnequipTools() end)
-                    task.wait(0.08)
+            for _, k in ipairs(Cfg.WeaponHotbarOrder or {"3"}) do
+                pcall(function() U.tap(k) end)
+                task.wait(0.4)
+                local eq = equippedTool()
+                if eq then
+                    St.eq = eq.Name
+                    St.swapPending = false
+                    print(string.format("[Dingus][Atk] weapon via hotbar '%s': %s",
+                        k, eq.Name))
+                    return
                 end
-                pcall(function() h:EquipTool(target) end)
-                St.eq = target.Name
-                print("[Dingus] equipped " .. target.Name)
-            end)
+            end
             St.swapPending = false
         end)
     end
@@ -570,21 +601,6 @@ function A.init(Ctx)
                 end
             end
         end
-        local rs = game:GetService("ReplicatedStorage")
-        local ps = rs:FindFirstChild("Player_Service")
-        local data = ps and ps:FindFirstChild("Data")
-        local me = data and data:FindFirstChild(U.Lp.Name)
-        local slots = me and me:FindFirstChild("slots")
-        if slots then
-            for _, slot in ipairs(slots:GetChildren()) do
-                local stats = slot:FindFirstChild("Stats")
-                local br = stats and stats:FindFirstChild("Breath")
-                local mx = stats and stats:FindFirstChild("MaxBreath")
-                if br and mx and br.Value and mx.Value and mx.Value > 0 then
-                    return br.Value / mx.Value
-                end
-            end
-        end
         return nil
     end
 
@@ -595,7 +611,7 @@ function A.init(Ctx)
     end
 
     --============================================================
-    -- CHEST COLLECTION
+    -- CHEST COLLECTION · deep walk
     --============================================================
     local function isChestName(nm)
         if not nm then return false end
@@ -606,29 +622,32 @@ function A.init(Ctx)
         return false
     end
 
-    local function isChestModel(inst)
-        if not inst then return false end
-        if not (inst:IsA("Model") or inst:IsA("Part") or inst:IsA("MeshPart")) then
-            return false
-        end
-        return isChestName(inst.Name)
-    end
-
     local function findNearestChest(myPos, range)
         local found, foundDist = nil, range
-        for _, inst in ipairs(workspace:GetChildren()) do
-            if isChestModel(inst) then
-                local p = inst:IsA("BasePart") and inst.Position
-                    or (inst.PrimaryPart and inst.PrimaryPart.Position)
-                    or (inst:FindFirstChild("HumanoidRootPart") and
-                        inst.HumanoidRootPart.Position)
-                if p then
-                    local d = (p - myPos).Magnitude
-                    if d < foundDist then
-                        found = inst
-                        foundDist = d
+        local stack = { { workspace, 0 } }
+        local iter = 0
+        while #stack > 0 do
+            local item = table.remove(stack)
+            local inst, depth = item[1], item[2]
+            if inst and depth <= 5 then
+                if (inst:IsA("Model") or inst:IsA("Part") or inst:IsA("MeshPart"))
+                   and isChestName(inst.Name) then
+                    local p = inst:IsA("BasePart") and inst.Position
+                        or (inst.PrimaryPart and inst.PrimaryPart.Position)
+                        or (inst:FindFirstChild("HumanoidRootPart")
+                            and inst.HumanoidRootPart.Position)
+                    if p then
+                        local d = (p - myPos).Magnitude
+                        if d < foundDist then
+                            found, foundDist = inst, d
+                        end
                     end
                 end
+                for _, child in ipairs(inst:GetChildren()) do
+                    table.insert(stack, { child, depth + 1 })
+                end
+                iter = iter + 1
+                if iter % 3000 == 0 then task.wait() end
             end
         end
         return found, foundDist
@@ -643,9 +662,9 @@ function A.init(Ctx)
         return false
     end
 
-    local function tryCollectChest(now)
+    local function tryCollectChest(now, force)
         if not Cfg.ChestEnabled then return false end
-        if now - St.lChestScan < 1.5 then return false end
+        if not force and now - St.lChestScan < 1.5 then return false end
         St.lChestScan = now
 
         local r = U.hrp()
@@ -667,10 +686,12 @@ function A.init(Ctx)
                 dest = Vector3.new(dest.X, r.Position.Y, dest.Z)
                 local cf = safeCFrame(dest, chestPos)
                 pcall(function() r.CFrame = cf end)
+                task.wait(0.25)
             end
         end
 
         St.chestTarget = chest
+        local prevState = St.cbtS
         St.cbtS = "CHEST"
 
         U.tap("T")
@@ -690,7 +711,7 @@ function A.init(Ctx)
         else
             St.chestFails[chest] = now + Cfg.ChestSkipDuration
             St.chestSkipped = St.chestSkipped + 1
-            print(string.format("[Dingus][Chest] skipped %s",
+            print(string.format("[Dingus][Chest] skipped %s (needs key or locked)",
                 chest and chest.Name or "?"))
             St.chestTarget = nil
             return false
@@ -757,7 +778,7 @@ function A.init(Ctx)
     task.spawn(resolveFMode)
 
     --============================================================
-    -- HOLD PROBE (deferred)
+    -- HOLD PROBE
     --============================================================
     task.spawn(function()
         if not Cfg.DetectHoldSkills then return end
@@ -781,12 +802,14 @@ function A.init(Ctx)
     --============================================================
     local retreatRunning = false
 
-    local function startRetreat(from)
+    local function startRetreat(from, reason)
         if retreatRunning then return end
         retreatRunning = true
         St.rtrC = (St.rtrC or 0) + 1
         St.cbtS = "RETREAT"
         releaseBlock()
+        print(string.format("[Dingus][Atk] retreat (%s)",
+            tostring(reason or "hp")))
 
         task.spawn(function()
             U.tap("Q"); task.wait(0.25)
@@ -800,7 +823,7 @@ function A.init(Ctx)
             h.WalkSpeed = Cfg.RunSpeed
 
             local startT = U.clock()
-            local hardCap = startT + 2.5
+            local hardCap = startT + 3.5
             local lastHp = h.Health
             local lastDamageT = startT
 
@@ -812,7 +835,7 @@ function A.init(Ctx)
                     lastHp = hh.Health
                     lastDamageT = U.clock()
                 end
-                if U.clock() - lastDamageT > 1.2 and U.clock() > startT + 0.6 then break end
+                if U.clock() - lastDamageT > 1.5 and U.clock() > startT + 0.8 then break end
                 if U.clock() > hardCap then break end
                 h:Move(flat.Unit)
                 task.wait(0.05)
@@ -849,7 +872,19 @@ function A.init(Ctx)
         local now = U.clock()
         local hpFrac = h.Health / h.MaxHealth
 
-        St.emergency = hpFrac < Cfg.EmergencyHP
+        -- Critical threshold: retreat even mid-fight
+        St.critical = hpFrac < Cfg.CriticalHP
+        if St.critical and not retreatRunning then
+            local nearest = St.ths and St.ths[1]
+            local from = nearest and nearest.rp.Position
+                or (St.tgt and St.tgt.rp and St.tgt.rp.Position)
+                or r.Position
+            startRetreat(from, "critical")
+            return
+        end
+
+        -- Emergency below 30% but above critical
+        St.emergency = (not St.critical) and hpFrac < Cfg.EmergencyHP
 
         equipWeapon()
         U.groundState()
@@ -873,14 +908,34 @@ function A.init(Ctx)
             U.tap("L")
         end
 
+        -- Retreat at threshold
         if not St.emergency
            and St.rtr and hpFrac < Cfg.RetreatHP
            and not retreatRunning then
             local nearest = St.ths and St.ths[1]
-            if nearest then startRetreat(nearest.rp.Position); return end
+            if nearest then startRetreat(nearest.rp.Position, "hp"); return end
         end
         if retreatRunning then return end
 
+        -- Passive chest tick (no threat within ChestSafeRadius)
+        if Cfg.ChestEnabled
+           and (now - St.lChestPassive) > Cfg.ChestPassiveT then
+            St.lChestPassive = now
+            local threatsNear = false
+            if St.ths then
+                for _, th in ipairs(St.ths) do
+                    if th.d and th.d < Cfg.ChestSafeRadius then
+                        threatsNear = true
+                        break
+                    end
+                end
+            end
+            if not threatsNear then
+                pcall(tryCollectChest, now)
+            end
+        end
+
+        -- Target
         if not St.tgt or not St.tgt.ch.Parent or St.tgt.hm.Health <= 0 then
             if St.tgt then
                 St.kll = (St.kll or 0) + 1
@@ -892,7 +947,7 @@ function A.init(Ctx)
                 St.comboTargetName = nil
                 releaseBlock()
                 if Cfg.ChestEnabled then
-                    pcall(tryCollectChest, now)
+                    pcall(tryCollectChest, now, true)
                 end
                 if D.invalidate then D.invalidate() end
             end
@@ -933,6 +988,7 @@ function A.init(Ctx)
             St.threatPeak = now
         end
 
+        -- Long range → teleport
         if dist > Cfg.AtkRange then
             St.cbtS = "TELEPORT"
             releaseBlock()
@@ -941,6 +997,7 @@ function A.init(Ctx)
             return
         end
 
+        -- In range
         inRangeChase(t, tPos, myPos, now)
 
         local blocking = D.isEnemyBlocking(t)
@@ -963,6 +1020,7 @@ function A.init(Ctx)
         end
         if St.emergency then forceBlock = false end
 
+        -- Dodge on telegraph
         if not St.emergency then
             local canDodge = (now - St.lDodge) > Cfg.DodgeCooldown
             local telegraph = timeSinceThreat < Cfg.TelegraphWindow
@@ -1053,11 +1111,13 @@ function A.init(Ctx)
             instantFires = St.instantFires or 0,
             holdSkills  = St.holdSkills,
             emergency   = St.emergency,
+            critical    = St.critical,
             blocking    = St.blocking,
             breathFrac  = St.breathFrac or 1.0,
             partySize   = St.partySize or 1,
             chestsCollected = St.chestCollected or 0,
             chestsSkipped   = St.chestSkipped or 0,
+            equipped    = St.eq,
         }
     end
 
@@ -1068,10 +1128,14 @@ function A.init(Ctx)
         detectHoldSkills()
     end
 
+    function A.tryCollectChestNow()
+        pcall(tryCollectChest, U.clock(), true)
+    end
+
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function() releaseBlock() end)
 
-    print("[Dingus][attack] v9 initialized · priority-aware")
+    print("[Dingus][attack] v10 initialized · hotbar-aware · critical-retreat")
 end
 
 return A
