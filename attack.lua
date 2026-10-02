@@ -1,11 +1,7 @@
 --[[
-    Dingus-Slayer · attack.lua v13
-    Combo engine retained. Chest scanning completely rewritten.
-    No workspace walks. Cached chest list. Tag + folder aware.
-
-    Crash fixes from v12 audit:
-      C1 · findNearestChest no longer walks workspace
-      H2 · combo tries are capped and GCD-aware, exits early
+    Dingus-Slayer · attack.lua v14
+    ProximityPrompt-driven loot. Boss kill → 8s loot window → next boss.
+    Combo engine, hotbar mutex, telegraph reaction all retained.
 ]]--
 
 local A = {}
@@ -17,8 +13,6 @@ function A.init(Ctx)
     local D = Ctx.Detect
     local L = Ctx.Lists
     local RunService = game:GetService("RunService")
-    local CollectionService = game:GetService("CollectionService")
-    local rs = game:GetService("ReplicatedStorage")
 
     --============================================================
     -- CONFIG
@@ -55,26 +49,26 @@ function A.init(Ctx)
     Cfg.EmergencyHP         = Cfg.EmergencyHP         or 0.30
     Cfg.EmergencyInterval   = Cfg.EmergencyInterval   or 0.15
 
-    -- Chest — new, safe defaults
     Cfg.ChestEnabled        = Cfg.ChestEnabled        ~= false
-    Cfg.ChestRange          = Cfg.ChestRange          or 30
-    Cfg.ChestVerifyDelay    = Cfg.ChestVerifyDelay    or 0.55
-    Cfg.ChestSkipDuration   = Cfg.ChestSkipDuration   or 45
-    Cfg.ChestRescanT        = Cfg.ChestRescanT        or 20     -- only re-scan list every 20s
-    Cfg.ChestPassiveT       = Cfg.ChestPassiveT       or 8      -- passive check every 8s (was 3s)
-    Cfg.ChestSafeRadius     = Cfg.ChestSafeRadius     or 40
-    Cfg.ChestFolderPath     = Cfg.ChestFolderPath     or { "Assets", "Chests" }
-    Cfg.ChestUseTags        = Cfg.ChestUseTags        ~= false
-    Cfg.ChestMaxTracked     = Cfg.ChestMaxTracked     or 40
+    Cfg.LootRadius          = Cfg.LootRadius          or 30
+    Cfg.LootMaxPasses       = Cfg.LootMaxPasses       or 4
+    Cfg.LootPassDeadline    = Cfg.LootPassDeadline    or 8
+    Cfg.LootPromptDepth     = Cfg.LootPromptDepth     or 4
+    Cfg.LootTargetCooldown  = Cfg.LootTargetCooldown  or 45
+    Cfg.LootVerbose         = Cfg.LootVerbose         or false
     Cfg.ChestKeywords       = Cfg.ChestKeywords       or {
-        "chest", "common chest", "demon chest", "ice chest",
-        "lost chest", "ouwigahara chest", "rare chest",
-        "sealed chest", "snow chest", "world events chest",
+        "chest", "cache", "crate",
+    }
+    Cfg.LootKeywords        = Cfg.LootKeywords        or {
+        "coin", "pouch", "metal scrap", "refinement", "silk thread",
+        "ore", "relic", "orb", "scroll", "totem",
+        "drop", "loot", "pick up", "pickup",
     }
 
     Cfg.FKeyMode       = Cfg.FKeyMode       or "auto"
     Cfg.AutoBlock      = Cfg.AutoBlock      ~= false
     Cfg.BlockHoldTTL   = Cfg.BlockHoldTTL   or 0.4
+    Cfg.BlockProbeWait = Cfg.BlockProbeWait or 0.15
 
     Cfg.TeleportCd         = Cfg.TeleportCd         or 0.22
     Cfg.TeleportStrike     = Cfg.TeleportStrike     or 4.5
@@ -101,7 +95,7 @@ function A.init(Ctx)
     St.lAtk = 0; St.lSkl = 0; St.lEqp = 0; St.lBrt = 0
     St.lDodge = 0; St.lTele = 0; St.lInRangeChase = 0
     St.lStateRefresh = 0; St.lChestScan = 0; St.lChestPassive = 0
-    St.lChestRescan = 0
+    St.lLootSweep = 0
 
     St.eq = "none"
     St.cbtS = "IDLE"
@@ -118,17 +112,18 @@ function A.init(Ctx)
     St.holdDetected = false
     St.holdDetecting = false
 
-    St.lastHp = 0; St.lastHpTime = 0
-    St.damageBlockUntil = 0; St.bossIdleSince = 0
-    St.emergency = false; St.critical = false
+    St.lastHp = 0
+    St.damageBlockUntil = 0
+    St.bossIdleSince = 0
+    St.emergency = false
+    St.critical = false
 
-    -- Chest state
-    St.chestList = {}       -- { inst, pos, lastSeen }
-    St.chestFails = {}
+    -- Loot state
     St.chestCollected = 0
-    St.chestSkipped = 0
-    St.chestTarget = nil
-    St.chestFolder = nil
+    St.lootCollected = 0
+    St.lootSkipped = 0
+    St.lootPasses = 0
+    St.lootTargetCooldowns = {}   -- [instance] = expiry
 
     St.teleCount = 0; St.teleFail = 0; St.dodgeCount = 0
     St.gcdHits = 0; St.gcdMisses = 0
@@ -160,9 +155,7 @@ function A.init(Ctx)
     end
 
     local function buildComboOrders()
-        local orders = {}
-        local seen = {}
-        local attempts = 0
+        local orders, seen, attempts = {}, {}, 0
         while #orders < Cfg.ComboOrderCount and attempts < 50 do
             attempts = attempts + 1
             local perm = buildPermutation()
@@ -197,7 +190,9 @@ function A.init(Ctx)
     local function advanceCombo()
         local order = currentOrder()
         if not order or #order == 0 then
-            St.comboOrderIdx = 1; St.comboPos = 1; return
+            St.comboOrderIdx = 1
+            St.comboPos = 1
+            return
         end
         St.comboPos = St.comboPos + 1
         if St.comboPos > #order then
@@ -347,12 +342,6 @@ function A.init(Ctx)
                 if not L.isCrow(child.Name) then return child end
             end
         end
-        local lh = c:FindFirstChild("LeftHand")
-        if lh then
-            for _, child in ipairs(lh:GetChildren()) do
-                if not L.isCrow(child.Name) then return child end
-            end
-        end
         return nil
     end
 
@@ -413,7 +402,6 @@ function A.init(Ctx)
                 local eq = equippedTool()
                 if eq and not L.isCrow(eq.Name) then
                     St.eq = eq.Name
-                    print(string.format("[Dingus][Atk] weapon '%s': %s", k, eq.Name))
                     H.release("attack-weapon")
                     St.swapPending = false
                     return
@@ -459,7 +447,6 @@ function A.init(Ctx)
         return true
     end
 
-    -- Fixed: single GCD check, then one fire attempt. No 6-try loop.
     local function fireCombo(t, hpFrac, now)
         if not St.skl then return end
         if not gcdReady(now) then return end
@@ -474,7 +461,6 @@ function A.init(Ctx)
         if fireSkill(idx, now) then
             advanceCombo()
         else
-            -- Skip locked/gated skill and try next in order (max once)
             advanceCombo()
         end
     end
@@ -504,9 +490,7 @@ function A.init(Ctx)
         local targetPos = tPos.Position
         local approach = targetPos - myPos
         local flatApproach = Vector3.new(approach.X, 0, approach.Z)
-        if flatApproach.Magnitude < 0.1 then
-            flatApproach = Vector3.new(1, 0, 0)
-        end
+        if flatApproach.Magnitude < 0.1 then flatApproach = Vector3.new(1, 0, 0) end
         flatApproach = flatApproach.Unit
         local side = Vector3.new(-flatApproach.Z, 0, flatApproach.X)
         local bias = math.sin(now * 0.3) * 2
@@ -575,7 +559,6 @@ function A.init(Ctx)
         if St.comboTargetName ~= t.ch.Name then
             St.comboTargetName = t.ch.Name
             resetCombo()
-            print(string.format("[Dingus][Atk] combo reset for %s", t.ch.Name))
         end
         St.comboIndex = St.comboIndex + 1
         local chain = Cfg.ComboBurst
@@ -587,7 +570,7 @@ function A.init(Ctx)
         task.spawn(function()
             task.wait(0.35)
             if not (t and t.hm and t.hm.Parent) then return end
-            local hit = t.hm.Health < hpBefore
+            local hit = t.hm.History < hpBefore
             table.insert(St.rHt, hit)
             if #St.rHt > Cfg.HitWindow then table.remove(St.rHt, 1) end
             if hit then St.aHi = (St.aHi or 0) + 1
@@ -627,154 +610,204 @@ function A.init(Ctx)
     end
 
     --============================================================
-    -- CHEST · cached list, no workspace walks
+    -- LOOT · ProximityPrompt-driven
     --============================================================
-    local function isChestName(nm)
-        if not nm then return false end
-        local l = string.lower(nm)
-        for i = 1, #Cfg.ChestKeywords do
-            if string.find(l, Cfg.ChestKeywords[i], 1, true) then return true end
+    local function hasKeyword(str, list)
+        if not str then return false end
+        local l = string.lower(str)
+        for i = 1, #list do
+            if string.find(l, list[i], 1, true) then return true end
         end
         return false
     end
 
-    local function resolveChestFolder()
-        if St.chestFolder and St.chestFolder.Parent then return St.chestFolder end
-        local cur = rs
-        for _, segment in ipairs(Cfg.ChestFolderPath) do
-            cur = cur and cur:FindFirstChild(segment)
-            if not cur then break end
+    local function promptPos(prompt)
+        local parent = prompt.Parent
+        if not parent then return nil end
+        if parent:IsA("BasePart") then return parent.Position end
+        if parent:IsA("Attachment") and parent.Parent
+           and parent.Parent:IsA("BasePart") then
+            return parent.Parent.Position
         end
-        St.chestFolder = cur
-        return cur
+        if parent:IsA("Model") then
+            if parent.PrimaryPart then return parent.PrimaryPart.Position end
+            local any = parent:FindFirstChildWhichIsA("BasePart")
+            if any then return any.Position end
+        end
+        return nil
     end
 
-    local function refreshChestList()
-        local now = U.clock()
-        if now - St.lChestRescan < Cfg.ChestRescanT then return end
-        St.lChestRescan = now
+    local function promptIsCooling(prompt, now)
+        local exp = St.lootTargetCooldowns[prompt]
+        if exp and now < exp then return true end
+        if exp and now >= exp then St.lootTargetCooldowns[prompt] = nil end
+        return false
+    end
 
-        local list = {}
-
-        -- Primary source: the folder (fast direct lookup)
-        local folder = resolveChestFolder()
-        if folder then
-            for _, child in ipairs(folder:GetChildren()) do
-                if (child:IsA("Model") or child:IsA("Part") or child:IsA("MeshPart"))
-                   and isChestName(child.Name) then
-                    local p = child:IsA("BasePart") and child.Position
-                        or (child.PrimaryPart and child.PrimaryPart.Position)
-                    if p then
-                        table.insert(list, { inst = child, pos = p, ts = now })
-                    end
-                end
-            end
-        end
-
-        -- Secondary: CollectionService tags
-        if Cfg.ChestUseTags and #list < Cfg.ChestMaxTracked then
-            local ok = pcall(function()
-                for _, tagged in ipairs(CollectionService:GetTagged("Chest")) do
-                    if isChestName(tagged.Name)
-                       or tagged.Name == "Chest" then
-                        local p = tagged:IsA("BasePart") and tagged.Position
-                            or (tagged.PrimaryPart and tagged.PrimaryPart.Position)
-                        if p then
-                            table.insert(list, { inst = tagged, pos = p, ts = now })
-                            if #list >= Cfg.ChestMaxTracked then break end
+    local function scanPrompts(maxDist)
+        local r = U.hrp()
+        if not r then return {} end
+        local myPos = r.Position
+        local out = {}
+        local stack = { { workspace, 0 } }
+        local iter = 0
+        while #stack > 0 do
+            local item = table.remove(stack)
+            local inst, depth = item[1], item[2]
+            if inst and depth <= (Cfg.LootPromptDepth or 4) then
+                if inst:IsA("ProximityPrompt") then
+                    local pos = promptPos(inst)
+                    if pos then
+                        local d = (pos - myPos).Magnitude
+                        if d <= maxDist then
+                            local name = (inst.ObjectText or "")
+                                .. " " .. (inst.ActionText or "")
+                            local kind = nil
+                            if hasKeyword(name, Cfg.ChestKeywords) then
+                                kind = "chest"
+                            elseif hasKeyword(name, Cfg.LootKeywords) then
+                                kind = "loot"
+                            end
+                            if kind then
+                                table.insert(out, {
+                                    prompt = inst,
+                                    parent = inst.Parent,
+                                    dist = d,
+                                    kind = kind,
+                                    name = name,
+                                    pos = pos,
+                                })
+                            end
                         end
                     end
                 end
-                for _, tagged in ipairs(CollectionService:GetTagged("chest")) do
-                    if #list >= Cfg.ChestMaxTracked then break end
-                    local p = tagged:IsA("BasePart") and tagged.Position
-                        or (tagged.PrimaryPart and tagged.PrimaryPart.Position)
-                    if p then
-                        table.insert(list, { inst = tagged, pos = p, ts = now })
-                    end
+                for _, c in ipairs(inst:GetChildren()) do
+                    table.insert(stack, { c, depth + 1 })
                 end
-            end)
-        end
-
-        St.chestList = list
-        if #list > 0 and Cfg.ChestVerbose then
-            print(string.format("[Dingus][Chest] cached %d chests", #list))
-        end
-    end
-
-    local function nearestCachedChest(myPos, range)
-        local best, bestD = nil, range
-        for i = #St.chestList, 1, -1 do
-            local c = St.chestList[i]
-            if c.inst and c.inst.Parent then
-                local d = (c.pos - myPos).Magnitude
-                if d < bestD then
-                    best = c.inst
-                    bestD = d
-                end
-            else
-                table.remove(St.chestList, i)
+                iter = iter + 1
+                if iter % 3000 == 0 then task.wait() end
             end
         end
-        return best, bestD
+        table.sort(out, function(a, b) return a.dist < b.dist end)
+        return out
     end
 
-    local function chestIsSkipped(chest, now)
-        local expiry = St.chestFails[chest]
-        if expiry and now < expiry then return true end
-        if expiry and now >= expiry then St.chestFails[chest] = nil end
+    local function firePrompt(prompt)
+        if type(fireproximityprompt) == "function" then
+            local ok = pcall(fireproximityprompt, prompt)
+            if ok then return true end
+        end
+        -- Hold duration fallback
+        local ok = pcall(function()
+            if prompt.InputHoldBegin then prompt:InputHoldBegin() end
+            task.wait(prompt.HoldDuration or 0.1)
+            if prompt.InputHoldEnd then prompt:InputHoldEnd() end
+        end)
+        if ok then return true end
+        -- Move + tap T
+        local r = U.hrp()
+        local pos = promptPos(prompt)
+        if r and pos then
+            pcall(function()
+                local flat = Vector3.new(pos.X - r.Position.X, 0, pos.Z - r.Position.Z)
+                if flat.Magnitude > 0.5 then
+                    local dest = r.Position + flat.Unit * math.max(0, flat.Magnitude - 3)
+                    r.CFrame = CFrame.new(Vector3.new(dest.X, r.Position.Y, dest.Z),
+                                          Vector3.new(pos.X, r.Position.Y, pos.Z))
+                end
+            end)
+            task.wait(0.1)
+            U.tap("T")
+            return true
+        end
         return false
     end
 
-    local function tryCollectChest(now, force)
-        if not Cfg.ChestEnabled then return false end
-        if not force and now - St.lChestScan < 2.0 then return false end
-        St.lChestScan = now
-
-        refreshChestList()
-
+    local function moveToPos(pos)
         local r = U.hrp()
-        if not r then return false end
+        if not r or not pos then return end
+        local approach = pos - r.Position
+        local flat = Vector3.new(approach.X, 0, approach.Z)
+        if flat.Magnitude < 0.5 then return end
+        local dest = r.Position + flat.Unit * math.max(0, flat.Magnitude - 4)
+        dest = Vector3.new(dest.X, r.Position.Y, dest.Z)
+        local cf = safeCFrame(dest, pos)
+        pcall(function() r.CFrame = cf end)
+        task.wait(0.12)
+    end
 
-        local chest, dist = nearestCachedChest(r.Position, Cfg.ChestRange)
-        if not chest then return false end
-        if chestIsSkipped(chest, now) then return false end
+    -- Single sweep: find all chest+loot prompts within radius, fire them
+    local function lootSweep(radius)
+        local now = U.clock()
+        local prompts = scanPrompts(radius)
+        if #prompts == 0 then return 0 end
 
-        local chestPos = chest:IsA("BasePart") and chest.Position
-            or (chest.PrimaryPart and chest.PrimaryPart.Position)
-            or r.Position
-        if dist > 8 then
-            local approach = chestPos - r.Position
-            local flat = Vector3.new(approach.X, 0, approach.Z)
-            if flat.Magnitude > 0.1 then
-                local dest = r.Position + flat.Unit * math.max(0, dist - 5)
-                dest = Vector3.new(dest.X, r.Position.Y, dest.Z)
-                local cf = safeCFrame(dest, chestPos)
-                pcall(function() r.CFrame = cf end)
-                task.wait(0.25)
+        local fired = 0
+        for i = 1, #prompts do
+            local p = prompts[i]
+            if p.prompt and p.prompt.Parent
+               and not promptIsCooling(p.prompt, now) then
+                moveToPos(p.pos)
+                local ok = firePrompt(p.prompt)
+                if ok then
+                    fired = fired + 1
+                    if p.kind == "chest" then
+                        St.chestCollected = (St.chestCollected or 0) + 1
+                        print(string.format("[Dingus][Loot] chest opened: %s",
+                            (p.name or ""):gsub("^%s+", "")))
+                    else
+                        St.lootCollected = (St.lootCollected or 0) + 1
+                    end
+                else
+                    St.lootSkipped = (St.lootSkipped or 0) + 1
+                    St.lootTargetCooldowns[p.prompt] = now + (Cfg.LootTargetCooldown or 45)
+                end
+                task.wait(0.06)
             end
         end
+        return fired
+    end
 
-        St.chestTarget = chest
-        St.cbtS = "CHEST"
-        U.tap("T")
-        task.wait(Cfg.ChestVerifyDelay)
+    -- Full loot cycle after a kill. Deadline-capped.
+    local function lootBossDrop()
+        if not Cfg.ChestEnabled then return end
+        local startT = U.clock()
+        local deadline = startT + (Cfg.LootPassDeadline or 8)
+        local totalFired = 0
+        local emptyPasses = 0
+        local pass = 0
+        local maxPasses = Cfg.LootMaxPasses or 4
 
-        local stillThere = false
-        pcall(function() stillThere = chest and chest.Parent ~= nil end)
-
-        if not stillThere then
-            St.chestCollected = St.chestCollected + 1
-            print(string.format("[Dingus][Chest] collected %s · total %d",
-                chest and chest.Name or "?", St.chestCollected))
-        else
-            St.chestFails[chest] = now + Cfg.ChestSkipDuration
-            St.chestSkipped = St.chestSkipped + 1
-            print(string.format("[Dingus][Chest] skipped %s",
-                chest and chest.Name or "?"))
+        while U.clock() < deadline and pass < maxPasses and emptyPasses < 2 do
+            pass = pass + 1
+            St.lootPasses = (St.lootPasses or 0) + 1
+            local fired = lootSweep(Cfg.LootRadius or 30)
+            totalFired = totalFired + fired
+            if fired == 0 then
+                emptyPasses = emptyPasses + 1
+            else
+                emptyPasses = 0
+            end
+            task.wait(0.3)
         end
-        St.chestTarget = nil
-        return not stillThere
+
+        if totalFired > 0 then
+            print(string.format("[Dingus][Loot] cycle done · fired=%d passes=%d",
+                totalFired, pass))
+        else
+            if Cfg.LootVerbose then
+                print("[Dingus][Loot] no loot found within radius")
+            end
+        end
+    end
+
+    local function lootPassive()
+        if not Cfg.ChestEnabled then return end
+        if St.tgt then return end
+        local fired = lootSweep(Cfg.LootRadius or 30)
+        if fired > 0 and Cfg.LootVerbose then
+            print(string.format("[Dingus][Loot] passive · %d", fired))
+        end
     end
 
     --============================================================
@@ -911,7 +944,7 @@ function A.init(Ctx)
             releaseBlock()
             if Cfg.ChestEnabled and (U.clock() - St.lChestPassive > 15) then
                 St.lChestPassive = U.clock()
-                pcall(tryCollectChest, U.clock())
+                pcall(lootPassive)
             end
             return
         end
@@ -961,21 +994,14 @@ function A.init(Ctx)
         end
         if retreatRunning then return end
 
-        -- Passive chest — only if no threat within safe radius
-        if Cfg.ChestEnabled
-           and (now - St.lChestPassive) > Cfg.ChestPassiveT then
+        -- Passive loot — only when no target engaged
+        if Cfg.ChestEnabled and not St.tgt
+           and (now - St.lChestPassive) > 15 then
             St.lChestPassive = now
-            local threatsNear = false
-            if St.ths then
-                for _, th in ipairs(St.ths) do
-                    if th.d and th.d < Cfg.ChestSafeRadius then
-                        threatsNear = true; break
-                    end
-                end
-            end
-            if not threatsNear then pcall(tryCollectChest, now) end
+            pcall(lootPassive)
         end
 
+        -- Target management
         if not St.tgt or not St.tgt.ch.Parent or St.tgt.hm.Health <= 0 then
             if St.tgt then
                 St.kll = (St.kll or 0) + 1
@@ -986,9 +1012,14 @@ function A.init(Ctx)
                 St.comboTargetName = nil
                 resetCombo()
                 releaseBlock()
-                if Cfg.ChestEnabled then pcall(tryCollectChest, now, true) end
                 if D.invalidate then D.invalidate() end
+
+                -- Full loot cycle before next target
+                if Cfg.ChestEnabled then
+                    pcall(lootBossDrop)
+                end
             end
+
             acquireTarget()
             if not St.tgt then St.cbtS = "IDLE"; releaseBlock(); return end
         end
@@ -1161,8 +1192,9 @@ function A.init(Ctx)
             breathFrac = St.breathFrac or 1.0,
             partySize = St.partySize or 1,
             chestsCollected = St.chestCollected or 0,
-            chestsSkipped = St.chestSkipped or 0,
-            chestsCached = #St.chestList,
+            lootCollected = St.lootCollected or 0,
+            lootSkipped = St.lootSkipped or 0,
+            lootPasses = St.lootPasses or 0,
             equipped = St.eq,
             hotbarHolder = holder,
         }
@@ -1175,19 +1207,25 @@ function A.init(Ctx)
         detectHoldSkills()
     end
 
-    function A.tryCollectChestNow()
-        pcall(tryCollectChest, U.clock(), true)
+    function A.lootNow()
+        pcall(lootBossDrop)
     end
 
-    function A.refreshChests()
-        St.lChestRescan = 0
-        refreshChestList()
+    function A.scanPromptsNow()
+        local list = scanPrompts(Cfg.LootRadius or 30)
+        print(string.format("[Dingus][Loot] %d prompts within radius:", #list))
+        for i = 1, math.min(#list, 10) do
+            local p = list[i]
+            print(string.format("  [%s] %s @ %.0f",
+                p.kind, (p.name or ""):gsub("^%s+", ""), p.dist))
+        end
+        return list
     end
 
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function() releaseBlock() end)
 
-    print("[Dingus][attack] v13 initialized · cached chests · combo engine")
+    print("[Dingus][attack] v14 initialized · ProximityPrompt loot")
 end
 
 return A
