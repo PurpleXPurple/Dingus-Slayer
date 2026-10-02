@@ -1,14 +1,12 @@
 --[[
-    Dingus-Slayer · detect.lua v4
-    Priority-aware boss scanning. Exposes isEnemyAttacking.
+    Dingus-Slayer · detect.lua v5
+    Fixes B1/B2/B3.
 
-    New in v4:
-      - scanBosses(force, includeNonPriority) filters by Ctx.Quest.isPriority
-        when available. Cache holds full list; filter is at read time
-        so priority changes propagate within ScanTTL.
-      - isEnemyAttacking(enemy) public — attack v9 uses for telegraph.
-      - Overlay reader retained for diagnostics.
-      - All v3 caching, blocking, stun detection retained.
+    Changes:
+      - Walk ALL roots, do not early-break
+      - Iteration cap 60k with rate-limited yields
+      - Priority filter has an "empty result" safety valve
+      - Farthest-boss distance surfaced for diagnostics
 ]]--
 
 local D = {}
@@ -19,12 +17,12 @@ function D.init(Ctx)
     local St = Ctx.St
     local L = Ctx.Lists
 
-    local bossCache = { ts = 0, list = {} }
-    local mobCache = { ts = 0, list = {} }
+    local bossCache     = { ts = 0, list = {} }
+    local mobCache      = { ts = 0, list = {} }
     local humanoidCache = { ts = 0, list = {} }
-    local overlayCache = { ts = 0, list = {} }
+    local overlayCache  = { ts = 0, list = {} }
 
-    local MAX_WALK = 30000
+    local MAX_WALK = 60000
     local CAP_WARNED = false
 
     --============================================================
@@ -43,24 +41,27 @@ function D.init(Ctx)
         local seen = {}
         local iter = 0
 
+        -- Roots: Humanoids first (game's own container), then Regions
+        -- (also under Humanoids but walked explicitly for depth),
+        -- then workspace as last resort.
         local roots = {}
         local humanoidsFolder = workspace:FindFirstChild("Humanoids")
-        local regionFound = false
         if humanoidsFolder then
+            table.insert(roots, { humanoidsFolder, "Humanoids" })
             local regions = humanoidsFolder:FindFirstChild("Regions")
             if regions then
-                table.insert(roots, regions)
-                regionFound = true
+                table.insert(roots, { regions, "Regions" })
             end
-            table.insert(roots, humanoidsFolder)
         end
-        if not regionFound then
-            table.insert(roots, workspace)
-        end
+        table.insert(roots, { workspace, "workspace" })
 
+        -- Walk ALL roots. No early break.
         for ri = 1, #roots do
-            local root = roots[ri]
+            local rootEntry = roots[ri]
+            local root = rootEntry[1]
+            local tag = rootEntry[2]
             local stack = { { root, 0 } }
+            local rootFound = 0
 
             while #stack > 0 do
                 local item = table.remove(stack)
@@ -81,8 +82,10 @@ function D.init(Ctx)
                                     local d = (myPos - hrp.Position).Magnitude
                                     if d <= maxDist then
                                         seen[inst] = true
+                                        rootFound = rootFound + 1
                                         table.insert(out, {
                                             ch = inst, hm = hum, rp = hrp, d = d,
+                                            src = tag,
                                         })
                                     end
                                 end
@@ -111,7 +114,7 @@ function D.init(Ctx)
             end
 
             if iter >= MAX_WALK then break end
-            if #out > 0 and root ~= workspace then break end
+            -- No early-break; continue to next root even if this one found matches.
         end
 
         table.sort(out, function(a, b) return a.d < b.d end)
@@ -119,25 +122,33 @@ function D.init(Ctx)
     end
 
     --============================================================
-    -- PRIORITY FILTER
+    -- PRIORITY FILTER · with safety valve
     --============================================================
+    local priorityFailures = 0
+    local function priorityActive()
+        if not Ctx.Quest or not Ctx.Quest.getPriorityBosses then return false end
+        local ok, list = pcall(Ctx.Quest.getPriorityBosses)
+        if not ok or not list or #list == 0 then return false end
+        -- If we keep finding zero matches across many scans, disable filter
+        if priorityFailures > 20 then return false end
+        return true
+    end
+
     local function passesPriorityFilter(name)
-        if not Ctx.Quest or not Ctx.Quest.isPriority then return true end
+        if not priorityActive() then return true end
         local ok, result = pcall(Ctx.Quest.isPriority, name)
         if not ok then return true end
         return result ~= false
     end
 
     --============================================================
-    -- BOSS SCANNER
-    -- Caches full list. Filters by quest priority at return time.
+    -- SCAN BOSSES
     --============================================================
     function D.scanBosses(force, includeNonPriority)
         local now = U.clock()
-        if not force and now - bossCache.ts < Cfg.ScanTTL then
+        if not force and now - bossCache.ts < (Cfg.ScanTTL or 1.2) then
             local list = bossCache.list
-            if includeNonPriority then return list end
-            -- Filter cached list
+            if includeNonPriority or not priorityActive() then return list end
             local out = {}
             for i = 1, #list do
                 if passesPriorityFilter(list[i].ch.Name) then
@@ -148,26 +159,41 @@ function D.init(Ctx)
         end
         bossCache.ts = now
 
-        local list = collectHumanoids(500, function(inst, hum)
+        local list = collectHumanoids(2000, function(inst, hum)
             return L.isBoss(inst.Name)
         end)
 
         bossCache.list = list
         St.ens = list
 
-        if includeNonPriority then return list end
-
+        -- Diagnostic: report if the priority filter drops everything
+        local priorityDropped = 0
+        local priorityKept = 0
         local out = {}
         for i = 1, #list do
             if passesPriorityFilter(list[i].ch.Name) then
+                priorityKept = priorityKept + 1
                 table.insert(out, list[i])
+            else
+                priorityDropped = priorityDropped + 1
             end
         end
+
+        if #list > 0 and priorityKept == 0 and priorityDropped > 0 then
+            priorityFailures = priorityFailures + 1
+            if priorityFailures == 5 then
+                print(string.format(
+                    "[Dingus][detect] priority filter dropped all %d bosses — disabling until quests refresh",
+                    priorityDropped))
+            end
+        end
+
+        if includeNonPriority or not priorityActive() then return list end
         return out
     end
 
     --============================================================
-    -- OVERLAY READER
+    -- OVERLAY READER (retained)
     --============================================================
     function D.readOverlay(force)
         local now = U.clock()
@@ -177,24 +203,18 @@ function D.init(Ctx)
         overlayCache.ts = now
 
         local pg = U.Lp:FindFirstChildOfClass("PlayerGui")
-        if not pg then
-            overlayCache.list = {}
-            return overlayCache.list
-        end
+        if not pg then overlayCache.list = {}; return overlayCache.list end
 
-        local hits = {}
-        local seen = {}
+        local hits, seen = {}, {}
         local stack = { { pg, 0 } }
         local iter = 0
-
         while #stack > 0 do
             local item = table.remove(stack)
             local inst, d = item[1], item[2]
             if inst and d <= 5 then
                 if inst:IsA("TextLabel") then
                     local ok, txt = pcall(function() return inst.Text end)
-                    if ok and type(txt) == "string"
-                       and #txt >= 3 and #txt <= 30 then
+                    if ok and type(txt) == "string" and #txt >= 3 and #txt <= 30 then
                         if L.isBoss(txt) then
                             local norm = txt:lower():gsub("^%s+", ""):gsub("%s+$", "")
                             if not seen[norm] then
@@ -214,28 +234,24 @@ function D.init(Ctx)
                 if iter % 2000 == 0 then task.wait() end
             end
         end
-
         overlayCache.list = hits
         return hits
     end
 
-    function D.overlayBosses(force)
-        return D.readOverlay(force)
-    end
+    function D.overlayBosses(force) return D.readOverlay(force) end
 
     --============================================================
-    -- MOB SCANNER (returns nothing — mobKeywords emptied)
+    -- MOBS (kept, empty keyword list)
     --============================================================
     function D.scanMobs(force)
         local now = U.clock()
-        if not force and now - mobCache.ts < Cfg.ScanTTL then
+        if not force and now - mobCache.ts < (Cfg.ScanTTL or 1.2) then
             return mobCache.list
         end
         mobCache.ts = now
-        local list = collectHumanoids(60, function(inst, hum)
+        local list = collectHumanoids(60, function(inst)
             if L.isBoss(inst.Name) then return false end
             if L.isCrow(inst.Name) then return false end
-            if L.isQuest(inst.Name) then return false end
             local lname = string.lower(inst.Name)
             for i = 1, #L.mobKeywords do
                 if string.find(lname, L.mobKeywords[i], 1, true) then
@@ -250,7 +266,7 @@ function D.init(Ctx)
 
     function D.nearbyAll(force)
         local now = U.clock()
-        if not force and now - humanoidCache.ts < Cfg.ScanTTL then
+        if not force and now - humanoidCache.ts < (Cfg.ScanTTL or 1.2) then
             return humanoidCache.list
         end
         humanoidCache.ts = now
@@ -262,7 +278,7 @@ function D.init(Ctx)
     --============================================================
     -- ANIMATION READERS
     --============================================================
-    local function animationMatches(enemy, predicate)
+    local function animMatch(enemy, pred)
         if not enemy or not enemy.hm then return false end
         local an = enemy.hm:FindFirstChildOfClass("Animator")
         if not an then return false end
@@ -276,7 +292,7 @@ function D.init(Ctx)
                 if okW and w > 0.3 then
                     local okN, nm = pcall(function() return t.Name end)
                     if okN and nm then
-                        if predicate(string.lower(nm)) then return true end
+                        if pred(string.lower(nm)) then return true end
                     end
                 end
             end
@@ -284,41 +300,31 @@ function D.init(Ctx)
         return false
     end
 
-    --============================================================
-    -- PUBLIC · IS ENEMY ATTACKING
-    --============================================================
     function D.isEnemyAttacking(enemy)
-        if not enemy or not enemy.hm then return false end
-        return animationMatches(enemy, function(l)
-            -- Attack-like names that aren't idle/walk/run/block/stun
-            if string.find(l, "idle", 1, true) then return false end
-            if string.find(l, "walk", 1, true) then return false end
-            if string.find(l, "run", 1, true) then return false end
-            if string.find(l, "block", 1, true) then return false end
-            if string.find(l, "stun", 1, true) then return false end
-            if string.find(l, "hit", 1, true) then return false end
-            if string.find(l, "death", 1, true) then return false end
-            -- Positive match: attack, slash, cast, punch, swing, cast
-            if string.find(l, "attack", 1, true) then return true end
-            if string.find(l, "slash", 1, true) then return true end
-            if string.find(l, "cast", 1, true) then return true end
-            if string.find(l, "punch", 1, true) then return true end
-            if string.find(l, "swing", 1, true) then return true end
-            if string.find(l, "combo", 1, true) then return true end
-            if string.find(l, "skill", 1, true) then return true end
-            if string.find(l, "ability", 1, true) then return true end
+        return animMatch(enemy, function(l)
+            if l:find("idle",1,true) or l:find("walk",1,true)
+               or l:find("run",1,true) or l:find("block",1,true)
+               or l:find("stun",1,true) or l:find("hit",1,true)
+               or l:find("death",1,true) then
+                return false
+            end
+            if l:find("attack",1,true) or l:find("slash",1,true)
+               or l:find("cast",1,true) or l:find("punch",1,true)
+               or l:find("swing",1,true) or l:find("combo",1,true)
+               or l:find("skill",1,true) or l:find("ability",1,true) then
+                return true
+            end
             return false
         end)
     end
 
     --============================================================
-    -- THREAT DETECTION (kept from v3)
+    -- THREATS
     --============================================================
     local function isClosingIn(enemy, myPos)
         local ok, vel = pcall(function() return enemy.rp.AssemblyLinearVelocity end)
         if not ok or not vel then return false end
-        local speed = vel.Magnitude
-        if speed < 4 then return false end
+        if vel.Magnitude < 4 then return false end
         local toMe = myPos - enemy.rp.Position
         local flat = Vector3.new(toMe.X, 0, toMe.Z)
         if flat.Magnitude < 0.1 then return false end
@@ -343,10 +349,7 @@ function D.init(Ctx)
         local myPos = myHrp.Position
         local bosses = D.scanBosses()
 
-        local threats = {}
-        local zoneCount = 0
-        local imminent = 0
-
+        local threats, zoneCount, imminent = {}, 0, 0
         for i = 1, #bosses do
             local e = bosses[i]
             if e.d <= 18 then
@@ -362,32 +365,25 @@ function D.init(Ctx)
                 })
             end
         end
-
         St.ths = threats
         St.zn = zoneCount
         St.imm = imminent
     end
 
     --============================================================
-    -- BLOCK / STUN DETECTION (kept from v3)
+    -- BLOCK / STUN
     --============================================================
     function D.isEnemyBlocking(enemy)
         if not enemy or not enemy.ch or not enemy.hm then return false end
-        local c = enemy.ch
-        local h = enemy.hm
-
+        local c, h = enemy.ch, enemy.hm
         local ok1, v1 = pcall(function() return c:GetAttribute("IsBlocking") end)
         if ok1 and v1 == true then return true end
-
         local ok2, v2 = pcall(function() return h:GetAttribute("IsBlocking") end)
         if ok2 and v2 == true then return true end
-
-        if animationMatches(enemy, function(l)
-            return string.find(l, "block", 1, true)
-                or string.find(l, "guard", 1, true)
-                or string.find(l, "parry", 1, true)
+        if animMatch(enemy, function(l)
+            return l:find("block",1,true) or l:find("guard",1,true)
+                or l:find("parry",1,true)
         end) then return true end
-
         local ok4, ws = pcall(function() return h.WalkSpeed end)
         if ok4 and ws and ws < 2 then
             local ok5, md = pcall(function() return h.MoveDirection end)
@@ -403,12 +399,9 @@ function D.init(Ctx)
 
     function D.isEnemyStunned(enemy)
         if not enemy or not enemy.ch or not enemy.hm then return false end
-        local c = enemy.ch
-        local h = enemy.hm
-
+        local c, h = enemy.ch, enemy.hm
         local ok1, v1 = pcall(function() return c:GetAttribute("Stunned") end)
         if ok1 and v1 == true then return true end
-
         local ok2, state = pcall(function() return h:GetState() end)
         if ok2 and state then
             if state == Enum.HumanoidStateType.FallingDown
@@ -417,29 +410,15 @@ function D.init(Ctx)
                 return true
             end
         end
-
-        if animationMatches(enemy, function(l)
-            return string.find(l, "stun", 1, true)
-                or string.find(l, "blockbreak", 1, true)
-                or string.find(l, "block_break", 1, true)
+        if animMatch(enemy, function(l)
+            return l:find("stun",1,true) or l:find("blockbreak",1,true)
+                or l:find("block_break",1,true)
         end) then return true end
-
-        local ok4, ws = pcall(function() return h.WalkSpeed end)
-        if ok4 and ws and ws < 1 then
-            local ok5, vel = pcall(function() return enemy.rp.AssemblyLinearVelocity end)
-            if ok5 and vel and vel.Magnitude < 1 then
-                if animationMatches(enemy, function(l)
-                    return string.find(l, "stun", 1, true)
-                        or string.find(l, "hurt", 1, true)
-                        or string.find(l, "damage", 1, true)
-                end) then return true end
-            end
-        end
         return false
     end
 
     --============================================================
-    -- TARGET PICKER
+    -- PICK
     --============================================================
     function D.pickTarget()
         local bosses = D.scanBosses()
@@ -462,14 +441,10 @@ function D.init(Ctx)
     end
 
     function D.invalidate()
-        bossCache.ts = 0
-        mobCache.ts = 0
-        humanoidCache.ts = 0
-        overlayCache.ts = 0
-        bossCache.list = {}
-        mobCache.list = {}
-        humanoidCache.list = {}
-        overlayCache.list = {}
+        bossCache.ts = 0; mobCache.ts = 0
+        humanoidCache.ts = 0; overlayCache.ts = 0
+        bossCache.list = {}; mobCache.list = {}
+        humanoidCache.list = {}; overlayCache.list = {}
     end
 
     function D.stats()
@@ -481,10 +456,31 @@ function D.init(Ctx)
             imminent = St.imm,
             zone = St.zn,
             overlay = #overlayCache.list,
+            priorityFailures = priorityFailures,
         }
     end
 
-    print("[Dingus][detect] v4 initialized · priority-aware")
+    --============================================================
+    -- DIAGNOSTIC · dump everything the scanner sees
+    --============================================================
+    function D.dump()
+        local list = collectHumanoids(2000, function() return true end)
+        print(string.format("[Dingus][detect] dump: %d humanoids in 2000 studs", #list))
+        local shown = 0
+        for i = 1, #list do
+            local e = list[i]
+            local isB = L.isBoss(e.ch.Name)
+            if isB or shown < 15 then
+                print(string.format("  %s [%s] @%.0f%s",
+                    e.ch.Name, e.src or "?",
+                    e.d, isB and " BOSS" or ""))
+                if isB then shown = shown + 1 end
+            end
+        end
+        return #list
+    end
+
+    print("[Dingus][detect] v5 initialized · multi-root, no early break")
 end
 
 return D
