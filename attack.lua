@@ -9,7 +9,7 @@ function A.init(Ctx)
     local RunService = game:GetService("RunService")
 
     St.rHt = {}
-    St.skCd = { 0, 0, 0, 0, 0 }
+    St.skCd = { 0, 0, 0, 0, 0, 0 }        -- v3: 6 entries
     St.aiI = Cfg.AtkInterval
     St.lAtk = 0
     St.lSkl = 0
@@ -28,15 +28,24 @@ function A.init(Ctx)
     St.swapPending = false
     St.flyFailLogged = false
 
-    local SK_KEYS = { "Z", "X", "C", "V", "B" }
-    local SK_CDS  = { 1.2, 2.0, 2.8, 3.6, 6.0 }
-    local ROTATION = { 2, 1, 3, 4, 5 }
+    -- v3 F-key state
+    St.fIsBlock       = false
+    St.fModeResolved  = false
+    St.blocking       = false
+    St.blockHoldUntil = 0
+
+    local SK_KEYS  = Cfg.SkillKeys or { "F", "Z", "X", "C", "V", "B" }
+    local SK_CDS   = Cfg.SkillCooldowns or { 0.5, 1.2, 2.0, 2.8, 3.6, 6.0 }
+    local ROTATION = Cfg.RotationOrder or { 2, 3, 4, 5, 6 }
 
     local COMBO_AIR       = { "m1", "m2", "m1", "m2", "m1" }
     local COMBO_SPECIAL_A = { "m2", "m2", "m1", "m2", "m1" }
     local COMBO_SPECIAL_B = { "m1", "m1", "m2", "m1", "m2" }
     local COMBO_RESET_TIME = 1.2
 
+    --============================================================
+    -- MOVER SCRUB
+    --============================================================
     local function scrubMovers()
         local r = U.hrp()
         if not r then return 0 end
@@ -44,7 +53,8 @@ function A.init(Ctx)
         for _, c in ipairs(r:GetChildren()) do
             if c:IsA("BodyPosition") or c:IsA("BodyVelocity")
                 or c:IsA("BodyGyro") or c:IsA("BodyForce")
-                or c:IsA("LinearVelocity") or c:IsA("AlignOrientation") then
+                or c:IsA("LinearVelocity") or c:IsA("AlignOrientation")
+                or c:IsA("AlignPosition") then
                 c:Destroy()
                 n = n + 1
             end
@@ -60,8 +70,108 @@ function A.init(Ctx)
     U.Lp.CharacterAdded:Connect(function()
         task.wait(1)
         scrubMovers()
+        St.blocking = false
+        St.blockHoldUntil = 0
+        St.fModeResolved = false
     end)
 
+    --============================================================
+    -- F-KEY PROBE
+    -- Runs once at boot (deferred). Decides whether F is block or
+    -- skill. Detection signals, in priority order:
+    --   1. Character/Humanoid attribute "IsBlocking" set during tap
+    --   2. Animation track named block/guard/parry during tap
+    --   3. Block bar value drop (SHCS.Blocking or similar)
+    --   4. WalkSpeed clamped during tap
+    -- If none fire, defaults to "skill".
+    --============================================================
+    local function readBlockAttribute()
+        local c = U.Lp.Character
+        if not c then return false end
+        local h = U.hum()
+        local ok1, v1 = pcall(function() return c:GetAttribute("IsBlocking") end)
+        if ok1 and v1 == true then return true end
+        if h then
+            local ok2, v2 = pcall(function() return h:GetAttribute("IsBlocking") end)
+            if ok2 and v2 == true then return true end
+        end
+        return false
+    end
+
+    local function readBlockAnim()
+        local h = U.hum()
+        if not h then return false end
+        local an = h:FindFirstChildOfClass("Animator")
+        if not an then return false end
+        local ok, tracks = pcall(function() return an:GetPlayingAnimationTracks() end)
+        if not ok or not tracks then return false end
+        for i = 1, #tracks do
+            local t = tracks[i]
+            local okP, isPlaying = pcall(function() return t.IsPlaying end)
+            if okP and isPlaying then
+                local okW, w = pcall(function() return t.WeightCurrent end)
+                if okW and w > 0.3 then
+                    local okN, nm = pcall(function() return t.Name end)
+                    if okN and nm then
+                        local l = string.lower(nm)
+                        if string.find(l, "block", 1, true)
+                            or string.find(l, "guard", 1, true)
+                            or string.find(l, "parry", 1, true) then
+                            return true
+                        end
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    local function probeFKey()
+        local h = U.hum()
+        if not h or h.Health <= 0 then return nil end
+        if St.cbt then return nil end  -- defer if combat active
+
+        -- Baseline WalkSpeed for signal 4
+        local baseWS = h.WalkSpeed
+
+        U.keyDown("F")
+        local waitT = Cfg.BlockProbeWait or 0.15
+        task.wait(waitT)
+
+        local isBlock = false
+        if readBlockAttribute() then isBlock = true end
+        if not isBlock and readBlockAnim() then isBlock = true end
+        if not isBlock then
+            local h2 = U.hum()
+            if h2 and h2.WalkSpeed < baseWS - 4 then
+                isBlock = true
+            end
+        end
+
+        U.keyUp("F")
+        task.wait(0.05)
+
+        return isBlock and "block" or "skill"
+    end
+
+    --============================================================
+    -- BLOCK HOLD / RELEASE
+    --============================================================
+    local function holdBlock()
+        if St.blocking then return end
+        St.blocking = true
+        U.keyDown("F")
+    end
+
+    local function releaseBlock()
+        if not St.blocking then return end
+        St.blocking = false
+        U.keyUp("F")
+    end
+
+    --============================================================
+    -- WEAPON EQUIP
+    --============================================================
     local function equippedTool()
         local c = U.Lp.Character
         if not c then return nil end
@@ -121,6 +231,9 @@ function A.init(Ctx)
         end)
     end
 
+    --============================================================
+    -- SKILLS
+    --============================================================
     local function fireSkill(idx)
         local now = U.clock()
         if now < St.skCd[idx] then return false end
@@ -132,16 +245,26 @@ function A.init(Ctx)
 
     local function fireRotation()
         for _, i in ipairs(ROTATION) do
-            if fireSkill(i) then return true end
+            -- Skip F if we've determined it's block.
+            if not (St.fIsBlock and SK_KEYS[i] == "F") then
+                if fireSkill(i) then return true end
+            end
         end
     end
 
+    --============================================================
+    -- STRIKE
+    --============================================================
     local function m1() U.m1() end
     local function m2() U.m2() end
 
     local function strike(t)
         St.aAt = (St.aAt or 0) + 1
         local hpBefore = t.hm.Health
+
+        -- Release block before striking. Holding F while clicking M1
+        -- usually cancels the attack in most action games.
+        if St.blocking then releaseBlock() end
 
         local now = U.clock()
         if now - St.lastComboTime > COMBO_RESET_TIME then
@@ -194,23 +317,13 @@ function A.init(Ctx)
 
     local function faceTarget(r, targetPos)
         pcall(function()
-            r.CFrame = CFrame.new(r.Position, Vector3.new(targetPos.X, r.Position.Y, targetPos.Z))
+            r.CFrame = CFrame.new(r.Position,
+                Vector3.new(targetPos.X, r.Position.Y, targetPos.Z))
         end)
     end
 
     --============================================================
-    -- FLY TRANSITION (critical fix)
-    -- Attempts to engage fly. Returns true only when the fly module
-    -- reports itself active. Otherwise returns false and the caller
-    -- falls through to ground chase.
-    --
-    -- Guards:
-    --   - Ctx.Fly may be missing entirely (module failed to load)
-    --   - Ctx.Fly.start may be nil (init never ran)
-    --   - Ctx.Fly.start may raise (bad state, broken dep)
-    --   - Ctx.Fly.start may return true but leave .active == false
-    --     (makeMovers() silently failed)
-    -- Only .active == true counts as success.
+    -- FLY TRANSITION
     --============================================================
     local function tryEngageFly()
         if not Ctx.Fly then return false end
@@ -225,9 +338,6 @@ function A.init(Ctx)
             end
             return false
         end
-
-        -- Verify the module actually entered the active state.
-        -- pcall success means no error, not that start succeeded.
         if not Ctx.Fly.active then
             if not St.flyFailLogged then
                 St.flyFailLogged = true
@@ -235,7 +345,6 @@ function A.init(Ctx)
             end
             return false
         end
-
         St.flyFailLogged = false
         return true
     end
@@ -256,6 +365,9 @@ function A.init(Ctx)
         h:Move(flat.Unit)
     end
 
+    --============================================================
+    -- MOVEMENT TICK
+    --============================================================
     local function movementTick(dt)
         if not St.cbt then return end
         if St.cbtS == "RETREAT" then return end
@@ -299,7 +411,8 @@ function A.init(Ctx)
                 local nudge = flatDir * 2.5
                 local newPos = myPos + nudge
                 pcall(function()
-                    r.CFrame = CFrame.new(newPos, Vector3.new(targetPos.X, newPos.Y, targetPos.Z))
+                    r.CFrame = CFrame.new(newPos,
+                        Vector3.new(targetPos.X, newPos.Y, targetPos.Z))
                 end)
                 St.lastPos = newPos
                 St.lastPosTime = now
@@ -309,7 +422,8 @@ function A.init(Ctx)
 
         if now - St.lMoveLog > 2.0 then
             St.lMoveLog = now
-            print(string.format("[Dingus][Move] chasing %s @%.0f", St.tgt.ch.Name, dist))
+            print(string.format("[Dingus][Move] chasing %s @%.0f",
+                St.tgt.ch.Name, dist))
         end
     end
 
@@ -317,6 +431,9 @@ function A.init(Ctx)
         pcall(movementTick, dt)
     end)
 
+    --============================================================
+    -- RETREAT
+    --============================================================
     local retreatRunning = false
 
     local function startRetreat(from)
@@ -324,6 +441,7 @@ function A.init(Ctx)
         retreatRunning = true
         St.rtrC = (St.rtrC or 0) + 1
         St.cbtS = "RETREAT"
+        releaseBlock()
         tryDisengageFly()
         if Ctx.Spoof and Ctx.Spoof.surfaceUp then pcall(Ctx.Spoof.surfaceUp) end
 
@@ -377,19 +495,77 @@ function A.init(Ctx)
         end)
     end
 
+    --============================================================
+    -- TARGET ACQUISITION
+    --============================================================
     local function acquireTarget()
         local tgt, kind = D.pickTarget()
         St.tgt = tgt
         St.tgtKind = kind
         if tgt then
-            print(string.format("[Dingus] target %s (%s) @%.0f", tgt.ch.Name, kind, tgt.d))
+            print(string.format("[Dingus] target %s (%s) @%.0f",
+                tgt.ch.Name, kind, tgt.d))
         end
         return tgt
     end
 
+    --============================================================
+    -- F-KEY RESOLUTION (once, deferred)
+    --============================================================
+    local function resolveFMode()
+        if St.fModeResolved then return end
+        local mode = Cfg.FKeyMode or "auto"
+
+        if mode == "auto" then
+            -- Wait for stable character + no combat
+            local waited = 0
+            while (not U.hrp() or St.cbt) and waited < 15 do
+                task.wait(0.5)
+                waited = waited + 0.5
+            end
+            if St.cbt then
+                St.fModeResolved = true
+                St.fIsBlock = false
+                print("[Dingus][Atk] F-mode deferred (combat active) — default skill")
+                return
+            end
+
+            local result = probeFKey()
+            if result == "block" then
+                St.fIsBlock = true
+                Cfg.RotationOrder = { 2, 3, 4, 5, 6 }
+                ROTATION = Cfg.RotationOrder
+                print("[Dingus][Atk] F-mode = BLOCK (probe: attribute/anim/ws)")
+            else
+                St.fIsBlock = false
+                Cfg.RotationOrder = { 2, 3, 1, 4, 5, 6 }
+                ROTATION = Cfg.RotationOrder
+                print("[Dingus][Atk] F-mode = SKILL (probe: no block signal)")
+            end
+        elseif mode == "block" then
+            St.fIsBlock = true
+            Cfg.RotationOrder = { 2, 3, 4, 5, 6 }
+            ROTATION = Cfg.RotationOrder
+            print("[Dingus][Atk] F-mode = BLOCK (config override)")
+        elseif mode == "skill" then
+            St.fIsBlock = false
+            Cfg.RotationOrder = { 2, 3, 1, 4, 5, 6 }
+            ROTATION = Cfg.RotationOrder
+            print("[Dingus][Atk] F-mode = SKILL (config override)")
+        end
+
+        St.fModeResolved = true
+    end
+
+    task.spawn(resolveFMode)
+
+    --============================================================
+    -- COMBAT TICK
+    --============================================================
     function A.combatTick()
         if not St.cbt then
             St.cbtS = "IDLE"
+            releaseBlock()
             tryDisengageFly()
             return
         end
@@ -399,6 +575,7 @@ function A.init(Ctx)
         if not h or not r then St.cbtS = "NO_CHAR"; return end
         if h.Health <= 0 then
             St.cbtS = "DEAD"
+            releaseBlock()
             tryDisengageFly()
             return
         end
@@ -427,14 +604,17 @@ function A.init(Ctx)
             if St.tgt then
                 St.kll = (St.kll or 0) + 1
                 St.bKll = (St.bKll or 0) + 1
-                print(string.format("[Dingus] killed %s (%d)", St.tgt.ch.Name, St.bKll))
+                print(string.format("[Dingus] killed %s (%d)",
+                    St.tgt.ch.Name, St.bKll))
                 St.tgt = nil
+                releaseBlock()
                 tryDisengageFly()
                 if D.invalidate then D.invalidate() end
             end
             acquireTarget()
             if not St.tgt then
                 St.cbtS = "IDLE"
+                releaseBlock()
                 tryDisengageFly()
                 return
             end
@@ -447,22 +627,21 @@ function A.init(Ctx)
         local dist = U.xzDist(r.Position, tPos.Position)
         t.d = dist
 
-        --============================================================
-        -- LONG RANGE — fly if we can, otherwise ground chase.
-        -- St.cbtS is set to "FLY" only after fly is confirmed active.
-        --============================================================
+        --========================================================
+        -- LONG RANGE
+        --========================================================
         if dist > Cfg.AtkRange + 4 then
             if tryEngageFly() then
                 St.cbtS = "FLY"
+                releaseBlock()  -- no block while flying
                 if St.skl and now - St.lSkl > 2.0 then
                     St.lSkl = now
                     fireRotation()
                 end
                 return
             end
-
-            -- Fly unavailable or failed to start. Ground chase.
             St.cbtS = "APPROACH"
+            releaseBlock()
             faceTarget(r, tPos.Position)
             groundChase(r, tPos)
             if St.skl and now - St.lSkl > 2.0 then
@@ -472,13 +651,11 @@ function A.init(Ctx)
             return
         end
 
-        --============================================================
-        -- IN RANGE — disengage fly if it was on.
-        --============================================================
+        --========================================================
+        -- IN RANGE
+        --========================================================
         if Ctx.Fly and Ctx.Fly.active then
             tryDisengageFly()
-            -- No blocking wait — the movers are destroyed synchronously
-            -- by F.stop. One Heartbeat later, ground movement takes over.
         end
 
         local blocking = D.isEnemyBlocking(t)
@@ -486,8 +663,26 @@ function A.init(Ctx)
 
         faceTarget(r, tPos.Position)
 
+        --========================================================
+        -- AUTO-BLOCK (v3)
+        -- Only active when F is block and AutoBlock is on.
+        -- Hold F when threat is imminent and we aren't attacking.
+        --========================================================
+        local shouldBlock = false
+        if St.fIsBlock and Cfg.AutoBlock then
+            local threatNow = (St.imm or 0) > 0
+            if threatNow then
+                St.blockHoldUntil = now + (Cfg.BlockHoldTTL or 0.6)
+            end
+            shouldBlock = threatNow or (now < (St.blockHoldUntil or 0))
+        end
+
+        --========================================================
+        -- STUN PUNISH
+        --========================================================
         if stunned and St.stunPun then
             St.cbtS = "PUNISH"
+            releaseBlock()
             if now - St.lAtk >= Cfg.StunAtkInt then
                 St.lAtk = now
                 strike(t)
@@ -499,8 +694,12 @@ function A.init(Ctx)
             return
         end
 
+        --========================================================
+        -- ENEMY BLOCKING · BREAK
+        --========================================================
         if blocking then
             St.cbtS = "BREAK_BLOCK"
+            releaseBlock()
             if St.skl and now - St.lSkl > 0.5 then
                 St.lSkl = now
                 fireRotation()
@@ -512,17 +711,31 @@ function A.init(Ctx)
             return
         end
 
+        --========================================================
+        -- NORMAL ATTACK · BLOCK HELD WHEN NOT ATTACKING
+        --========================================================
         St.cbtS = "ATTACK"
-        if now - St.lAtk >= currentInterval() then
-            St.lAtk = now
-            strike(t)
+
+        -- If we should block and aren't ready to attack, hold F.
+        if shouldBlock and (now - St.lAtk < currentInterval() * 0.8) then
+            holdBlock()
+        else
+            releaseBlock()
+            if now - St.lAtk >= currentInterval() then
+                St.lAtk = now
+                strike(t)
+            end
         end
+
         if St.skl and now - St.lSkl > 1.6 then
             St.lSkl = now
             fireRotation()
         end
     end
 
+    --============================================================
+    -- PUBLIC HELPERS
+    --============================================================
     function A.forceScan()
         if D.invalidate then D.invalidate() end
         local list = D.scanBosses()
@@ -541,12 +754,23 @@ function A.init(Ctx)
         end
     end
 
+    -- Expose F-mode for GUI/debug
+    function A.fModeInfo()
+        return {
+            resolved = St.fModeResolved,
+            isBlock = St.fIsBlock,
+            blocking = St.blocking,
+            rotation = Cfg.RotationOrder,
+        }
+    end
+
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function()
+        releaseBlock()
         tryDisengageFly()
     end)
 
-    print("[Dingus][attack] initialized")
+    print("[Dingus][attack] v3 initialized")
 end
 
 return A
