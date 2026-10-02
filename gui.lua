@@ -1,20 +1,39 @@
 --[[
-    Dingus-Slayer · gui.lua v28
-    Sidebar layout · section-grouped card rows · custom switch widget.
-    Matches Ctx.Gui contract: win, minimize, restore, gui, Log, FileMgr, ConfigMgr.
-    Restores _G.print / _G.warn on close (audit M3).
-    ConfigMgr delegates to Ctx.Cfg.save/load for single-file-source.
+    Dingus-Slayer · gui.lua v30
+    Sidebar layout. Seven tabs. Concealed-parent chain.
+    Panic-hide keybind. Restores _G.print/warn on close.
+
+    Evasion, honest version:
+      - Parent chain: gethui() -> CoreGui -> PlayerGui (warn on last)
+      - Random-named ScreenGui per install
+      - DisplayOrder high, ResetOnSpawn false
+      - Panic keybind tears the GUI down instantly
+      - NO metamethod hooks. Executor sandbox blocks them and the
+        attempt is itself a signature. NO auto-hide. You can't
+        detect detection.
+
+    Contract preserved for main.lua / attack.lua / spoofers.lua:
+      Ctx.Gui.win, .gui, .minimize, .restore
+      Ctx.Gui.Log, .FileMgr, .ConfigMgr
 ]]--
 
 local G = {}
 
 function G.init(Ctx)
-    local U = Ctx.Util
+    local U   = Ctx.Util
     local Cfg = Ctx.Cfg
-    local St = Ctx.St
+    local St  = Ctx.St
     local Tween = game:GetService("TweenService")
-    local UIS = game:GetService("UserInputService")
+    local UIS   = game:GetService("UserInputService")
     local LogService = game:GetService("LogService")
+
+    --============================================================
+    -- GUI CONFIG (new keys default in)
+    --============================================================
+    Cfg.GuiPanicKey1   = Cfg.GuiPanicKey1   or "RightControl"
+    Cfg.GuiPanicKey2   = Cfg.GuiPanicKey2   or "Backspace"
+    Cfg.GuiConcealed   = Cfg.GuiConcealed   or true
+    Cfg.GuiPanicHide   = Cfg.GuiPanicHide   or true
 
     --============================================================
     -- CAPABILITIES
@@ -26,7 +45,47 @@ function G.init(Ctx)
         isfile     = type(isfile) == "function",
         listfiles  = type(listfiles) == "function",
         makefolder = type(makefolder) == "function",
+        gethui     = type(gethui) == "function",
     }
+
+    --============================================================
+    -- CONCEALMENT: parent chain
+    -- Priority: gethui() -> CoreGui -> PlayerGui (warn)
+    --============================================================
+    local function resolveParent()
+        if Cfg.GuiConcealed then
+            if HAS.gethui then
+                local ok, hui = pcall(gethui)
+                if ok and hui then
+                    return hui, "gethui"
+                end
+            end
+            local ok, cg = pcall(function()
+                return game:GetService("CoreGui")
+            end)
+            if ok and cg then
+                return cg, "CoreGui"
+            end
+        end
+        return game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
+            or game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui"),
+            "PlayerGui"
+    end
+
+    local parent, parentKind = resolveParent()
+    if parentKind == "PlayerGui" then
+        warn("[Dingus][gui] falling back to PlayerGui — game scripts can see the UI")
+    end
+
+    -- Random instance name — never "DingusUI"
+    local suffix = string.format("%06x", math.random(0, 0xFFFFFF))
+    local guiName = "_c" .. suffix
+
+    -- Cleanup any prior instance we know about
+    for _, oldName in ipairs({ "DingusUI" }) do
+        local old = parent:FindFirstChild(oldName)
+        if old then pcall(function() old:Destroy() end) end
+    end
 
     --============================================================
     -- PALETTE
@@ -44,20 +103,16 @@ function G.init(Ctx)
         navHover    = Color3.fromRGB(20, 20, 28),
         trackOff    = Color3.fromRGB(48, 48, 62),
         border      = Color3.fromRGB(36, 30, 32),
-
         accent      = Color3.fromRGB(220, 90, 70),
         accentSoft  = Color3.fromRGB(240, 130, 110),
         accentDim   = Color3.fromRGB(150, 60, 50),
-
         green       = Color3.fromRGB(80, 200, 120),
         red         = Color3.fromRGB(220, 70, 80),
         blue        = Color3.fromRGB(70, 130, 200),
         orange      = Color3.fromRGB(210, 140, 80),
-
         text        = Color3.fromRGB(232, 232, 240),
         textDim     = Color3.fromRGB(160, 165, 180),
         textMuted   = Color3.fromRGB(105, 110, 130),
-
         logInfo     = Color3.fromRGB(200, 200, 210),
         logWarn     = Color3.fromRGB(240, 200, 100),
         logError    = Color3.fromRGB(240, 120, 120),
@@ -102,18 +157,17 @@ function G.init(Ctx)
             local e = Log.buffer[i]
             lines[#lines+1] = string.format("[%s] %s", e.time, e.text)
         end
-        local ok = pcall(writefile, filename, table.concat(lines, "\n"))
-        return ok
+        return pcall(writefile, filename, table.concat(lines, "\n"))
     end
 
-    -- LogService hook (safe, non-destructive)
+    -- LogService hook (non-destructive)
     pcall(function()
         LogService.MessageOut:Connect(function(msg, msgType)
             pcall(Log.add, msg, msgType)
         end)
     end)
 
-    -- print/warn hook (restored on close)
+    -- print/warn hook (restored on close and on panic)
     local _origPrint = print
     local _origWarn  = warn
     do
@@ -136,6 +190,11 @@ function G.init(Ctx)
             pcall(Log.add, table.concat(out, " "), Enum.MessageType.MessageWarning)
             return _origWarn(...)
         end
+    end
+
+    local function restoreGlobals()
+        _G.print = _origPrint
+        _G.warn  = _origWarn
     end
 
     --============================================================
@@ -198,7 +257,7 @@ function G.init(Ctx)
     end
 
     --============================================================
-    -- CONFIG MANAGER (delegates to Cfg.save / Cfg.load)
+    -- CONFIG MANAGER (delegates to Cfg.save/load)
     --============================================================
     local ConfigMgr = { currentSlot = "default" }
 
@@ -232,23 +291,20 @@ function G.init(Ctx)
     end
 
     --============================================================
-    -- ROOT
+    -- ROOT GUI
     --============================================================
-    local parent = (gethui and gethui()) or game:GetService("CoreGui")
-    local old = parent:FindFirstChild("DingusUI")
-    if old then old:Destroy() end
-
     local gui = Instance.new("ScreenGui")
-    gui.Name = "DingusUI"
+    gui.Name = guiName
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 2 ^ 30
     gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     gui.Parent = parent
 
-    local WIN_W, WIN_H = 720, 560
-    local HEADER_H  = 44
-    local SIDEBAR_W = 180
-    local PAD       = 12
+    local WIN_W, WIN_H   = 740, 580
+    local HEADER_H       = 44
+    local SIDEBAR_W      = 190
+    local PAD            = 12
 
     --============================================================
     -- WINDOW
@@ -285,7 +341,6 @@ function G.init(Ctx)
     hFix.BorderSizePixel = 0
     hFix.Parent = header
 
-    -- logo chip
     local chip = Instance.new("Frame")
     chip.Size = UDim2.new(0, 26, 0, 26)
     chip.Position = UDim2.new(0, 14, 0.5, -13)
@@ -313,17 +368,16 @@ function G.init(Ctx)
     titleLbl.TextSize = 14
     titleLbl.Parent = header
 
-    -- live dot
     local liveDot = Instance.new("Frame")
     liveDot.Size = UDim2.new(0, 6, 0, 6)
     liveDot.Position = UDim2.new(0, 176, 0.5, -3)
-    liveDot.BackgroundColor3 = CLR.green
+    liveDot.BackgroundColor3 = CLR.textMuted
     liveDot.BorderSizePixel = 0
     liveDot.Parent = header
     Instance.new("UICorner", liveDot).CornerRadius = UDim.new(1, 0)
 
     local liveLbl = Instance.new("TextLabel")
-    liveLbl.Size = UDim2.new(0, 60, 1, 0)
+    liveLbl.Size = UDim2.new(0, 300, 1, 0)
     liveLbl.Position = UDim2.new(0, 188, 0, 0)
     liveLbl.BackgroundTransparency = 1
     liveLbl.Text = "ready"
@@ -417,7 +471,7 @@ function G.init(Ctx)
     fLbl.Size = UDim2.new(1, -32, 1, 0)
     fLbl.Position = UDim2.new(0, 24, 0, 0)
     fLbl.BackgroundTransparency = 1
-    fLbl.Text = "v26 · idle"
+    fLbl.Text = "v30 · idle"
     fLbl.TextColor3 = CLR.textMuted
     fLbl.TextXAlignment = Enum.TextXAlignment.Left
     fLbl.Font = FONT_B
@@ -425,7 +479,7 @@ function G.init(Ctx)
     fLbl.Parent = sideFooter
 
     --============================================================
-    -- CONTENT AREA
+    -- CONTENT
     --============================================================
     local content = Instance.new("Frame")
     content.Name = "Content"
@@ -453,7 +507,6 @@ function G.init(Ctx)
         track.AutoButtonColor = false
         track.Parent = par
         Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
-
         local knob = Instance.new("Frame")
         knob.Size = UDim2.new(0, 16, 0, 16)
         knob.Position = initial and UDim2.new(1, -18, 0.5, -8)
@@ -462,7 +515,6 @@ function G.init(Ctx)
         knob.BorderSizePixel = 0
         knob.Parent = track
         Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
-
         local state = initial
         local function set(v)
             state = v
@@ -527,7 +579,6 @@ function G.init(Ctx)
         t.Font = FONT_B
         t.TextSize = 13
         t.Parent = row
-
         local d = nil
         if desc and desc ~= "" then
             d = Instance.new("TextLabel")
@@ -580,7 +631,6 @@ function G.init(Ctx)
         fmt = fmt or "%.1f"
         local row = mkRow(page, 62)
         mkIcon(row, glyph)
-
         local t = Instance.new("TextLabel")
         t.Size = UDim2.new(1, -140, 0, 16)
         t.Position = UDim2.new(0, 56, 0, 12)
@@ -591,7 +641,6 @@ function G.init(Ctx)
         t.Font = FONT_B
         t.TextSize = 13
         t.Parent = row
-
         local v = Instance.new("TextLabel")
         v.Size = UDim2.new(0, 70, 0, 16)
         v.Position = UDim2.new(1, -84, 0, 12)
@@ -602,7 +651,6 @@ function G.init(Ctx)
         v.Font = FONT_B
         v.TextSize = 12
         v.Parent = row
-
         local bar = Instance.new("Frame")
         bar.Size = UDim2.new(1, -72, 0, 5)
         bar.Position = UDim2.new(0, 56, 0, 42)
@@ -610,7 +658,6 @@ function G.init(Ctx)
         bar.BorderSizePixel = 0
         bar.Parent = row
         Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
-
         local pct = math.clamp((getter() - minV) / (maxV - minV), 0, 1)
         local fill = Instance.new("Frame")
         fill.Size = UDim2.new(pct, 0, 1, 0)
@@ -618,7 +665,6 @@ function G.init(Ctx)
         fill.BorderSizePixel = 0
         fill.Parent = bar
         Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
-
         local knob = Instance.new("Frame")
         knob.Size = UDim2.new(0, 12, 0, 12)
         knob.Position = UDim2.new(pct, -6, 0.5, -6)
@@ -627,14 +673,12 @@ function G.init(Ctx)
         knob.ZIndex = 2
         knob.Parent = bar
         Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
-
         local hit = Instance.new("TextButton")
         hit.Size = UDim2.new(1, -72, 0, 22)
         hit.Position = UDim2.new(0, 56, 0, 33)
         hit.BackgroundTransparency = 1
         hit.Text = ""
         hit.Parent = row
-
         local drag = false
         hit.InputBegan:Connect(function(i)
             if i.UserInputType == Enum.UserInputType.MouseButton1 then drag = true end
@@ -663,8 +707,6 @@ function G.init(Ctx)
         local row = mkRow(page, 50)
         mkIcon(row, glyph, tint)
         mkTitleDesc(row, title, desc, 16)
-
-        -- chevron
         local chev = Instance.new("TextLabel")
         chev.Size = UDim2.new(0, 20, 0, 20)
         chev.Position = UDim2.new(1, -34, 0.5, -10)
@@ -674,8 +716,6 @@ function G.init(Ctx)
         chev.Font = FONT_B
         chev.TextSize = 18
         chev.Parent = row
-
-        -- click overlay (excludes chevron visually but captures whole row)
         local hit = Instance.new("TextButton")
         hit.Size = UDim2.new(1, 0, 1, 0)
         hit.BackgroundTransparency = 1
@@ -692,7 +732,6 @@ function G.init(Ctx)
         local row = mkRow(page, 50)
         mkIcon(row, glyph)
         mkTitleDesc(row, title, nil, 16)
-
         local box = Instance.new("TextBox")
         box.Size = UDim2.new(0, 140, 0, 26)
         box.Position = UDim2.new(1, -154, 0.5, -13)
@@ -739,7 +778,7 @@ function G.init(Ctx)
     -- PAGES
     --============================================================
     local PAGES = {}
-    local NAV = {}
+    local NAV   = {}
 
     local function mkPage(name, scrolling)
         scrolling = scrolling ~= false
@@ -761,7 +800,6 @@ function G.init(Ctx)
         p.BorderSizePixel = 0
         p.Visible = false
         p.Parent = content
-
         if scrolling then
             local lay = Instance.new("UIListLayout", p)
             lay.Padding = UDim.new(0, 6)
@@ -776,9 +814,6 @@ function G.init(Ctx)
         return p
     end
 
-    --============================================================
-    -- NAV ITEMS
-    --============================================================
     local function selectPage(name)
         for n, p in pairs(PAGES) do p.Visible = (n == name) end
         for n, e in pairs(NAV) do e.setActive(n == name) end
@@ -868,16 +903,15 @@ function G.init(Ctx)
     mkNavItem("◈", "Dashboard", "Dashboard", 1)
     mkNavItem("◆", "Combat",    "Combat",    2)
     mkNavItem("✦", "Quests",    "Quests",    3)
-    mkNavItem("◎", "Config",    "Config",    4)
-    mkNavItem("▤", "Files",     "Files",     5)
+    mkNavItem("▤", "Config",    "Config",    4)
+    mkNavItem("▥", "Files",     "Files",     5)
     mkNavItem("≡", "Logs",      "Logs",      6)
+    mkNavItem("⚙", "Settings",  "Settings",  7)
 
     --============================================================
-    -- PAGE: DASHBOARD
+    -- DASHBOARD
     --============================================================
     local pDash = mkPage("Dashboard")
-
-    -- stat grid
     local grid = Instance.new("Frame")
     grid.Size = UDim2.new(1, 0, 0, 136)
     grid.BackgroundTransparency = 1
@@ -896,7 +930,6 @@ function G.init(Ctx)
         card.LayoutOrder = order
         card.Parent = parent
         Instance.new("UICorner", card).CornerRadius = UDim.new(0, 10)
-
         local l = Instance.new("TextLabel")
         l.Size = UDim2.new(1, -24, 0, 12)
         l.Position = UDim2.new(0, 14, 0, 10)
@@ -907,7 +940,6 @@ function G.init(Ctx)
         l.Font = FONT_B
         l.TextSize = 9
         l.Parent = card
-
         local v = Instance.new("TextLabel")
         v.Size = UDim2.new(1, -24, 0, 24)
         v.Position = UDim2.new(0, 14, 0, 26)
@@ -922,18 +954,18 @@ function G.init(Ctx)
         return v
     end
 
-    local svState   = mkStat(grid, "State",   1)
-    local svTarget  = mkStat(grid, "Target",  2)
-    local svHp      = mkStat(grid, "HP",      3)
-    local svKills   = mkStat(grid, "Kills",   4)
+    local svState  = mkStat(grid, "State",  1)
+    local svTarget = mkStat(grid, "Target", 2)
+    local svHp     = mkStat(grid, "HP",     3)
+    local svKills  = mkStat(grid, "Kills",  4)
 
     mkSection(pDash, "Control")
-    mkButtonRow(pDash, "▶", "Start Combat",  "Enable auto-combat and target acquisition", function()
+    mkButtonRow(pDash, "▶", "Start Combat", "Enable auto-combat and target acquisition", function()
         St.cbt = true; print("[Dingus] combat on")
     end)
-    mkButtonRow(pDash, "■", "Stop Combat",   "Halt combat loop and release fly", function()
+    mkButtonRow(pDash, "■", "Stop Combat", "Halt combat loop and release fly", function()
         St.cbt = false
-        if Ctx.Fly and Ctx.Fly.stop then Ctx.Fly.stop() end
+        if Ctx.Fly and Ctx.Fly.stop then pcall(Ctx.Fly.stop) end
         print("[Dingus] combat off")
     end, true)
     mkButtonRow(pDash, "◎", "Scan for Bosses", "Force a boss scan; results in F9", function()
@@ -944,7 +976,7 @@ function G.init(Ctx)
     mkButtonRow(pDash, "▲", "Force Move To Target", "Teleport above current target", function()
         if Ctx.Atk and Ctx.Atk.forceMove then Ctx.Atk.forceMove() end
     end)
-    mkButtonRow(pDash, "↻", "Reset Movers",  "Strip BodyMovers from HRP", function()
+    mkButtonRow(pDash, "↻", "Reset Movers", "Strip BodyMovers from HRP", function()
         local r = U.hrp()
         if r then
             for _, c in ipairs(r:GetChildren()) do
@@ -959,15 +991,15 @@ function G.init(Ctx)
     end, true)
 
     --============================================================
-    -- PAGE: COMBAT
+    -- COMBAT
     --============================================================
     local pCombat = mkPage("Combat")
 
     mkSection(pCombat, "Automation")
-    mkToggleRow(pCombat, "✦", "Auto Skill Rotation", "Cycles Z X C V B in rotation order", "skl")
-    mkToggleRow(pCombat, "◆", "Auto Equip Weapon",   "Swaps to the first weapon in inventory", "eqp")
-    mkToggleRow(pCombat, "◀", "Auto Retreat",        "Dash away when HP drops below threshold", "rtr")
-    mkToggleRow(pCombat, "◎", "Stun Punish",         "Attack extra fast during stun windows", "stunPun")
+    mkToggleRow(pCombat, "✦", "Auto Skill Rotation", "Cycles slot order per F-probe result", "skl")
+    mkToggleRow(pCombat, "◆", "Auto Equip Weapon",   "Swaps to first weapon in inventory", "eqp")
+    mkToggleRow(pCombat, "◀", "Auto Retreat",        "Dash away when HP drops", "rtr")
+    mkToggleRow(pCombat, "◎", "Stun Punish",         "Attack extra fast during stun", "stunPun")
     mkToggleRow(pCombat, "◇", "Guard Spoof",         "Client-side HP / block reinforcement", "gsp")
 
     mkSection(pCombat, "Tuning")
@@ -987,13 +1019,13 @@ function G.init(Ctx)
     local combatInfo = mkInfo(pCombat, 108)
 
     --============================================================
-    -- PAGE: QUESTS
+    -- QUESTS
     --============================================================
     local pQuest = mkPage("Quests")
 
     mkSection(pQuest, "Crow")
-    mkToggleRow(pQuest, "✦", "Auto Crow Quests", "Periodically accept available crow quests", "crw")
-    mkButtonRow(pQuest, "◆", "Equip Crow",   "Find and equip the crow tool", function()
+    mkToggleRow(pQuest, "✦", "Auto Crow Quests", "Periodically read available crow quests", "crw")
+    mkButtonRow(pQuest, "◆", "Equip Crow", "Find and equip the crow tool", function()
         local t = Ctx.Scan.findCrowTool()
         local h = U.hum()
         if t and h and t:IsA("Tool") then
@@ -1001,13 +1033,16 @@ function G.init(Ctx)
             print("[Dingus] crow equipped")
         end
     end)
-    mkButtonRow(pQuest, "◈", "Summon Crow",  "Call the crow with M1", function() U.m1() end)
-    mkButtonRow(pQuest, "◎", "Accept Quest", "Activate the quest menu button", function()
-        local m = Ctx.Scan.findCrowMenu()
-        if m then
-            pcall(function() m:Activate() end)
-            print("[Dingus] quest accepted")
+    mkButtonRow(pQuest, "◈", "Summon Crow", "Call the crow with M1", function() U.m1() end)
+    mkButtonRow(pQuest, "☰", "Read Quest Panel", "Scrape current quests from open panel", function()
+        local pg = U.Lp:FindFirstChildOfClass("PlayerGui")
+        if not pg then return end
+        local cc = pg:FindFirstChild("ComponentsHolder")
+        if not cc then
+            print("[Dingus][Crow] panel not open — click the crow first")
+            return
         end
+        print("[Dingus][Crow] panel detected")
     end)
 
     mkSection(pQuest, "Quest Cycle")
@@ -1018,7 +1053,7 @@ function G.init(Ctx)
     local questInfo = mkInfo(pQuest, 96)
 
     --============================================================
-    -- PAGE: CONFIG
+    -- CONFIG
     --============================================================
     local pConfig = mkPage("Config")
 
@@ -1053,7 +1088,7 @@ function G.init(Ctx)
     local slotsInfo  = mkInfo(pConfig, 96)
 
     --============================================================
-    -- PAGE: FILES
+    -- FILES
     --============================================================
     local pFiles = mkPage("Files")
 
@@ -1071,10 +1106,9 @@ function G.init(Ctx)
     local filesInfo = mkInfo(pFiles, 240)
 
     --============================================================
-    -- PAGE: LOGS  (non-scrolling outer)
+    -- LOGS
     --============================================================
     local pLogs = mkPage("Logs", false)
-
     local logPad = Instance.new("UIPadding", pLogs)
     logPad.PaddingTop    = UDim.new(0, PAD)
     logPad.PaddingLeft   = UDim.new(0, PAD)
@@ -1083,7 +1117,6 @@ function G.init(Ctx)
 
     local filterRow = Instance.new("Frame")
     filterRow.Size = UDim2.new(1, 0, 0, 30)
-    filterRow.Position = UDim2.new(0, 0, 0, 0)
     filterRow.BackgroundTransparency = 1
     filterRow.Parent = pLogs
 
@@ -1158,7 +1191,6 @@ function G.init(Ctx)
     logFrame.BorderSizePixel = 0
     logFrame.Parent = pLogs
     Instance.new("UICorner", logFrame).CornerRadius = UDim.new(0, 10)
-
     local logScroll = Instance.new("ScrollingFrame")
     logScroll.Size = UDim2.new(1, -12, 1, -12)
     logScroll.Position = UDim2.new(0, 6, 0, 6)
@@ -1206,6 +1238,41 @@ function G.init(Ctx)
         end
         logScroll.CanvasPosition = Vector2.new(0, logScroll.AbsoluteCanvasSize.Y)
     end
+
+    --============================================================
+    -- SETTINGS (concealment + panic)
+    --============================================================
+    local pSettings = mkPage("Settings")
+
+    mkSection(pSettings, "Concealment")
+    mkToggleRow(pSettings, "◈", "Concealed Parent",
+        "Parent to gethui/CoreGui instead of PlayerGui. Takes effect on next reload.",
+        "GuiConcealed",
+        function(v) Cfg.GuiConcealed = v end
+    )
+
+    mkButtonRow(pSettings, "⇩", "Panic Hide Now",
+        "Tear down the GUI immediately (RightCtrl + Backspace also works)",
+        function()
+            if G.gui and G.gui.Parent then
+                G.gui.Parent = nil
+                print("[Dingus] GUI hidden (panic)")
+            end
+        end,
+        true
+    )
+
+    mkToggleRow(pSettings, "◇", "Panic Keybind Enabled",
+        "RightCtrl + Backspace hides the GUI",
+        "GuiPanicHide",
+        function(v) Cfg.GuiPanicHide = v end
+    )
+
+    mkSection(pSettings, "Diagnostics")
+    local parentInfo = mkInfo(pSettings, 70)
+
+    mkSection(pSettings, "Runtime")
+    local runtimeInfo = mkInfo(pSettings, 130)
 
     --============================================================
     -- DEFAULT PAGE
@@ -1320,7 +1387,6 @@ function G.init(Ctx)
                 local hp = h and string.format("%d/%d",
                     math.floor(h.Health), math.floor(h.MaxHealth)) or "?"
 
-                -- Dashboard stats
                 local s_state = tostring(St.cbtS or "—")
                 if cache.s_state ~= s_state then
                     cache.s_state = s_state
@@ -1341,32 +1407,33 @@ function G.init(Ctx)
                     svKills.Text = s_kill
                 end
 
-                -- Combat info
                 local hitRate = St.aAt > 0 and math.floor(St.aHi / St.aAt * 100) or 0
+                local fInfo = Ctx.Atk and Ctx.Atk.fModeInfo and Ctx.Atk.fModeInfo() or {}
                 local ci = string.format(
                     "  state: %s  ·  hits: %d/%d (%d%%)\n" ..
                     "  kills: %d  ·  retreats: %d  ·  skills fired: %d\n" ..
                     "  fly: %s  ·  threats: %d  ·  zone: %d\n" ..
+                    "  F-mode: %s  ·  blocking: %s\n" ..
                     "  hp: %s  ·  atk interval: %.2f",
                     St.cbtS or "—", St.aHi or 0, St.aAt or 0, hitRate,
                     St.bKll or 0, St.rtrC or 0, St.skC or 0,
                     tostring(St.FlyActive), St.zn or 0, St.imm or 0,
+                    fInfo.isBlock and "BLOCK" or (fInfo.resolved and "SKILL" or "?"),
+                    tostring(fInfo.blocking),
                     hp, St.aiI or 0)
                 if cache.combatInfo ~= ci then cache.combatInfo = ci; combatInfo.Text = ci end
 
-                -- Quest info
                 local qi = string.format(
                     "  crow tool: %s\n" ..
-                    "  perched: %s  ·  accepted: %d\n" ..
+                    "  perched: %s  ·  quests read: %d\n" ..
                     "  player level: %d  ·  hunts: %d\n" ..
                     "  quest target: %s",
                     St.crT and St.crT.Name or "not found",
-                    tostring(St.cPrch), St.cQs or 0,
+                    tostring(St.cPrch), St.crQuests and #St.crQuests or 0,
                     St.playerLevel or 0, St.huntCount or 0,
                     tostring(St.questTarget or "—"))
                 if cache.questInfo ~= qi then cache.questInfo = qi; questInfo.Text = qi end
 
-                -- Config info
                 local slotList = ConfigMgr.listSlots()
                 local cfgi = string.format(
                     "  active slot: %s\n" ..
@@ -1374,7 +1441,7 @@ function G.init(Ctx)
                     "  saved slots: %d\n" ..
                     "  writefile: %s  ·  readfile: %s",
                     ConfigMgr.currentSlot,
-                    Ctx.Cfg.slotFile(ConfigMgr.currentSlot),
+                    Ctx.Cfg.slotFile and Ctx.Cfg.slotFile(ConfigMgr.currentSlot) or "?",
                     #slotList,
                     tostring(HAS.writefile), tostring(HAS.readfile))
                 if cache.configInfo ~= cfgi then cache.configInfo = cfgi; configInfo.Text = cfgi end
@@ -1388,7 +1455,6 @@ function G.init(Ctx)
                 local sl = table.concat(slotLines, "\n")
                 if cache.slotsInfo ~= sl then cache.slotsInfo = sl; slotsInfo.Text = sl end
 
-                -- Files info
                 FileMgr.refresh()
                 local fileLines = { string.format("  files: %d", #FileMgr.files) }
                 for i = 1, math.min(#FileMgr.files, 15) do
@@ -1398,17 +1464,39 @@ function G.init(Ctx)
                 local fi = table.concat(fileLines, "\n")
                 if cache.filesInfo ~= fi then cache.filesInfo = fi; filesInfo.Text = fi end
 
+                -- Settings info
+                local pi = string.format(
+                    "  parent: %s\n" ..
+                    "  instance name: %s\n" ..
+                    "  gethui available: %s\n" ..
+                    "  concealed mode: %s",
+                    parentKind, guiName,
+                    tostring(HAS.gethui),
+                    tostring(Cfg.GuiConcealed))
+                if cache.parentInfo ~= pi then cache.parentInfo = pi; parentInfo.Text = pi end
+
+                local ri = string.format(
+                    "  fps: %.0f  ·  boot: %s\n" ..
+                    "  scripts loaded: %s\n" ..
+                    "  combat loop: %s\n" ..
+                    "  spoofers: %s",
+                    St.fps or 60, tostring(St.boot),
+                    tostring(St.run),
+                    (Ctx.Loops and Ctx.Loops[1] and not Ctx.Loops[1].disabled) and "active" or "idle",
+                    St.gsp and "on" or "off")
+                if cache.runtimeInfo ~= ri then cache.runtimeInfo = ri; runtimeInfo.Text = ri end
+
                 -- Header status
                 local bar = string.format("%s · fps %.0f · log %d",
                     St.cbt and "combat" or "idle", St.fps or 60, #Log.buffer)
                 if cache.live ~= bar then cache.live = bar; liveLbl.Text = bar end
-                if cache.fDot ~= (St.cbt and "g" or "m") then
-                    cache.fDot = St.cbt and "g" or "m"
+                local colorKey = St.cbt and "g" or "m"
+                if cache.fDot ~= colorKey then
+                    cache.fDot = colorKey
                     fDot.BackgroundColor3 = St.cbt and CLR.green or CLR.textMuted
                     liveDot.BackgroundColor3 = St.cbt and CLR.green or CLR.textMuted
                 end
 
-                -- Log rebuild
                 if Log.pendingUpdate then
                     Log.pendingUpdate = false
                     rebuildLog()
@@ -1419,21 +1507,29 @@ function G.init(Ctx)
     end)
 
     --============================================================
-    -- HOTKEY (in-window; main.lua has its own global hook)
+    -- HOTKEYS
     --============================================================
+    -- RightShift toggle (main.lua also has one; harmless duplication)
+    -- RightCtrl + Backspace → panic hide
     UIS.InputBegan:Connect(function(input, gp)
         if gp then return end
         if input.KeyCode == Enum.KeyCode.RightShift then
             if minimized then restore() else minimize() end
+            return
+        end
+        if Cfg.GuiPanicHide
+           and input.KeyCode == Enum.KeyCode.Backspace
+           and UIS:IsKeyDown(Enum.KeyCode.RightControl) then
+            gui.Parent = nil
+            print("[Dingus] GUI panic-hidden · reload to restore")
         end
     end)
 
     --============================================================
-    -- CLOSE (restore print/warn)
+    -- CLOSE
     --============================================================
     closeBtn.MouseButton1Click:Connect(function()
-        _G.print = _origPrint
-        _G.warn  = _origWarn
+        restoreGlobals()
         gui:Destroy()
     end)
 
@@ -1448,8 +1544,11 @@ function G.init(Ctx)
     G.FileMgr   = FileMgr
     G.ConfigMgr = ConfigMgr
     G.PAGES     = PAGES
+    G.parent    = parent
+    G.parentKind = parentKind
 
-    print("[Dingus][gui] initialized · v28 sidebar layout")
+    print(string.format("[Dingus][gui] v30 initialized · parent=%s · name=%s",
+        parentKind, guiName))
 end
 
 return G
