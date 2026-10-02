@@ -1,51 +1,45 @@
 --[[
-    Dingus-Slayer · lists.lua v4
-    Boss-focused. Non-boss classification removed.
-    Empty mobKeywords forces pickTarget to only return bosses.
+    Dingus-Slayer · lists.lua v5
+    Endgame bosses only. Map 1 and Map 2 removed per request.
+    Kept: Hidden Mist corridor + endgame regions + generic tiers +
+    in-game renamed aliases.
 ]]--
 
 local L = {}
 
 L.bosses = {
-    -- Map 1
-    "zoku", "zuko",
-    "zanegutsu", "kuuchie",
-    "kaden",
-    "sabito",
-    "sanemi",
-    "yahaba",
-    "susamaru",
-    "shiron",
-    "giyu",
-    "slasher",
-    "nezuko",
-    "mother bear",
+    -- Endgame / Hidden Mist corridor
+    "obanai",
+    "obari",
+    "zentaro",
+    "tengai",
+    "sumari",
+    "yahari",
+    "reaper",
+    "daki",
+    "gyutaro",
+    "shinobu",
+    "nezura",
+    "gyomei",
+    "fujiko",
+    "yeti",
+    "tengen",
+    "doma",
+    "akaza",
+    "enmu",
+    "hoyuzo",
+    "kaiden",
 
-    -- Map 2
-    "nomay bandit",
-    "muichiro",
-    "inosuke",
-    "rengoku",
-    "renpeke",
-    "akeza",
-    "swampy",
-
-    -- Endgame
-    "obanai", "obari", "zentaro", "tengai",
-    "sumari", "yahari", "reaper",
-    "daki", "gyutaro", "shinobu",
-    "nezura", "gyomei", "fujiko", "yeti",
-    "tengen", "doma", "akaza", "enmu",
-    "hoyuzo", "kaiden",
-
-    -- Generic
+    -- Generic / tiered
     "white terror",
     "high demon",
     "profound demon",
     "trainee",
 
     -- In-game renamed aliases (screenshot-verified)
-    "enru", "datai", "akazo",
+    "enru",
+    "datai",
+    "akazo",
 
     -- Non-boss NPC names that still trigger hostile responses
     "subordinate",
@@ -90,11 +84,10 @@ L.nonWeapons = {
     "uniform", "crow",
 }
 
--- Emptied per request. detect.scanMobs returns nothing with this
--- empty, so pickTarget only ever returns bosses.
+-- Emptied: mob scanning returns nothing, pickTarget only returns bosses.
 L.mobKeywords = {}
 
--- Emptied. Only used by removed scanners.deepScan.
+-- Emptied: unused by remaining scanners.
 L.questKeywords = {}
 
 L.crowKeywords = { "crow", "kasugai" }
