@@ -1,50 +1,89 @@
 --[[
-    Dingus-Slayer · lists.lua v5
-    Endgame bosses only. Map 1 and Map 2 removed per request.
-    Kept: Hidden Mist corridor + endgame regions + generic tiers +
-    in-game renamed aliases.
+    Dingus-Slayer · lists.lua v6
+    Endgame bosses only. Region-grouped. Per-boss selection state.
+
+    Removed: mother bear, nomay bandit, muichiro, inosuke, rengoku,
+             renpeke, akeza, swampy, zoku, zuko, zanegutsu, kuuchie,
+             kaden, sabito, sanemi, yahaba, susamaru, shiron, giyu,
+             slasher, nezuko, trainee, subordinate, white terror,
+             high demon, profound demon.
 ]]--
 
 local L = {}
 
-L.bosses = {
-    -- Endgame / Hidden Mist corridor
-    "obanai",
-    "obari",
-    "zentaro",
-    "tengai",
-    "sumari",
-    "yahari",
-    "reaper",
-    "daki",
-    "gyutaro",
-    "shinobu",
-    "nezura",
-    "gyomei",
-    "fujiko",
-    "yeti",
-    "tengen",
-    "doma",
-    "akaza",
-    "enmu",
-    "hoyuzo",
-    "kaiden",
-
-    -- Generic / tiered
-    "white terror",
-    "high demon",
-    "profound demon",
-    "trainee",
-
-    -- In-game renamed aliases (screenshot-verified)
-    "enru",
-    "datai",
-    "akazo",
-
-    -- Non-boss NPC names that still trigger hostile responses
-    "subordinate",
+--============================================================
+-- BOSS REGIONS
+-- Grouped for the GUI selector. Flat list is derived below.
+--============================================================
+L.bossRegions = {
+    {
+        name = "Hidden Mist",
+        bosses = { "obanai", "obari", "gyomei", "shinobu", "tengen", "fujiko" },
+    },
+    {
+        name = "Bamboo Grove",
+        bosses = { "sumari", "yahari", "hoyuzo", "nezura" },
+    },
+    {
+        name = "Demon Domain",
+        bosses = { "daki", "gyutaro", "doma", "akaza" },
+    },
+    {
+        name = "Nightfall",
+        bosses = { "zentaro", "tengai", "reaper", "enmu" },
+    },
+    {
+        name = "Frozen Wilds",
+        bosses = { "yeti", "kaiden" },
+    },
+    {
+        name = "Renamed",
+        bosses = { "enru", "datai", "akazo" },
+    },
 }
 
+-- Flat list derived from regions
+L.bosses = {}
+for _, region in ipairs(L.bossRegions) do
+    for _, b in ipairs(region.bosses) do
+        table.insert(L.bosses, b)
+    end
+end
+
+--============================================================
+-- SELECTION STATE
+--============================================================
+L.selectedBosses = {}
+for _, b in ipairs(L.bosses) do
+    L.selectedBosses[b] = true
+end
+
+function L.setBossEnabled(name, enabled)
+    if L.selectedBosses[name] == nil then return end
+    L.selectedBosses[name] = not not enabled
+end
+
+function L.isBossEnabled(name)
+    return L.selectedBosses[name] ~= false
+end
+
+function L.setAllBosses(enabled)
+    for _, b in ipairs(L.bosses) do
+        L.selectedBosses[b] = not not enabled
+    end
+end
+
+function L.enabledCount()
+    local n = 0
+    for _, b in ipairs(L.bosses) do
+        if L.selectedBosses[b] ~= false then n = n + 1 end
+    end
+    return n, #L.bosses
+end
+
+--============================================================
+-- WEAPONS
+--============================================================
 L.weapons = {
     "katana", "sword", "blade", "saber", "sabre",
     "cutlass", "rapier", "nodachi", "wakizashi", "tachi",
@@ -84,14 +123,13 @@ L.nonWeapons = {
     "uniform", "crow",
 }
 
--- Emptied: mob scanning returns nothing, pickTarget only returns bosses.
 L.mobKeywords = {}
-
--- Emptied: unused by remaining scanners.
 L.questKeywords = {}
-
 L.crowKeywords = { "crow", "kasugai" }
 
+--============================================================
+-- MATCHING
+--============================================================
 local function matchWord(haystack, needle)
     local s, e = string.find(haystack, needle, 1, true)
     if not s then return false end
@@ -112,7 +150,14 @@ end
 
 function L.isBoss(nm)
     if not nm then return false end
-    return matchAny(string.lower(nm), L.bosses)
+    local l = string.lower(nm)
+    for i = 1, #L.bosses do
+        local b = L.bosses[i]
+        if matchWord(l, b) then
+            return L.selectedBosses[b] ~= false
+        end
+    end
+    return false
 end
 
 function L.isWeapon(nm)
