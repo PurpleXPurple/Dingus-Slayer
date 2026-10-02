@@ -11,11 +11,12 @@ function F.init(Ctx)
     Cfg.FlyJitter      = Cfg.FlyJitter      or 3
     Cfg.FlyJitterHz    = Cfg.FlyJitterHz    or 1.7
     Cfg.FlyHeight      = Cfg.FlyHeight      or 6
-    Cfg.FlyMaxForce    = Cfg.FlyMaxForce    or 2e5
-    Cfg.FlyP           = Cfg.FlyP           or 5000
-    Cfg.FlyD           = Cfg.FlyD           or 1500
+    Cfg.FlyMaxForce    = Cfg.FlyMaxForce    or 1e5
+    Cfg.FlyP           = Cfg.FlyP           or 4000
+    Cfg.FlyD           = Cfg.FlyD           or 1200
     Cfg.FlyArriveDist  = Cfg.FlyArriveDist  or 10
     Cfg.FlyMinSpeed    = Cfg.FlyMinSpeed    or 40
+    Cfg.FlyDetachCam   = Cfg.FlyDetachCam   or false
 
     F.active = false
     F.bv = nil
@@ -32,6 +33,8 @@ function F.init(Ctx)
     F.avgSpeed = 0
     F.speedSamples = 0
     F.speedSum = 0
+    F._origCamSubject = nil
+    F._origPlatformStand = false
 
     local function scrub()
         local hrp = U.hrp()
@@ -39,31 +42,40 @@ function F.init(Ctx)
         for _, c in ipairs(hrp:GetChildren()) do
             if c:IsA("BodyVelocity") or c:IsA("BodyGyro")
                or c:IsA("BodyPosition") or c:IsA("BodyForce")
-               or c:IsA("LinearVelocity") or c:IsA("AlignOrientation") then
+               or c:IsA("LinearVelocity") or c:IsA("AlignOrientation")
+               or c:IsA("AlignPosition") then
                 c:Destroy()
             end
         end
     end
 
+    -- BodyVelocity + BodyGyro on HRP. Parent is Head only if Cfg says so.
+    -- Research shows anti-cheats scan HRP for BodyMovers; Head evades some.
     local function makeMovers()
         local hrp = U.hrp()
         if not hrp then return false end
         scrub()
 
+        local target = hrp
+        if Cfg.FlyParentHead then
+            local head = hrp.Parent and hrp.Parent:FindFirstChild("Head")
+            if head then target = head end
+        end
+
         local bv = Instance.new("BodyVelocity")
-        bv.Name = "DingusFlyBV"
+        bv.Name = "_dgbv"
         bv.MaxForce = Vector3.new(Cfg.FlyMaxForce, Cfg.FlyMaxForce, Cfg.FlyMaxForce)
         bv.P = Cfg.FlyP
         bv.Velocity = Vector3.zero
-        bv.Parent = hrp
+        bv.Parent = target
 
         local bg = Instance.new("BodyGyro")
-        bg.Name = "DingusFlyBG"
+        bg.Name = "_dbg"
         bg.MaxTorque = Vector3.new(4e5, 4e5, 4e5)
         bg.P = 8000
         bg.D = 900
         bg.CFrame = hrp.CFrame
-        bg.Parent = hrp
+        bg.Parent = target
 
         F.bv = bv
         F.bg = bg
@@ -77,12 +89,30 @@ function F.init(Ctx)
         F.hrp = nil
     end
 
+    local function saveCamera()
+        if not Cfg.FlyDetachCam then return end
+        local cam = workspace.CurrentCamera
+        if cam then
+            F._origCamSubject = cam.CameraSubject
+            local h = U.hum()
+            if h then cam.CameraSubject = h end
+        end
+    end
+
+    local function restoreCamera()
+        if not F._origCamSubject then return end
+        local cam = workspace.CurrentCamera
+        if cam then cam.CameraSubject = F._origCamSubject end
+        F._origCamSubject = nil
+    end
+
     function F.start()
         if F.active then return true end
         local h = U.hum()
         if not h then return false end
         if not makeMovers() then return false end
 
+        F._origPlatformStand = h.PlatformStand
         h.PlatformStand = true
         h.WalkSpeed = 0
 
@@ -99,6 +129,7 @@ function F.init(Ctx)
         F.speedSum = 0
         St.FlyActive = true
 
+        saveCamera()
         print("[Dingus][Fly] started")
         return true
     end
@@ -110,11 +141,12 @@ function F.init(Ctx)
 
         local h = U.hum()
         if h then
-            h.PlatformStand = false
+            h.PlatformStand = F._origPlatformStand or false
             h.WalkSpeed = 16
         end
 
         St.FlyActive = false
+        restoreCamera()
 
         if F.speedSamples > 0 then
             print(string.format("[Dingus][Fly] stopped — avg %.0f peak %.0f studs/s over %d samples",
@@ -191,13 +223,10 @@ function F.init(Ctx)
         end
 
         local speed = Cfg.FlySpeed
-        if F.stuckCount > 0 then
-            speed = speed + Cfg.FlySpeedBoost
-        end
-        if goalDist < 40 then
-            speed = math.max(Cfg.FlyMinSpeed, speed * (goalDist / 40))
-        end
+        if F.stuckCount > 0 then speed = speed + Cfg.FlySpeedBoost end
+        if goalDist < 40 then speed = math.max(Cfg.FlyMinSpeed, speed * (goalDist / 40)) end
 
+        -- Jitter stays. It's the main anti-detection mechanic in this module.
         F.jitterPhase = F.jitterPhase + dt * Cfg.FlyJitterHz * 6.28318
         local jitterX = math.sin(F.jitterPhase) * Cfg.FlyJitter
         local jitterY = math.cos(F.jitterPhase * 0.7) * Cfg.FlyJitter * 0.6
@@ -219,7 +248,10 @@ function F.init(Ctx)
             F.bg.CFrame = CFrame.new(myPos, horizontalLook)
         end
 
-        local measuredSpeed = hrp.AssemblyLinearVelocity.Magnitude
+        -- Speed telemetry. Clamped report — no raw Infinity in logs.
+        local measuredSpeed = 0
+        local okV, v = pcall(function() return hrp.AssemblyLinearVelocity.Magnitude end)
+        if okV and v and v == v and v < math.huge then measuredSpeed = v end
         F.speedSamples = F.speedSamples + 1
         F.speedSum = F.speedSum + measuredSpeed
         F.avgSpeed = F.speedSum / F.speedSamples
@@ -240,7 +272,7 @@ function F.init(Ctx)
     Ctx.Cleanup = Ctx.Cleanup or {}
     table.insert(Ctx.Cleanup, function() F.stop() end)
 
-    print("[Dingus][fly] initialized")
+    print("[Dingus][fly] v2 initialized")
 end
 
 return F
