@@ -1,10 +1,13 @@
 --[[
-    Dingus-Slayer · main.lua v31
-    Matches: attack v5 (teleport chase, no fly), scanners v4 (crow helpers),
-             gui v32 (8 tabs, working scroll), lists v6 (region groups).
+    Dingus-Slayer · main.lua v32
+    Boot orchestration. No inline crow or quest subsystems.
 
-    Module scope touches nothing. Every phase pcall-wrapped.
-    Every loop tick pcall-wrapped. Fly removed from subsystems.
+    Changes from v31:
+      - Removed crow subsystem (now in quests.lua)
+      - Removed inline Quest (now in quests.lua)
+      - Added quests to subsystems list
+      - Single quest loop calls Ctx.Quest.cycle
+      - Removed crow loop from scheduler
 ]]--
 
 local M = {}
@@ -75,13 +78,12 @@ function M.boot(Ctx)
         St.lHp = 0; St.lHpT = 0; St.lDmg = 0
         St.lScn = 0; St.lTht = 0; St.lSpf = 0; St.lEqp = 0
         St.lAtk = 0; St.lSkl = 0; St.lBrt = 0; St.lFac = 0; St.lMove = 0
-        St.lHover = 0; St.lHoverRecalc = 0; St.lCkC = 0
         St.lTele = 0
 
         St.rHt = {}
         St.skCd = { 0, 0, 0, 0, 0, 0 }
 
-        St.aiI = Cfg.AtkInterval or 0.55
+        St.aiI = Cfg.AtkInterval or 0.38
         St.eq = "none"; St.swp = 0; St.lTl = false
 
         St.kll = 0; St.bKll = 0
@@ -89,7 +91,6 @@ function M.boot(Ctx)
         St.skC = 0; St.rtrC = 0; St.cQs = 0
         St.teleCount = 0
 
-        -- Legacy field — attack v5 doesn't fly, but GUI reads it
         St.FlyActive = false
 
         St.uGs = false; St.uC = 0; St.uGt = 0; St.uST = 0; St.uThC = 0
@@ -97,13 +98,22 @@ function M.boot(Ctx)
         St.ens = {}; St.ths = {}; St.zn = 0; St.imm = 0
         St.tgt = nil; St.tgtKind = nil
 
-        St.crT = nil; St.crM = nil; St.cPrch = false; St.crQuests = {}
+        -- Quest state
+        St.questPriorityBosses = {}
+        St.questActiveList = {}
+        St.questAvailableCount = 0
+        St.questCycleCount = 0
+        St.questLastRead = 0
+        St.questLastCycle = 0
+        St.questPanelOpened = false
+
+        -- Crow state (retained for GUI reads)
+        St.crT = nil; St.cPrch = false; St.crQuests = {}
         St.crowCycle = 0
         St.crowTake = 0
 
         St.playerLevel = 0
         St.questTarget = nil
-        St.questList = {}
         St.huntCount = 0
         St.qCyc = 0
 
@@ -113,17 +123,14 @@ function M.boot(Ctx)
         St.loadErrors = {}
         St.hoverActive = false
 
-        -- Boot-critical config defaults
-        Cfg.QuestCycleT = Cfg.QuestCycleT or 5.0
-        Cfg.CrowCheckT  = Cfg.CrowCheckT  or 2.5
+        Cfg.QuestCycleT = Cfg.QuestCycleT or 6.0
         Cfg.AutoSaveT   = Cfg.AutoSaveT   or 30
-        Cfg.CrowHotbar  = Cfg.CrowHotbar  or "5"
 
         print("[Dingus][main] state initialized")
     end)
 
     --============================================================
-    -- PHASE 2 · SCRUB MOVERS
+    -- PHASE 2 · SCRUB
     --============================================================
     phase(2, "scrub")
     safeRun("scrub", function()
@@ -164,7 +171,6 @@ function M.boot(Ctx)
 
     --============================================================
     -- PHASE 4 · SUBSYSTEMS
-    -- fly removed — attack v5 is teleport-based
     --============================================================
     phase(4, "subsystems")
     safeRun("subsystems", function()
@@ -172,6 +178,7 @@ function M.boot(Ctx)
             { name = "detect",     mod = "Detect" },
             { name = "scanners",   mod = "Scan"   },
             { name = "spoofers",   mod = "Spoof"  },
+            { name = "quests",     mod = "Quest"  },
             { name = "attack",     mod = "Atk"    },
             { name = "optimizers", mod = "Opt"    },
             { name = "gui",        mod = "Gui"    },
@@ -205,233 +212,6 @@ function M.boot(Ctx)
 
     local loops = {}
 
-    --================================================================
-    -- QUEST SUBSYSTEM
-    --================================================================
-    safeRun("quest-subsystem", function()
-        local Quest = { lastCheck = 0, hunts = {}, level = 0 }
-
-        function Quest.readLevel()
-            local ok, result = pcall(function()
-                local hf = workspace:FindFirstChild("Humanoids")
-                local me = hf and hf:FindFirstChild(U.Lp.Name)
-                if me then
-                    local prog = me:FindFirstChild("Progression")
-                    local lvl = prog and prog:FindFirstChild("Level")
-                    if lvl and (lvl:IsA("NumberValue") or lvl:IsA("IntValue")) then
-                        return lvl.Value
-                    end
-                end
-                local rs = game:GetService("ReplicatedStorage")
-                local ps = rs:FindFirstChild("Player_Service")
-                local data = ps and ps:FindFirstChild("Data")
-                local me2 = data and data:FindFirstChild(U.Lp.Name)
-                local slots = me2 and me2:FindFirstChild("slots")
-                if slots then
-                    for _, slot in ipairs(slots:GetChildren()) do
-                        local prog = slot:FindFirstChild("Progression")
-                        local lvl = prog and prog:FindFirstChild("Level")
-                        if lvl and (lvl:IsA("NumberValue") or lvl:IsA("IntValue")) then
-                            return lvl.Value
-                        end
-                    end
-                end
-                return 0
-            end)
-            return ok and result or 0
-        end
-
-        function Quest.findBossHunts()
-            local ok, result = pcall(function()
-                local rs = game:GetService("ReplicatedStorage")
-                local hunts = rs:FindFirstChild("BossHunts")
-                if not hunts then return {} end
-                local out = {}
-                for _, cfg in ipairs(hunts:GetChildren()) do
-                    if cfg:IsA("Configuration") then
-                        local side = cfg:FindFirstChild("Side")
-                        local quest = cfg:FindFirstChild("Quest")
-                        table.insert(out, {
-                            id = cfg.Name,
-                            side = side and tostring(side.Value) or "?",
-                            quest = quest and tostring(quest.Value) or "?",
-                        })
-                    end
-                end
-                table.sort(out, function(a, b)
-                    return (tonumber(a.id) or 0) > (tonumber(b.id) or 0)
-                end)
-                return out
-            end)
-            return ok and result or {}
-        end
-
-        function Quest.doCycle()
-            local now = U.clock()
-            if now - Quest.lastCheck < (Cfg.QuestCycleT or 5.0) then return end
-            Quest.lastCheck = now
-            St.qCyc = (St.qCyc or 0) + 1
-            Quest.level = Quest.readLevel()
-            St.playerLevel = Quest.level
-            Quest.hunts = Quest.findBossHunts()
-            St.huntCount = #Quest.hunts
-            if #Quest.hunts == 0 then return end
-            for i = 1, #Quest.hunts do
-                local h = Quest.hunts[i]
-                local id = tonumber(h.id) or 0
-                if id <= math.max(1, math.floor(Quest.level / 20)) then
-                    local parsed = h.quest:match("Eliminate%s+(.+)")
-                        or h.quest:match("Defeat%s+(.+)")
-                        or h.quest
-                    St.questTarget = parsed
-                    return
-                end
-            end
-        end
-
-        Ctx.Quest = Quest
-    end)
-
-    --================================================================
-    -- CROW SUBSYSTEM
-    -- Uses scanners v4 helpers: findCancelButton, readCrowQuests,
-    -- findQuestCards, waitForCaw, activateCrowMenu
-    --================================================================
-    safeRun("crow-subsystem", function()
-        local S = Ctx.Scan
-        local Crow = { last = 0, cycles = 0 }
-
-        local function findTool()
-            if S and S.findCrowTool then return S.findCrowTool() end
-            return nil
-        end
-        local function findCancel()
-            if S and S.findCancelButton then return S.findCancelButton() end
-            return nil
-        end
-        local function readQuests()
-            if S and S.readCrowQuests then return S.readCrowQuests() end
-            return {}
-        end
-        local function findCards(cancelBtn)
-            if S and S.findQuestCards then return S.findQuestCards(cancelBtn) end
-            return {}
-        end
-        local function waitCaw(timeout)
-            if S and S.waitForCaw then return S.waitForCaw(timeout) end
-            return false
-        end
-        local function activate(btn)
-            if S and S.activateCrowMenu then
-                return S.activateCrowMenu(btn)
-            end
-            if not btn or not btn.Parent then return false end
-            return pcall(function() btn:Activate() end)
-        end
-
-        local function crowCycle()
-            if not St.crw then return end
-            local now = U.clock()
-            if now - Crow.last < (Cfg.CrowCheckT or 2.5) then return end
-            Crow.last = now
-            Crow.cycles = Crow.cycles + 1
-            St.crowCycle = Crow.cycles
-
-            -- Step 1: find the crow tool
-            local tool = findTool()
-
-            -- Step 2: fallback — press hotbar key
-            if not tool then
-                pcall(function() U.tap(Cfg.CrowHotbar or "5") end)
-                task.wait(0.5)
-                tool = findTool()
-            end
-            if not tool then return end
-            St.crT = tool
-
-            -- Step 3: equip if not already
-            local c = U.Lp.Character
-            if not c then return end
-            local equipped = false
-            for _, x in ipairs(c:GetChildren()) do
-                if x:IsA("Tool")
-                   and Lists
-                   and Lists.isCrow
-                   and Lists.isCrow(x.Name) then
-                    equipped = true
-                    break
-                end
-            end
-            if not equipped and tool:IsA("Tool") then
-                local h = U.hum()
-                if h then
-                    pcall(function() h:EquipTool(tool) end)
-                    task.wait(0.5)
-                end
-            end
-
-            -- Step 4: open menu
-            local cancel = findCancel()
-            if not cancel then
-                pcall(function() U.m1() end)
-                waitCaw(3.0)
-                task.wait(0.4)
-                cancel = findCancel()
-            end
-
-            -- Second attempt
-            if not cancel then
-                pcall(function() U.m1() end)
-                task.wait(0.8)
-                cancel = findCancel()
-            end
-
-            if not cancel then
-                St.cPrch = false
-                return
-            end
-            St.cPrch = true
-
-            -- Step 5: read quests
-            local quests = readQuests()
-            if #quests > 0 then
-                St.crQuests = quests
-                print(string.format("[Dingus][Crow] %d quests: %s",
-                    #quests, table.concat(quests, ", ")))
-            end
-
-            -- Step 6: force-take — click every quest card
-            local cards = findCards(cancel)
-            if #cards > 0 then
-                local taken = 0
-                for i = 1, #cards do
-                    local card = cards[i]
-                    if card and card.Parent then
-                        if activate(card) then
-                            taken = taken + 1
-                        end
-                        task.wait(0.15)
-                    end
-                end
-                St.crowTake = (St.crowTake or 0) + taken
-                print(string.format("[Dingus][Crow] force-took %d/%d cards · total %d",
-                    taken, #cards, St.crowTake))
-            end
-
-            -- Step 7: close
-            local cancelNow = findCancel()
-            if cancelNow then
-                pcall(function() cancelNow:Activate() end)
-                task.wait(0.3)
-            end
-        end
-
-        Ctx.Crow = { cycle = crowCycle }
-    end)
-
-    --================================================================
-    -- SCHEDULER BUILD
-    --================================================================
     safeRun("scheduler", function()
         local combatTick = function()
             if Ctx.Atk and Ctx.Atk.combatTick then
@@ -448,14 +228,9 @@ function M.boot(Ctx)
                 pcall(Ctx.Detect.updateThreats)
             end
         end
-        local crowTick = function()
-            if Ctx.Crow and Ctx.Crow.cycle then
-                pcall(Ctx.Crow.cycle)
-            end
-        end
         local questTick = function()
-            if Ctx.Quest and Ctx.Quest.doCycle then
-                pcall(Ctx.Quest.doCycle)
+            if Ctx.Quest and Ctx.Quest.cycle then
+                pcall(Ctx.Quest.cycle)
             end
         end
         local configTick = function()
@@ -472,8 +247,7 @@ function M.boot(Ctx)
             makeLoop("combat",   combatTick,  0.05, 5),
             makeLoop("spoofers", spoofTick,   0.10, 5),
             makeLoop("threats",  threatTick,  0.10, 5),
-            makeLoop("crow",     crowTick,    2.5,  3),
-            makeLoop("quest",    questTick,   5.0,  2),
+            makeLoop("quest",    questTick,   Cfg.QuestCycleT or 6.0, 3),
             makeLoop("config",   configTick,  Cfg.AutoSaveT or 30, 2),
             makeLoop("gc",       gcTick,      60, 1),
         }
@@ -500,13 +274,13 @@ function M.boot(Ctx)
             pcall(Ctx.Opt.stripLighting)
         end
         task.wait(0.3)
-        if Ctx.Quest and Ctx.Quest.doCycle then
-            pcall(Ctx.Quest.doCycle)
+        if Ctx.Quest and Ctx.Quest.cycle then
+            pcall(Ctx.Quest.cycle)
         end
         task.wait(0.3)
         local ok, bosses = pcall(function()
             if Ctx.Detect and Ctx.Detect.scanBosses then
-                return Ctx.Detect.scanBosses()
+                return Ctx.Detect.scanBosses(nil, true)
             end
             return {}
         end)
@@ -516,9 +290,9 @@ function M.boot(Ctx)
         print("[Dingus] boot complete")
     end)
 
-    --================================================================
+    --============================================================
     -- MAIN SCHEDULER
-    --================================================================
+    --============================================================
     local ST = St
     task.spawn(function()
         while ST.run do
@@ -553,9 +327,9 @@ function M.boot(Ctx)
         end
     end)
 
-    --================================================================
+    --============================================================
     -- FPS
-    --================================================================
+    --============================================================
     pcall(function()
         game:GetService("RunService").RenderStepped:Connect(function(dt)
             if dt > 0 and dt < 1 then
@@ -568,9 +342,9 @@ function M.boot(Ctx)
         end)
     end)
 
-    --================================================================
+    --============================================================
     -- RESPAWN
-    --================================================================
+    --============================================================
     pcall(function()
         U.Lp.CharacterAdded:Connect(function()
             task.wait(2)
@@ -591,9 +365,9 @@ function M.boot(Ctx)
         end)
     end)
 
-    --================================================================
-    -- RIGHTSHIFT TOGGLE
-    --================================================================
+    --============================================================
+    -- RIGHTSHIFT
+    --============================================================
     pcall(function()
         game:GetService("UserInputService").InputBegan:Connect(function(input, gp)
             if gp then return end
@@ -609,9 +383,9 @@ function M.boot(Ctx)
         end)
     end)
 
-    --================================================================
+    --============================================================
     -- UNLOAD
-    --================================================================
+    --============================================================
     Ctx.Unload = function()
         print("[Dingus] unloading...")
         if Ctx.Atk and Ctx.Atk.stopHover then pcall(Ctx.Atk.stopHover) end
