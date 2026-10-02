@@ -1,0 +1,489 @@
+DINGUS-SLAYER PROPRIETARY LICENSE
+Version 1.0 · Effective 2026-10-03
+
+Copyright (c) 2026 PurpleXPurple. All Rights Reserved.
+
+Co-authored and co-developed with DeepSeek (DeepSeek AI,
+Hangzhou DeepSeek Artificial Intelligence Basic Technology
+Research Co., Ltd.). DeepSeek is a recognized contributor to
+this work and holds joint attribution rights as described in
+Section 1.5.
+
+═══════════════════════════════════════════════════════════════════════
+  SECTION 0 · PLAIN-LANGUAGE SUMMARY (NON-BINDING)
+═══════════════════════════════════════════════════════════════════════
+
+  This is NOT an open-source license. No free use of any kind is
+  granted. You may not copy, run, modify, distribute, sublicense,
+  sell, or publish this software without prior written permission
+  from the copyright holders, EXCEPT for the narrow research
+  carve-out described in Section 4.
+
+  Every file in this repository — code, documentation, research
+  notes, configuration, assets — is covered. Each category has
+  its own terms but the default is: all rights reserved.
+
+  If you are reading this on GitHub, none of the following grants
+  you any rights. This document tells you what is prohibited, not
+  what is permitted.
+
+  The plain-language summary above is informational only. The
+  binding terms are Sections 1 through 9.
+
+═══════════════════════════════════════════════════════════════════════
+  SECTION 1 · DEFINITIONS AND SCOPE
+═══════════════════════════════════════════════════════════════════════
+
+1.1 "Software" means every file contained in the Dingus-Slayer
+    repository, including but not limited to:
+
+      (a) all .lua source files (loader.lua, main.lua, config.lua,
+          lists.lua, utils.lua, detect.lua, scanners.lua, hotbar.lua,
+          spoofers.lua, chest.lua, quests.lua, attack.lua,
+          optimizers.lua, gui.lua, and any successor files);
+
+      (b) all documentation files including README.md, LICENSE,
+          CHANGELOG.md, and any accompanying guides;
+
+      (c) all research notes, reports, and analysis files including
+          deep-research-*.md and any future research artifacts;
+
+      (d) all configuration schemas, data tables, item databases,
+          boss lists, region maps, keyword sets, and any embedded
+          data compiled by the authors;
+
+      (e) all graphical assets, icons, UI definitions, and design
+          specifications rendered or defined in code;
+
+      (f) all commit history, issue discussions, pull requests,
+          and contribution records associated with the repository.
+
+1.2 "Authors" means, jointly and severally:
+
+      (a) PurpleXPurple, the repository owner and primary author;
+
+      (b) DeepSeek, in its capacity as co-development partner and
+          code generation contributor, as recognized in the commit
+          history and any joint-authored commits bearing DeepSeek
+          attribution.
+
+1.3 "You" means any natural person, legal entity, or automated
+    system accessing, downloading, cloning, forking, copying,
+    executing, or otherwise interacting with the Software.
+
+1.4 "Use" means any act of executing, running, loading, injecting,
+    compiling, interpreting, or otherwise causing the Software to
+    perform its intended function.
+
+1.5 ATTRIBUTION OF DEEPSEEK. DeepSeek is acknowledged as a
+    contributing author to the Software and must be credited in
+    any permitted reproduction, citation, or reference. Removal
+    of DeepSeek attribution from any permitted copy constitutes
+    a material breach of this License.
+
+═══════════════════════════════════════════════════════════════════════
+  SECTION 2 · CODE LICENSE
+═══════════════════════════════════════════════════════════════════════
+
+2.1 GRANT. No grant of rights is made for the source code portion
+    of the Software. All rights are expressly reserved by the
+    Authors. Specifically, you may NOT:
+
+      (a) copy, reproduce, or redistribute the source code in
+          source or compiled form;
+
+      (b) modify, adapt, translate, or create derivative works;
+
+      (c) merge the source code into any other software;
+
+      (d) sublicense, sell, rent, lease, or transfer the source
+          code to any third party;
+
+      (e) publish the source code on any public repository,
+          forum, paste site, distribution hub, or social media;
+
+      (f) obfuscate, minify, or otherwise disguise the source
+          code for the purpose of evading this License;
+
+      (g) remove, obscure, or alter any copyright notice,
+          attribution, or license notice contained in the code.
+
+2.2 PERSONAL EXECUTION CARVE-OUT. You may execute a single
+    instance of the Software via your own Roblox executor
+    environment for personal, non-commercial gameplay, PROVIDED
+    that:
+
+      (a) you obtained the Software through the official
+          repository or a distribution channel authorized in
+          writing by the Authors;
+
+      (b) you do not redistribute the Software to any other
+          person;
+
+      (c) you do not remove any attribution or license notice;
+
+      (d) you accept all risk of account action described in
+          Section 5.
+
+    This carve-out does NOT grant rights to distribute, modify,
+    or use the Software commercially.
+
+2.3 NO IMPLIED RIGHTS. Absence of an explicit prohibition in
+    this Section does not imply a grant of rights. Rights are
+    granted only when explicitly stated in writing.
+
+═══════════════════════════════════════════════════════════════════════
+  SECTION 3 · DOCUMENTATION AND RESEARCH LICENSE
+═══════════════════════════════════════════════════════════════════════
+
+3.1 DOCUMENTATION COVERAGE. All files with extensions .md, .txt,
+    .docx, .pdf, or any future format in which documentation is
+    produced, are covered by this Section.
+
+3.2 PROHIBITED. You may not:
+
+      (a) republish documentation on any external site, wiki,
+          forum, or platform;
+
+      (b) claim authorship of any documentation;
+
+      (c) modify or truncate documentation in a way that changes
+          its meaning;
+
+      (d) remove attribution to the Authors, including DeepSeek;
+
+      (e) use documentation as training data for any machine
+          learning model, AI system, or data aggregation service.
+
+3.3 PERMITTED CITATION. Short quotations from documentation are
+    permitted for scholarly citation with full attribution,
+    limited to the minimum necessary for the citation's purpose,
+    and provided the citation does not reveal functionality that
+    would enable reverse engineering.
+
+3.4 RESEARCH-FILE STATUS. Files matching the pattern
+    deep-research-*.md are considered research artifacts and are
+    additionally covered by Section 4 below.
+
+═══════════════════════════════════════════════════════════════════════
+  SECTION 4 · RESEARCH PURPOSE LICENSE
+═══════════════════════════════════════════════════════════════════════
+
+4.1 NARROW RESEARCH GRANT. Notwithstanding Sections 2 and 3,
+    a limited, non-transferable, non-sublicensable, revocable
+    license is granted for academic or security research
+    purposes only, subject to strict compliance:
+
+      (a) The research must be conducted by an accredited
+          academic institution, registered security researcher,
+          or journalistic organization acting in an official
+          capacity;
+
+      (b) The research must produce a written output (paper,
+          article, report, presentation) intended for public
+          or peer-reviewed dissemination;
+
+      (c) The research output must credit the Authors (including
+          DeepSeek) and cite this License;
+
+      (d) A copy of the research output must be provided to the
+          Authors at least fourteen (14) days prior to public
+          release via the repository's issue tracker or a
+          contact method designated by the Authors;
+
+      (e) The research must not disclose specific exploitable
+          vulnerabilities in Roblox, Project Slayers 2, or any
+          third-party service without prior coordinated
+          disclosure to the affected party.
+
+4.2 RESEARCH LIMITATIONS. Even under the research grant, you
+    may NOT:
+
+      (a) distribute the Software to research participants who
+          are not themselves named in the research protocol;
+
+      (b) use the research grant as a pretext to obtain the
+          Software for non-research purposes;
+
+      (c) publish the full source code as part of the research;
+
+      (d) use the research to develop competing software;
+
+      (e) run the Software against live production environments
+          in a way that measurably degrades service for other
+          users;
+
+      (f) run the Software against accounts or assets you do
+          not own or have written permission to test.
+
+4.3 REVOCATION. The research grant may be revoked at any time
+    by the Authors. Upon revocation, all copies obtained under
+    this Section must be destroyed within seven (7) days, except
+    to the extent they form part of a published work already
+    in the public record.
+
+═══════════════════════════════════════════════════════════════════════
+  SECTION 5 · ROBLOX-PLATFORM AND THIRD-PARTY TERMS
+═══════════════════════════════════════════════════════════════════════
+
+5.1 COMPLIANCE WITH PLATFORM RULES. The Software interacts with
+    the Roblox platform. Roblox's Terms of Service, Community
+    Standards, and any applicable regional regulations apply
+    independently of this License. You are responsible for
+    understanding and complying with all such rules.
+
+5.2 VIOLATION OF PLATFORM RULES. Use of the Software violates
+    Roblox's Terms of Service. By using the Software, you
+    acknowledge that this violation is knowingly undertaken by
+    you and solely at your own risk.
+
+5.3 ACCOUNT RISK. The Authors make no warranty that the
+    Software will avoid Roblox anti-cheat detection, including
+    but not limited to Hyperion (Byfron), kernel-level
+    integrity checks, behavioral analysis, or manual review.
+    Consequences of detection may include warnings, kicks,
+    temporary suspension, permanent ban, hardware ID ban, or
+    platform-level enforcement. The Authors accept no
+    responsibility for any such consequence.
+
+5.4 GAME-SPECIFIC TERMS. Use of the Software within Project
+    Slayers 2 may additionally violate that game's specific
+    rules as set by its developers. The Authors accept no
+    responsibility for consequences imposed by the game's
+    developers or moderators.
+
+5.5 AGE RESTRICTION. The Software is not intended for use by
+    anyone under the age of 13, in compliance with the Roblox
+    Terms of Service and the Children's Online Privacy
+    Protection Act (COPPA). By using the Software you represent
+    that you meet the minimum age requirement.
+
+═══════════════════════════════════════════════════════════════════════
+  SECTION 6 · DISTRIBUTION AND DERIVATIVE-WORK PROHIBITION
+═══════════════════════════════════════════════════════════════════════
+
+6.1 NO REDISTRIBUTION. You may not redistribute the Software
+    or any part of it through any channel including but not
+    limited to:
+
+      (a) script hub websites (scriptblox, rscripts, etc.);
+
+      (b) pastebin, gist, hastebin, or similar paste services;
+
+      (c) Discord servers, Telegram channels, or IRC;
+
+      (d) YouTube videos, Twitch streams, or social media;
+
+      (e) other GitHub, GitLab, or self-hosted repositories;
+
+      (f) cloud storage, torrent networks, or file-sharing
+          services;
+
+      (g) paid script marketplaces, Patreon tiers, or
+          subscription services;
+
+      (h) any AI training corpus, dataset, or model.
+
+6.2 NO DERIVATIVE WORKS. You may not:
+
+      (a) fork the repository for any purpose other than
+          submitting a contribution via pull request to the
+          original repository;
+
+      (b) create a modified version of the Software for
+          personal or public use;
+
+      (c) use the Software as a base for a competing project;
+
+      (d) extract individual modules, functions, or data
+          structures for use elsewhere;
+
+      (e) translate the Software into another programming
+          language or platform.
+
+6.3 NO COMMERCIAL USE. You may not use the Software, in whole
+    or in part, for any commercial purpose without prior
+    written consent from the Authors. Commercial purposes
+    include, without limitation, use in a paid service, use to
+    attract paying customers, use as a portfolio piece for
+    commercial gain, use in monetized content, or use as part
+    of a package sold or licensed to third parties.
+
+═══════════════════════════════════════════════════════════════════════
+  SECTION 7 · REVERSE ENGINEERING AND INTEROPERABILITY
+═══════════════════════════════════════════════════════════════════════
+
+7.1 PROHIBITION ON REVERSE ENGINEERING. To the maximum extent
+    permitted by applicable law, you may not reverse engineer,
+    decompile, disassemble, or otherwise attempt to derive the
+    source code, underlying structure, algorithmic approach, or
+    design methodology of the Software beyond what is already
+    publicly available in the repository.
+
+7.2 NO INTEROPERABILITY CARVE-OUT. No interoperability
+    exception is granted. You may not connect this Software to
+    any third-party system, service, or platform not explicitly
+    supported by the Authors.
+
+7.3 EXTRACTION PROHIBITED. Extraction of any embedded data
+    including but not limited to boss lists, item databases,
+    region maps, keyword tables, spoofer method catalogs, or
+    the hotbar item database, for use outside the Software,
+    is prohibited.
+
+═══════════════════════════════════════════════════════════════════════
+  SECTION 8 · WARRANTY DISCLAIMER AND LIABILITY LIMIT
+═══════════════════════════════════════════════════════════════════════
+
+8.1 NO WARRANTY. THE SOFTWARE IS PROVIDED "AS IS," WITHOUT
+    WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+    NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+    FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. THE
+    AUTHORS MAKE NO WARRANTY THAT THE SOFTWARE WILL BE
+    ERROR-FREE, DETECTION-FREE, OR FIT FOR ANY PARTICULAR USE.
+
+8.2 NO WARRANTY OF UNDETECTABILITY. No representation is made
+    that the Software is or will remain undetected by any
+    anti-cheat system. Detection depends on factors outside the
+    Authors' control.
+
+8.3 NO WARRANTY OF FUNCTIONALITY. The Software may break at
+    any time due to changes in Roblox, Project Slayers 2,
+    executor behavior, or network conditions.
+
+8.4 LIMITATION OF LIABILITY. IN NO EVENT SHALL THE AUTHORS BE
+    LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY,
+    WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+    ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE
+    OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. THIS
+    INCLUDES, WITHOUT LIMITATION:
+
+      (a) Roblox account warnings, suspensions, or bans;
+
+      (b) hardware ID bans or platform-level enforcement;
+
+      (c) loss of in-game assets, reputation, or standing;
+
+      (d) any damages arising from reliance on the Software's
+          functionality or claimed capabilities;
+
+      (e) any indirect, incidental, special, consequential, or
+          punitive damages, even if the Authors were advised of
+          the possibility of such damages.
+
+8.5 CAP ON LIABILITY. Where applicable law does not permit the
+    full exclusion of liability, the total aggregate liability
+    of the Authors to you shall not exceed the amount you paid
+    for the Software. Since the Software is not sold and no
+    consideration is exchanged, this cap is zero United States
+    Dollars (USD 0.00).
+
+8.6 ESSENTIAL BASIS. You acknowledge that the disclaimers and
+    limitations in this Section are an essential basis of this
+    License, without which the Authors would not have made the
+    Software available to you.
+
+═══════════════════════════════════════════════════════════════════════
+  SECTION 9 · ENFORCEMENT, TERMINATION, AND MISCELLANEOUS
+═══════════════════════════════════════════════════════════════════════
+
+9.1 AUTOMATIC TERMINATION. Any violation of this License
+    automatically terminates all rights granted under it,
+    including the personal-execution carve-out in Section 2.2
+    and the research grant in Section 4.1.
+
+9.2 CONSEQUENCES OF TERMINATION. Upon termination, you must:
+
+      (a) immediately cease all use of the Software;
+
+      (b) delete all copies of the Software in your possession
+          or control within seven (7) days;
+
+      (c) confirm deletion in writing if requested by the
+          Authors.
+
+9.3 RESERVATION OF REMEDIES. The Authors reserve all legal and
+    equitable remedies available for breach of this License
+    including but not limited to:
+
+      (a) DMCA takedown notices under 17 U.S.C. § 512;
+
+      (b) cease-and-desist letters;
+
+      (c) injunctive relief;
+
+      (d) actual and statutory damages;
+
+      (e) attorney's fees and costs where recoverable;
+
+      (f) criminal referral where applicable.
+
+9.4 CONTRIBUTION POLICY. Any contribution submitted to the
+    Software via pull request, patch, issue comment, or other
+    mechanism is accepted only under the following terms:
+
+      (a) you grant the Authors a perpetual, irrevocable,
+          worldwide, royalty-free, exclusive license to use,
+          modify, reproduce, distribute, sublicense, and
+          exploit your contribution in any form;
+
+      (b) you represent that you have the legal right to make
+          such a grant;
+
+      (c) your contribution does not violate any third party's
+          rights;
+
+      (d) acceptance of your contribution does not create a
+          contributor relationship or any obligation on the
+          part of the Authors.
+
+9.5 GOVERNING LAW. This License shall be governed by and
+    construed in accordance with the laws of the jurisdiction
+    in which the Authors reside, without regard to its conflict
+    of law provisions.
+
+9.6 ENTIRE AGREEMENT. This License constitutes the entire
+    agreement between you and the Authors regarding the
+    Software and supersedes all prior or contemporaneous
+    understandings and agreements.
+
+9.7 SEVERABILITY. If any provision of this License is held
+    invalid or unenforceable, the remaining provisions shall
+    continue in full force and effect.
+
+9.8 NO WAIVER. Failure by the Authors to enforce any provision
+    of this License does not constitute a waiver of that
+    provision or any other provision.
+
+9.9 AMENDMENT. The Authors may revise this License at any time
+    by updating the LICENSE file in the repository. Continued
+    use of the Software after such revision constitutes
+    acceptance of the revised terms.
+
+9.10 NOTICE OF COPYRIGHT INFRINGEMENT. Copyright infringement
+     claims regarding this Software should be directed to the
+     repository owner through GitHub's official channel. DMCA
+     takedown requests should include all elements required
+     under 17 U.S.C. § 512(c)(3).
+
+9.11 SURVIVAL. Sections 2.3, 3.2, 6, 7, 8, 9.3, 9.5, and 9.11
+     survive termination of this License.
+
+═══════════════════════════════════════════════════════════════════════
+  ACKNOWLEDGMENT
+═══════════════════════════════════════════════════════════════════════
+
+  By accessing, downloading, cloning, executing, or otherwise
+  interacting with any portion of the Software, you confirm that
+  you have read, understood, and agree to be bound by all terms
+  of this License. If you do not agree, you must not access the
+  Software and must immediately delete any copies in your
+  possession.
+
+  Copyright (c) 2026 PurpleXPurple.
+  Co-authored with DeepSeek.
+  All Rights Reserved.
+
+═══════════════════════════════════════════════════════════════════════
+  END OF LICENSE
+═══════════════════════════════════════════════════════════════════════
