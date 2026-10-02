@@ -1,19 +1,25 @@
 --[[
-    Dingus-Slayer · attack.lua v5
-    Teleport-based chase. Fly path removed entirely.
+    Dingus-Slayer · attack.lua v6
+    Combat rewrite. Addresses every /audit finding from v5.
 
-    Chase strategy:
-      - Target within AtkRange: strike
-      - Target beyond AtkRange: teleport behind, facing forward
-      - Teleport is rate-limited (TeleportCd), jittered, and blended
-        with a random walk command so position history looks normal
+    Fixes:
+      C1  Safe CFrame construction (guaranteed look-at separation)
+      C2  Real combo chaining (multi-click M1 per strike)
+      C3  Telegraph reaction (auto-dodge Q, block hold on incoming)
+      C4  Behind direction from player→boss vector, not boss LookVector
+      H1  In-range chase (re-face + reposition when boss moves)
+      H3  Ultimate gating (skills 5 & 6 held for high-value windows)
+      M2  Combo index resets per-target, not per-timeout
+      M4  Boss attack animation read via detect.isEnemyAttacking
 
-    Config keys added (defaulted inline):
-      TeleportCd          seconds between teleport hops
-      TeleportBehindDist  studs behind boss to land
-      TeleportHeight      studs above target Y
-      TeleportJitter      random XY jitter per hop
-      TeleportWalkBlend   chance to send a small walk command post-hop
+    State machine:
+      IDLE, TELEPORT, CLOSE, STRIKE, PUNISH, BREAK, DODGE, BLOCK,
+      RETREAT, DEAD, NO_CHAR
+
+    Core loop:
+      1. Threat evaluation (dodge / block / strike / break / punish)
+      2. Positional management (teleport out-of-range, chase in-range)
+      3. Attack execution (chained M1s, gated skills)
 ]]--
 
 local A = {}
@@ -31,9 +37,9 @@ function A.init(Ctx)
     --============================================================
     Cfg.AtkRange       = Cfg.AtkRange       or 8
     Cfg.AtkInterval    = Cfg.AtkInterval    or 0.55
-    Cfg.AtkIntMin      = Cfg.AtkIntMin      or 0.35
-    Cfg.AtkIntMax      = Cfg.AtkIntMax      or 0.75
-    Cfg.StunAtkInt     = Cfg.StunAtkInt     or 0.28
+    Cfg.AtkIntMin      = Cfg.AtkIntMin      or 0.28
+    Cfg.AtkIntMax      = Cfg.AtkIntMax      or 0.80
+    Cfg.StunAtkInt     = Cfg.StunAtkInt     or 0.24
     Cfg.HitWindow      = Cfg.HitWindow      or 12
     Cfg.RunSpeed       = Cfg.RunSpeed       or 16
 
@@ -47,17 +53,27 @@ function A.init(Ctx)
 
     Cfg.FKeyMode       = Cfg.FKeyMode       or "auto"
     Cfg.AutoBlock      = Cfg.AutoBlock      ~= false
-    Cfg.BlockHoldTTL   = Cfg.BlockHoldTTL   or 0.6
+    Cfg.BlockHoldTTL   = Cfg.BlockHoldTTL   or 0.4
     Cfg.BlockProbeWait = Cfg.BlockProbeWait or 0.15
 
     -- Teleport
-    Cfg.TeleportCd         = Cfg.TeleportCd         or 0.22
-    Cfg.TeleportBehindDist = Cfg.TeleportBehindDist or 6
+    Cfg.TeleportCd         = Cfg.TeleportCd         or 0.25
+    Cfg.TeleportBehindDist = Cfg.TeleportBehindDist or 7
     Cfg.TeleportHeight     = Cfg.TeleportHeight     or 3
     Cfg.TeleportJitter     = Cfg.TeleportJitter     or 2
-    Cfg.TeleportWalkBlend  = Cfg.TeleportWalkBlend  or 0.4
+    Cfg.TeleportWalkBlend  = Cfg.TeleportWalkBlend  or 0.5
+    Cfg.TeleportStrike      = Cfg.TeleportStrike      or 4.5   -- prefer landing inside strike range
 
-    Cfg.EquipDebugN    = Cfg.EquipDebugN    or 3
+    -- Combat
+    Cfg.ComboClicks        = Cfg.ComboClicks        or 3
+    Cfg.ComboClickGap      = Cfg.ComboClickGap      or 0.08
+    Cfg.ComboInterChainGap = Cfg.ComboInterChainGap or 0.18
+    Cfg.DodgeCooldown      = Cfg.DodgeCooldown      or 0.8
+    Cfg.InRangeChaseT      = Cfg.InRangeChaseT      or 0.25
+    Cfg.UltimateHPGate     = Cfg.UltimateHPGate     or 0.30
+    Cfg.TelegraphWindow    = Cfg.TelegraphWindow    or 0.35
+
+    Cfg.EquipDebugN    = Cfg.EquipDebugN    or 2
 
     --============================================================
     -- STATE
@@ -65,32 +81,50 @@ function A.init(Ctx)
     St.rHt = {}
     St.skCd = { 0, 0, 0, 0, 0, 0 }
     St.aiI = Cfg.AtkInterval
-    St.lAtk = 0; St.lSkl = 0; St.lEqp = 0; St.lBrt = 0
-    St.lFac = 0; St.lMoveLog = 0; St.lTele = 0
-    St.eq = "none"; St.lTl = false
+
+    St.lAtk = 0
+    St.lSkl = 0
+    St.lEqp = 0
+    St.lBrt = 0
+    St.lDodge = 0
+    St.lTele = 0
+    St.lInRangeChase = 0
+    St.lTelegraph = 0
+    St.lMoveLog = 0
+
+    St.eq = "none"
     St.cbtS = "IDLE"
-    St.lastPos = nil; St.lastPosTime = 0
+    St.lastPos = nil
+    St.lastPosTime = 0
     St.stuckWarnings = 0
-    St.lastComboTime = 0; St.comboIndex = 0
     St.swapPending = false
     St.equipDebugLeft = Cfg.EquipDebugN
 
+    -- Combo state (per-target)
+    St.comboIndex = 0
+    St.comboTargetName = nil
+    St.comboActive = false
+
+    -- F-mode
     St.fIsBlock = false
     St.fModeResolved = false
     St.blocking = false
     St.blockHoldUntil = 0
 
-    -- Teleport counters
+    -- Teleport
     St.teleCount = 0
+    St.teleFail = 0
 
-    local SK_KEYS = Cfg.SkillKeys
-    local SK_CDS  = Cfg.SkillCooldowns
+    -- Dodge
+    St.dodgeCount = 0
+
+    -- Threat state
+    St.lastBossAttacking = false
+    St.threatSince = 0
+
+    local SK_KEYS  = Cfg.SkillKeys
+    local SK_CDS   = Cfg.SkillCooldowns
     local ROTATION = Cfg.RotationOrder
-
-    local COMBO_AIR       = { "m1", "m2", "m1", "m2", "m1" }
-    local COMBO_SPECIAL_A = { "m2", "m2", "m1", "m2", "m1" }
-    local COMBO_SPECIAL_B = { "m1", "m1", "m2", "m1", "m2" }
-    local COMBO_RESET_TIME = 1.2
 
     --============================================================
     -- MOVER SCRUB
@@ -121,6 +155,9 @@ function A.init(Ctx)
         St.blocking = false
         St.blockHoldUntil = 0
         St.fModeResolved = false
+        St.comboIndex = 0
+        St.comboActive = false
+        St.comboTargetName = nil
     end)
 
     --============================================================
@@ -171,11 +208,9 @@ function A.init(Ctx)
         local h = U.hum()
         if not h or h.Health <= 0 then return nil end
         if St.cbt then return nil end
-
         local baseWS = h.WalkSpeed
         U.keyDown("F")
         task.wait(Cfg.BlockProbeWait)
-
         local isBlock = false
         if readBlockAttribute() then isBlock = true end
         if not isBlock and readBlockAnim() then isBlock = true end
@@ -239,12 +274,6 @@ function A.init(Ctx)
 
         local h = U.hum(); if not h then return end
         local current = equippedTool()
-        local debugThis = St.equipDebugLeft > 0
-        if debugThis then
-            St.equipDebugLeft = St.equipDebugLeft - 1
-            print(string.format("[Dingus][Equip] current=%s",
-                current and current.Name or "nil"))
-        end
 
         if current and L.isWeapon(current.Name) then
             St.eq = current.Name
@@ -275,6 +304,10 @@ function A.init(Ctx)
     --============================================================
     -- SKILLS
     --============================================================
+    local function skillIsUltimate(idx)
+        return idx >= 5
+    end
+
     local function fireSkill(idx)
         local now = U.clock()
         if now < St.skCd[idx] then return false end
@@ -284,50 +317,53 @@ function A.init(Ctx)
         return true
     end
 
-    local function fireRotation()
-        for _, i in ipairs(ROTATION) do
-            if not (St.fIsBlock and SK_KEYS[i] == "F") then
-                if fireSkill(i) then return true end
-            end
-        end
-    end
+    --============================================================
+    -- STRIKE · chained M1 combo
+    --============================================================
+    -- C2/C4 fix: fire N clicks with tight gap, wait interChain gap,
+    -- occasionally chain a second burst. This triggers the game's
+    -- internal combo progression instead of isolated first-attacks.
+    local function doChainedStrike(burstCount)
+        burstCount = burstCount or Cfg.ComboClicks
+        local gap = Cfg.ComboClickGap
 
-    --============================================================
-    -- STRIKE
-    --============================================================
-    local function m1() U.m1() end
-    local function m2() U.m2() end
+        if St.blocking then releaseBlock() end
+
+        task.spawn(function()
+            for i = 1, burstCount do
+                U.m1()
+                if i < burstCount then task.wait(gap) end
+            end
+        end)
+    end
 
     local function strike(t)
         St.aAt = (St.aAt or 0) + 1
         local hpBefore = t.hm.Health
 
-        if St.blocking then releaseBlock() end
-
-        local now = U.clock()
-        if now - St.lastComboTime > COMBO_RESET_TIME then
+        -- Reset combo when target changes
+        if St.comboTargetName ~= t.ch.Name then
+            St.comboTargetName = t.ch.Name
             St.comboIndex = 0
         end
-        St.lastComboTime = now
         St.comboIndex = St.comboIndex + 1
 
-        local combo
-        if t.d and t.d > 15 then
-            combo = COMBO_AIR
-        elseif math.random() < 0.5 then
-            combo = COMBO_SPECIAL_A
-        else
-            combo = COMBO_SPECIAL_B
+        -- Chain count escalates with combo index, resets per target
+        local chain = 3
+        if St.comboIndex % 5 == 0 then
+            chain = 4  -- heavier finisher
         end
 
-        local step = combo[((St.comboIndex - 1) % #combo) + 1]
-        if step == "m2" then m2() else m1() end
+        if St.blocking then releaseBlock() end
+        doChainedStrike(chain)
 
+        -- Tool activation for any weapon-specific ability
         local tool = equippedTool()
         if tool then pcall(function() tool:Activate() end) end
 
+        -- Hit verification
         task.spawn(function()
-            task.wait(0.25)
+            task.wait(0.30)
             if not (t and t.hm and t.hm.Parent) then return end
             local hit = t.hm.Health < hpBefore
             table.insert(St.rHt, hit)
@@ -348,22 +384,80 @@ function A.init(Ctx)
         end
         local rate = hits / #St.rHt
         if rate > 0.7 then
-            St.aiI = math.max(Cfg.AtkIntMin, St.aiI - 0.02)
+            St.aiI = math.max(Cfg.AtkIntMin, St.aiI - 0.03)
         elseif rate < 0.3 then
-            St.aiI = math.min(Cfg.AtkIntMax, St.aiI + 0.02)
+            St.aiI = math.min(Cfg.AtkIntMax, St.aiI + 0.03)
         end
         return St.aiI
     end
 
+    --============================================================
+    -- SKILL ROTATION (with ultimate gating)
+    --============================================================
+    local function fireRotation(t, hpFrac)
+        for _, i in ipairs(ROTATION) do
+            if St.fIsBlock and SK_KEYS[i] == "F" then
+                -- skip F if block
+            else
+                -- H3 fix: hold ultimate-tier skills (index 5+) unless
+                -- the boss is stunned, HP is low, or we have breathing room
+                local canFire = true
+                if skillIsUltimate(i) then
+                    local stunned = t and D.isEnemyStunned and D.isEnemyStunned(t)
+                    local bossLow = hpFrac and hpFrac < Cfg.UltimateHPGate
+                    local notThreatened = (St.imm or 0) == 0
+                    if not (stunned or bossLow or notThreatened) then
+                        canFire = false
+                    end
+                end
+                if canFire and fireSkill(i) then return true end
+            end
+        end
+    end
+
+    --============================================================
+    -- FACE TARGET (safe)
+    --============================================================
     local function faceTarget(r, targetPos)
         pcall(function()
+            local dx = targetPos.X - r.Position.X
+            local dz = targetPos.Z - r.Position.Z
+            if dx*dx + dz*dz < 0.04 then return end  -- too close, skip
             r.CFrame = CFrame.new(r.Position,
                 Vector3.new(targetPos.X, r.Position.Y, targetPos.Z))
         end)
     end
 
     --============================================================
-    -- TELEPORT CHASE
+    -- SAFE CFrame CONSTRUCTION (C1 fix)
+    --============================================================
+    local function safeCFrame(dest, lookAtPos)
+        -- Guarantee horizontal separation so the look vector isn't
+        -- near-zero (which normalizes to NaN and drops the player
+        -- into the void baseplate).
+        local dx = lookAtPos.X - dest.X
+        local dz = lookAtPos.Z - dest.Z
+        local horizSq = dx*dx + dz*dz
+
+        if horizSq < 0.25 then
+            -- Horizontal components cancel. Force a separation using
+            -- an arbitrary perpendicular.
+            dx = 1
+            dz = 0
+            lookAtPos = Vector3.new(dest.X + dx, lookAtPos.Y, dest.Z + dz)
+        end
+
+        local ok, cf = pcall(function()
+            return CFrame.new(dest, Vector3.new(lookAtPos.X, dest.Y, lookAtPos.Z))
+        end)
+        if ok and cf then return cf, nil end
+
+        -- Fallback: position only, no orientation
+        return CFrame.new(dest), "look-at build failed"
+    end
+
+    --============================================================
+    -- TELEPORT CHASE (C4 fix — direction from player→boss)
     --============================================================
     local function teleportChase(t, tPos)
         local r = U.hrp()
@@ -373,43 +467,58 @@ function A.init(Ctx)
         if now - St.lTele < Cfg.TeleportCd then return false end
         St.lTele = now
 
+        local myPos = r.Position
         local targetPos = tPos.Position
-        local bossLook = tPos.CFrame.LookVector
 
-        -- Land behind the boss at configured height
-        local behindOffset = -bossLook * Cfg.TeleportBehindDist
-        local aboveOffset = Vector3.new(0, Cfg.TeleportHeight, 0)
+        -- C4: compute the approach vector FROM the player TO the boss.
+        -- Land between the player's current position and the boss,
+        -- offset slightly to the side for a flank angle.
+        local approach = targetPos - myPos
+        local flatApproach = Vector3.new(approach.X, 0, approach.Z)
+        if flatApproach.Magnitude < 0.1 then
+            flatApproach = Vector3.new(1, 0, 0)
+        end
+        flatApproach = flatApproach.Unit
 
-        -- Jitter — small enough to look like movement, big enough to
-        -- break exact-repeat position vectors
+        -- Side vector (perpendicular, horizontal)
+        local side = Vector3.new(-flatApproach.Z, 0, flatApproach.X)
+
+        -- Destination: in front of boss relative to us, at strike range,
+        -- slightly to the side so we're not perfectly aligned with the
+        -- boss's forward (avoids head-on face-off).
+        local sideBias = (math.random() - 0.5) * 3
         local jx = (math.random() - 0.5) * Cfg.TeleportJitter
-        local jy = (math.random() - 0.5) * (Cfg.TeleportJitter * 0.3)
         local jz = (math.random() - 0.5) * Cfg.TeleportJitter
 
-        local dest = targetPos + behindOffset + aboveOffset
-            + Vector3.new(jx, jy, jz)
+        local dest = targetPos
+            - flatApproach * Cfg.TeleportStrike
+            + side * sideBias
+            + Vector3.new(jx, Cfg.TeleportHeight, jz)
 
-        local face = Vector3.new(targetPos.X, dest.Y, targetPos.Z)
+        -- Keep us at a sane Y above the boss
+        if dest.Y < targetPos.Y + 1 then
+            dest = Vector3.new(dest.X, targetPos.Y + Cfg.TeleportHeight, dest.Z)
+        end
 
-        local ok = pcall(function()
-            r.CFrame = CFrame.new(dest, face)
-        end)
+        -- Look at the boss
+        local cf, err = safeCFrame(dest, targetPos)
+        local ok = pcall(function() r.CFrame = cf end)
+        if not ok then
+            St.teleFail = St.teleFail + 1
+            return false
+        end
 
-        if not ok then return false end
-
-        -- Blend: post-hop velocity that doesn't look like landing
-        -- from a teleport. Random small XY, slightly negative Y so
-        -- it reads as "landed and settled".
+        -- Kill any residual velocity so the server sees a settled state
         pcall(function()
             r.AssemblyLinearVelocity = Vector3.new(
-                (math.random() - 0.5) * 4,
-                -5 - math.random() * 3,
-                (math.random() - 0.5) * 4
+                (math.random() - 0.5) * 3,
+                -4 - math.random() * 3,
+                (math.random() - 0.5) * 3
             )
         end)
 
-        -- Blend: occasional tiny walk command so MoveDirection in
-        -- the next tick isn't zero for every hop
+        -- Blend: occasionally issue a small walk so post-hop we don't
+        -- always have a frozen MoveDirection
         if math.random() < Cfg.TeleportWalkBlend then
             local h = U.hum()
             if h then
@@ -424,6 +533,57 @@ function A.init(Ctx)
         end
 
         St.teleCount = St.teleCount + 1
+        return true
+    end
+
+    --============================================================
+    -- IN-RANGE CHASE (H1 fix)
+    --============================================================
+    -- When the boss moves during melee, we need to stay glued to the
+    -- strike radius. Re-face every tick; if the boss slides away,
+    -- nudge ourselves back into range with a short teleport.
+    local function inRangeChase(t, tPos, myPos)
+        local now = U.clock()
+        if now - St.lInRangeChase < Cfg.InRangeChaseT then return end
+        St.lInRangeChase = now
+
+        local r = U.hrp()
+        if not r then return end
+
+        local myH = U.hum()
+        if myH then
+            myH.AutoRotate = true
+        end
+
+        faceTarget(r, tPos.Position)
+
+        -- If boss has slid beyond AtkRange, do a fast short hop
+        local dist = U.xzDist(myPos, tPos.Position)
+        if dist > Cfg.AtkRange + 1.5 then
+            local approach = tPos.Position - myPos
+            local flat = Vector3.new(approach.X, 0, approach.Z)
+            if flat.Magnitude > 0.1 then
+                flat = flat.Unit
+            end
+            local hopDist = dist - Cfg.TeleportStrike
+            if hopDist > 0.5 and hopDist < 20 then
+                local dest = myPos + flat * hopDist
+                dest = Vector3.new(dest.X, myPos.Y, dest.Z)
+                local cf = safeCFrame(dest, tPos.Position)
+                pcall(function() r.CFrame = cf end)
+            end
+        end
+    end
+
+    --============================================================
+    -- DODGE (C3 fix)
+    --============================================================
+    local function tryDodge()
+        local now = U.clock()
+        if now - St.lDodge < Cfg.DodgeCooldown then return false end
+        St.lDodge = now
+        St.dodgeCount = St.dodgeCount + 1
+        U.tap("Q")
         return true
     end
 
@@ -488,6 +648,8 @@ function A.init(Ctx)
         St.tgt = tgt
         St.tgtKind = kind
         if tgt then
+            St.comboTargetName = nil
+            St.comboIndex = 0
             print(string.format("[Dingus] target %s (%s) @%.0f",
                 tgt.ch.Name, kind, tgt.d))
         end
@@ -571,14 +733,20 @@ function A.init(Ctx)
         St.lHp = h.Health
         St.lHpT = now
 
-        if now - St.lBrt > 2.5 then St.lBrt = now; U.tap("L") end
+        -- Passive breathing
+        if now - St.lBrt > 2.5 then
+            St.lBrt = now
+            U.tap("L")
+        end
 
+        -- Low HP → retreat
         if St.rtr and hpFrac < Cfg.RetreatHP and not retreatRunning then
             local nearest = St.ths and St.ths[1]
             if nearest then startRetreat(nearest.rp.Position); return end
         end
         if retreatRunning then return end
 
+        -- Acquire target
         if not St.tgt or not St.tgt.ch.Parent or St.tgt.hm.Health <= 0 then
             if St.tgt then
                 St.kll = (St.kll or 0) + 1
@@ -586,6 +754,8 @@ function A.init(Ctx)
                 print(string.format("[Dingus] killed %s (%d)",
                     St.tgt.ch.Name, St.bKll))
                 St.tgt = nil
+                St.comboIndex = 0
+                St.comboTargetName = nil
                 releaseBlock()
                 if D.invalidate then D.invalidate() end
             end
@@ -601,19 +771,44 @@ function A.init(Ctx)
         local tPos = t.ch:FindFirstChild("HumanoidRootPart")
         if not tPos then St.tgt = nil; return end
 
-        local dist = U.xzDist(r.Position, tPos.Position)
+        local myPos = r.Position
+        local dist = U.xzDist(myPos, tPos.Position)
         t.d = dist
 
         --========================================================
-        -- LONG RANGE · TELEPORT
+        -- TELEGRAPH EVALUATION (C3 fix)
+        --========================================================
+        local imminent = (St.imm or 0) > 0
+        local bossAttacking = false
+        if D.isEnemyAttacking then
+            bossAttacking = D.isEnemyAttacking(t)
+        end
+        -- Also read the threat timing
+        if imminent and not St.lastBossAttacking then
+            St.threatSince = now
+        end
+        St.lastBossAttacking = imminent or bossAttacking
+
+        --========================================================
+        -- LONG RANGE → TELEPORT
         --========================================================
         if dist > Cfg.AtkRange then
             St.cbtS = "TELEPORT"
             releaseBlock()
+
+            -- Don't teleport if a boss attack is mid-wind-up — the
+            -- teleport animation won't save us. Dodge first.
+            if (imminent or bossAttacking) and (now - St.lDodge > Cfg.DodgeCooldown) then
+                St.cbtS = "DODGE"
+                tryDodge()
+                task.wait(0.05)
+                return
+            end
+
             teleportChase(t, tPos)
             if St.skl and now - St.lSkl > 2.0 then
                 St.lSkl = now
-                fireRotation()
+                fireRotation(t, hpFrac)
             end
             return
         end
@@ -621,20 +816,46 @@ function A.init(Ctx)
         --========================================================
         -- IN RANGE
         --========================================================
+        -- Maintain alignment with the boss
+        inRangeChase(t, tPos, myPos)
+
         local blocking = D.isEnemyBlocking(t)
         local stunned = D.isEnemyStunned(t)
+        local timeSinceThreat = now - St.threatSince
 
-        faceTarget(r, tPos.Position)
+        --========================================================
+        -- TELEGRAPH REACTION (C3)
+        --========================================================
+        -- Priority: dodge > block > strike
+        -- 1. If a boss attack is imminent and we can dodge, do it
+        -- 2. Otherwise if we can block (F is block), hold F
+        -- 3. Otherwise attack
 
+        local canDodge = (now - St.lDodge) > Cfg.DodgeCooldown
+        local telegraphWindow = timeSinceThreat < Cfg.TelegraphWindow
+
+        if (imminent or bossAttacking) and canDodge and telegraphWindow then
+            St.cbtS = "DODGE"
+            releaseBlock()
+            tryDodge()
+            return
+        end
+
+        --========================================================
+        -- AUTO-BLOCK
+        --========================================================
         local shouldBlock = false
         if St.fIsBlock and Cfg.AutoBlock then
-            local threatNow = (St.imm or 0) > 0
+            local threatNow = imminent or bossAttacking
             if threatNow then
                 St.blockHoldUntil = now + Cfg.BlockHoldTTL
             end
             shouldBlock = threatNow or (now < (St.blockHoldUntil or 0))
         end
 
+        --========================================================
+        -- PUNISH · BREAK_BLOCK · ATTACK
+        --========================================================
         if stunned and St.stunPun then
             St.cbtS = "PUNISH"
             releaseBlock()
@@ -642,41 +863,49 @@ function A.init(Ctx)
                 St.lAtk = now
                 strike(t)
             end
-            if St.skl and now - St.lSkl > 0.3 then
+            -- Punish window: fire heavy skills liberally
+            if St.skl and now - St.lSkl > 0.25 then
                 St.lSkl = now
-                fireRotation()
+                fireRotation(t, hpFrac)
             end
             return
         end
 
         if blocking then
-            St.cbtS = "BREAK_BLOCK"
+            St.cbtS = "BREAK"
             releaseBlock()
-            if St.skl and now - St.lSkl > 0.5 then
+            if St.skl and now - St.lSkl > 0.4 then
                 St.lSkl = now
-                fireRotation()
+                fireRotation(t, hpFrac)
             end
-            if now - St.lAtk > St.aiI * 1.5 then
+            if now - St.lAtk > St.aiI * 1.2 then
                 St.lAtk = now
                 strike(t)
             end
             return
         end
 
-        St.cbtS = "ATTACK"
-        if shouldBlock and (now - St.lAtk < currentInterval() * 0.8) then
+        -- Normal attack
+        St.cbtS = "STRIKE"
+
+        if shouldBlock and (now - St.lAtk < currentInterval() * 0.7) then
+            St.cbtS = "BLOCK"
             holdBlock()
+            -- Still fire rotation while blocking if skills are ready
+            if St.skl and now - St.lSkl > 1.0 then
+                St.lSkl = now
+                fireRotation(t, hpFrac)
+            end
         else
             releaseBlock()
             if now - St.lAtk >= currentInterval() then
                 St.lAtk = now
                 strike(t)
             end
-        end
-
-        if St.skl and now - St.lSkl > 1.6 then
-            St.lSkl = now
-            fireRotation()
+            if St.skl and now - St.lSkl > 1.4 then
+                St.lSkl = now
+                fireRotation(t, hpFrac)
+            end
         end
     end
 
@@ -698,7 +927,9 @@ function A.init(Ctx)
         local r = U.hrp()
         local tPos = St.tgt.ch:FindFirstChild("HumanoidRootPart")
         if r and tPos then
-            r.CFrame = CFrame.new(tPos.Position + Vector3.new(0, 3, 0))
+            local dest = tPos.Position + Vector3.new(0, 3, 0)
+            local cf = safeCFrame(dest, tPos.Position)
+            pcall(function() r.CFrame = cf end)
         end
     end
 
@@ -714,7 +945,11 @@ function A.init(Ctx)
     function A.telemetry()
         return {
             teleports = St.teleCount or 0,
+            teleFails = St.teleFail or 0,
+            dodges    = St.dodgeCount or 0,
             lastTeleportGap = U.clock() - (St.lTele or 0),
+            comboIndex = St.comboIndex or 0,
+            comboTarget = St.comboTargetName,
         }
     end
 
@@ -723,7 +958,7 @@ function A.init(Ctx)
         releaseBlock()
     end)
 
-    print("[Dingus][attack] v5 initialized · teleport-based")
+    print("[Dingus][attack] v6 initialized · chained strikes + dodge + telegraph")
 end
 
 return A
