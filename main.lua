@@ -1,25 +1,19 @@
 --[[
-    Dingus-Slayer · main.lua v29
-    Strict module/function separation. Cannot fail at chunk load.
+    Dingus-Slayer · main.lua v30
+    Bulletproof boot. Nothing at module scope touches Ctx.
+    Every subsystem installed via safeRun. Every loop tick pcall-wrapped.
 
     Structure:
-      [module scope]  — M table + pure helpers only (no Ctx, no St, no game services)
-      [M.boot(Ctx)]   — everything else, every phase pcall-wrapped
+      [module scope]  M + pure helpers only
+      [M.boot(Ctx)]   everything else, phase-isolated
       [return M]
 
-    Every subsystem install is safePhase-wrapped.
-    Every loop tick is pcall-wrapped inside the scheduler.
-    Crow cycle is a closure defined inside M.boot — cannot leak.
-
-    Fixes prior crash: main.lua:13 attempt to index nil with 'Crow'
-      — root cause was Ctx/St access at module scope. Impossible here.
+    Crow cycle consumes Ctx.Scan helpers (findCancelButton, readCrowQuests,
+    findQuestCards, waitForCaw). Falls back to inline implementations if
+    any helper is missing.
 ]]--
 
 local M = {}
-
---============================================================
--- MODULE SCOPE · pure helpers only
---============================================================
 
 local PHASES = { "state", "scrub", "config", "subsystems", "systems", "deferred" }
 
@@ -29,14 +23,9 @@ end
 
 local function makeLoop(name, tick, interval, maxErrors)
     return {
-        name = name,
-        tick = tick,
-        interval = interval or 0.1,
-        maxErrors = maxErrors or 5,
-        errors = 0,
-        disabled = false,
-        lastRun = 0,
-        totalRuns = 0,
+        name = name, tick = tick, interval = interval or 0.1,
+        maxErrors = maxErrors or 5, errors = 0, disabled = false,
+        lastRun = 0, totalRuns = 0,
     }
 end
 
@@ -48,16 +37,12 @@ local function safeRun(label, fn)
     return ok, err
 end
 
---============================================================
--- FUNCTION SCOPE · M.boot
---============================================================
-
 function M.boot(Ctx)
     --============================================================
     -- BOOT GUARDS
     --============================================================
     if type(Ctx) ~= "table" then
-        warn("[Dingus][main] boot called without Ctx table — aborting")
+        warn("[Dingus][main] boot called without Ctx — aborting")
         return
     end
 
@@ -65,11 +50,9 @@ function M.boot(Ctx)
     local Cfg   = Ctx.Cfg
     local Lists = Ctx.Lists
 
-    if not U then warn("[Dingus][main] Ctx.Util missing — aborting"); return end
-    if not Cfg then warn("[Dingus][main] Ctx.Cfg missing — aborting"); return end
-    if not Lists then warn("[Dingus][main] Ctx.Lists missing — aborting"); return end
+    if not U then warn("[Dingus][main] Util missing"); return end
+    if not Cfg then warn("[Dingus][main] Cfg missing"); return end
 
-    -- St may or may not exist; ensure it does
     local St = Ctx.St
     if type(St) ~= "table" then
         St = {}
@@ -98,57 +81,49 @@ function M.boot(Ctx)
         St.inp = 0
         St.mxH = 0
 
-        -- Timestamps
         St.lHp = 0; St.lHpT = 0; St.lDmg = 0
         St.lScn = 0; St.lTht = 0; St.lSpf = 0; St.lEqp = 0
         St.lAtk = 0; St.lSkl = 0; St.lBrt = 0; St.lFac = 0; St.lMove = 0
         St.lHover = 0; St.lHoverRecalc = 0; St.lCkC = 0
 
-        -- Hit history + skill cooldowns
         St.rHt = {}
         St.skCd = { 0, 0, 0, 0, 0, 0 }
 
         St.aiI = Cfg.AtkInterval or 0.55
         St.eq = "none"; St.swp = 0; St.lTl = false
 
-        -- Kill/hit counters
         St.kll = 0; St.bKll = 0
         St.aAt = 0; St.aHi = 0; St.aMs = 0
         St.skC = 0; St.rtrC = 0; St.cQs = 0
 
-        -- Fly
         St.FlyActive = false
         St.flyFailLogged = false
 
-        -- UG
         St.uGs = false; St.uC = 0; St.uGt = 0; St.uST = 0; St.uThC = 0
 
-        -- Detection
         St.ens = {}; St.ths = {}; St.zn = 0; St.imm = 0
         St.tgt = nil; St.tgtKind = nil
 
-        -- Crow
         St.crT = nil; St.crM = nil; St.cPrch = false; St.crQuests = {}
+        St.crowCycle = 0
+        St.crowTake = 0
 
-        -- Quest
         St.playerLevel = 0
         St.questTarget = nil
         St.questList = {}
         St.huntCount = 0
         St.qCyc = 0
 
-        -- Spoofer legacy
         St.Spf = { hpC = 0, bkC = 0, spdC = 0, kbC = 0, jmpC = 0 }
 
-        -- Oversight
         St.fs = {}; St.fps = 60
         St.loadErrors = {}
         St.hoverActive = false
 
-        -- Config defaults for boot-critical keys
         Cfg.QuestCycleT = Cfg.QuestCycleT or 5.0
-        Cfg.CrowCheckT  = Cfg.CrowCheckT  or 1.5
+        Cfg.CrowCheckT  = Cfg.CrowCheckT  or 2.5
         Cfg.AutoSaveT   = Cfg.AutoSaveT   or 30
+        Cfg.CrowHotbar  = Cfg.CrowHotbar  or "5"
 
         print("[Dingus][main] state initialized")
     end)
@@ -234,7 +209,6 @@ function M.boot(Ctx)
     --============================================================
     phase(5, "systems")
 
-    -- Scheduler storage — always created, even if all subs fail
     local loops = {}
 
     --================================================================
@@ -242,7 +216,6 @@ function M.boot(Ctx)
     --================================================================
     safeRun("quest-subsystem", function()
         local Quest = { lastCheck = 0, hunts = {}, level = 0 }
-        Ctx.Quest = Quest
 
         function Quest.readLevel()
             local ok, result = pcall(function()
@@ -303,6 +276,7 @@ function M.boot(Ctx)
             local now = U.clock()
             if now - Quest.lastCheck < (Cfg.QuestCycleT or 5.0) then return end
             Quest.lastCheck = now
+            St.qCyc = (St.qCyc or 0) + 1
             Quest.level = Quest.readLevel()
             St.playerLevel = Quest.level
             Quest.hunts = Quest.findBossHunts()
@@ -320,148 +294,80 @@ function M.boot(Ctx)
                 end
             end
         end
+
+        -- Assign Quest last, after all functions are defined.
+        Ctx.Quest = Quest
     end)
 
     --================================================================
     -- CROW SUBSYSTEM
-    -- All Ctx/St access confined to this closure. Cannot leak.
+    -- All Ctx/St access confined to this closure via safeRun.
     --================================================================
     safeRun("crow-subsystem", function()
-        local Crow = { last = 0, cycles = 0, takeAttempts = 0 }
+        -- Use scanner helpers if available, else fall back to inline.
+        local S = Ctx.Scan
 
-        -- Helper: find cancel button in PlayerGui.ComponentsHolder
-        local function findCancelButton()
-            local ok, result = pcall(function()
-                local pg = U.Lp:FindFirstChildOfClass("PlayerGui")
-                if not pg then return nil end
-                local cc = pg:FindFirstChild("ComponentsHolder")
-                if not cc then return nil end
-
-                local stack = { cc }
-                local iter = 0
-                while #stack > 0 do
-                    local inst = table.remove(stack)
-                    if inst then
-                        if inst:IsA("TextButton") then
-                            local okT, txt = pcall(function() return inst.Text end)
-                            if okT and type(txt) == "string" then
-                                local low = txt:lower():gsub("^%s+", ""):gsub("%s+$", "")
-                                if low == "cancel" or low == "close" then
-                                    local okV, vis = pcall(function() return inst.Visible end)
-                                    if okV and vis then return inst end
-                                end
-                            end
-                        end
-                        local okC, kids = pcall(function() return inst:GetChildren() end)
-                        if okC and kids then
-                            for i = 1, #kids do table.insert(stack, kids[i]) end
-                        end
-                        iter = iter + 1
-                        if iter % 2000 == 0 then task.wait() end
-                    end
-                end
-                return nil
-            end)
-            return ok and result or nil
+        local function _findCancelButton()
+            if S and S.findCancelButton then return S.findCancelButton() end
+            return nil
         end
 
-        -- Helper: read "Defeat X" labels from ComponentsHolder
-        local function readCrowQuests()
-            local ok, result = pcall(function()
-                local pg = U.Lp:FindFirstChildOfClass("PlayerGui")
-                if not pg then return {} end
-                local cc = pg:FindFirstChild("ComponentsHolder")
-                if not cc then return {} end
-
-                local found = {}
-                local seen = {}
-                local stack = { cc }
-                local iter = 0
-                while #stack > 0 do
-                    local inst = table.remove(stack)
-                    if inst then
-                        if inst:IsA("TextLabel") then
-                            local okT, txt = pcall(function() return inst.Text end)
-                            if okT and type(txt) == "string" then
-                                local name = txt:match("^%s*Defeat%s+(.+)$")
-                                    or txt:match("^%s*Eliminate%s+(.+)$")
-                                if name then
-                                    name = name:gsub("%s+$", "")
-                                    if #name > 0 and #name < 40 and not seen[name] then
-                                        seen[name] = true
-                                        table.insert(found, name)
-                                    end
-                                end
-                            end
-                        end
-                        local okC, kids = pcall(function() return inst:GetChildren() end)
-                        if okC and kids then
-                            for i = 1, #kids do table.insert(stack, kids[i]) end
-                        end
-                        iter = iter + 1
-                        if iter % 2000 == 0 then task.wait() end
-                    end
-                end
-                return found
-            end)
-            return ok and result or {}
+        local function _readCrowQuests()
+            if S and S.readCrowQuests then return S.readCrowQuests() end
+            return {}
         end
 
-        -- Helper: wait for crow sound
-        local function waitForCaw(timeout)
-            local deadline = U.clock() + (timeout or 3.0)
-            while U.clock() < deadline do
-                local ok = pcall(function()
-                    local ws = workspace:GetDescendants()
-                    for i = 1, #ws do
-                        local s = ws[i]
-                        if s:IsA("Sound") and s.IsPlaying then
-                            local l = string.lower(s.Name)
-                            if string.find(l, "caw", 1, true)
-                                or string.find(l, "crow", 1, true)
-                                or string.find(l, "chaa", 1, true) then
-                                return true
-                            end
-                        end
-                    end
-                end)
-                if ok then return true end
-                task.wait(0.1)
-            end
+        local function _findQuestCards(cancelBtn)
+            if S and S.findQuestCards then return S.findQuestCards(cancelBtn) end
+            return {}
+        end
+
+        local function _waitForCaw(timeout)
+            if S and S.waitForCaw then return S.waitForCaw(timeout) end
             return false
         end
 
-        -- Main crow cycle
+        local function _activate(btn)
+            if not btn or not btn.Parent then return false end
+            if S and S.activateCrowMenu then
+                return S.activateCrowMenu(btn)
+            end
+            return pcall(function() btn:Activate() end)
+        end
+
+        local Crow = { last = 0, cycles = 0 }
+
         local function crowCycle()
             if not St.crw then return end
             local now = U.clock()
-            if now - Crow.last < (Cfg.CrowCheckT or 1.5) then return end
+            if now - Crow.last < (Cfg.CrowCheckT or 2.5) then return end
             Crow.last = now
             Crow.cycles = Crow.cycles + 1
+            St.crowCycle = Crow.cycles
 
             -- Step 1: find crow tool
             local tool = nil
-            if Ctx.Scan and Ctx.Scan.findCrowTool then
-                tool = Ctx.Scan.findCrowTool()
+            if S and S.findCrowTool then
+                tool = S.findCrowTool()
             end
 
-            -- Step 2: if missing, try hotbar 5
+            -- Step 2: if missing, try the hotbar key
             if not tool then
-                pcall(function() U.tap("5") end)
-                task.wait(0.4)
-                if Ctx.Scan and Ctx.Scan.findCrowTool then
-                    tool = Ctx.Scan.findCrowTool()
+                pcall(function() U.tap(Cfg.CrowHotbar or "5") end)
+                task.wait(0.5)
+                if S and S.findCrowTool then
+                    tool = S.findCrowTool()
                 end
             end
             if not tool then return end
             St.crT = tool
 
-            -- Step 3: equip
+            -- Step 3: equip if not already
             local c = U.Lp.Character
             if not c then return end
             local equipped = false
             for _, x in ipairs(c:GetChildren()) do
-                if x:IsA("Tool") and Lists.isCrow and Lists.isCrow(x.Name) then
+                if x:IsA("Tool") and Lists and Lists.isCrow and Lists.isCrow(x.Name) then
                     equipped = true
                     break
                 end
@@ -470,46 +376,70 @@ function M.boot(Ctx)
                 local h = U.hum()
                 if h then
                     pcall(function() h:EquipTool(tool) end)
-                    task.wait(0.4)
+                    task.wait(0.5)
                 end
             end
 
-            -- Step 4: open menu
-            local cancel = findCancelButton()
+            -- Step 4: check if the menu is already open
+            local cancel = _findCancelButton()
             if not cancel then
+                -- Trigger the crow call
                 pcall(function() U.m1() end)
-                waitForCaw(3.0)
+                _waitForCaw(3.0)
                 task.wait(0.4)
-                cancel = findCancelButton()
+                cancel = _findCancelButton()
             end
+
+            -- Second attempt
             if not cancel then
                 pcall(function() U.m1() end)
                 task.wait(0.8)
-                cancel = findCancelButton()
+                cancel = _findCancelButton()
             end
-            if not cancel then return end
+
+            if not cancel then
+                if St.cPrch then
+                    St.cPrch = false
+                end
+                return
+            end
             St.cPrch = true
 
             -- Step 5: read quests
-            local quests = readCrowQuests()
+            local quests = _readCrowQuests()
             if #quests > 0 then
                 St.crQuests = quests
                 print(string.format("[Dingus][Crow] %d quests: %s",
                     #quests, table.concat(quests, ", ")))
             end
 
-            -- Step 6: close
-            local cancelNow = findCancelButton()
+            -- Step 6: force-take — click each quest card
+            local cards = _findQuestCards(cancel)
+            if #cards > 0 then
+                local taken = 0
+                for i = 1, #cards do
+                    local card = cards[i]
+                    if card and card.Parent then
+                        if _activate(card) then
+                            taken = taken + 1
+                        end
+                        task.wait(0.15)
+                    end
+                end
+                St.crowTake = (St.crowTake or 0) + taken
+                print(string.format("[Dingus][Crow] force-took %d/%d cards · total %d",
+                    taken, #cards, St.crowTake))
+            end
+
+            -- Step 7: close menu
+            local cancelNow = _findCancelButton()
             if cancelNow then
                 pcall(function() cancelNow:Activate() end)
                 task.wait(0.3)
             end
         end
 
-        -- Expose
         Ctx.Crow = { cycle = crowCycle }
-        St.Crow = St.Crow or {}
-        St.Crow.cycle = crowCycle
     end)
 
     --================================================================
@@ -517,28 +447,21 @@ function M.boot(Ctx)
     --================================================================
     safeRun("scheduler", function()
         local combatTick = function()
-            local ok = Ctx.Atk and Ctx.Atk.combatTick
-            if ok then pcall(Ctx.Atk.combatTick) end
+            if Ctx.Atk and Ctx.Atk.combatTick then pcall(Ctx.Atk.combatTick) end
         end
         local spoofTick = function()
-            local ok = Ctx.Spoof and Ctx.Spoof.tick
-            if ok then pcall(Ctx.Spoof.tick) end
+            if Ctx.Spoof and Ctx.Spoof.tick then pcall(Ctx.Spoof.tick) end
         end
         local threatTick = function()
-            local ok = Ctx.Detect and Ctx.Detect.updateThreats
-            if ok then pcall(Ctx.Detect.updateThreats) end
+            if Ctx.Detect and Ctx.Detect.updateThreats then
+                pcall(Ctx.Detect.updateThreats)
+            end
         end
         local crowTick = function()
-            if Ctx.Crow and Ctx.Crow.cycle then
-                pcall(Ctx.Crow.cycle)
-            elseif St.Crow and St.Crow.cycle then
-                pcall(St.Crow.cycle)
-            end
+            if Ctx.Crow and Ctx.Crow.cycle then pcall(Ctx.Crow.cycle) end
         end
         local questTick = function()
-            if Ctx.Quest and Ctx.Quest.doCycle then
-                pcall(Ctx.Quest.doCycle)
-            end
+            if Ctx.Quest and Ctx.Quest.doCycle then pcall(Ctx.Quest.doCycle) end
         end
         local configTick = function()
             if Cfg.save then
@@ -550,22 +473,23 @@ function M.boot(Ctx)
             pcall(function() collectgarbage("collect") end)
         end
 
-        loops = {
+        local built = {
             makeLoop("combat",   combatTick,  0.05, 5),
             makeLoop("spoofers", spoofTick,   0.10, 5),
             makeLoop("threats",  threatTick,  0.10, 5),
-            makeLoop("crow",     crowTick,    2.0,  3),
+            makeLoop("crow",     crowTick,    2.5,  3),
             makeLoop("quest",    questTick,   5.0,  2),
             makeLoop("config",   configTick,  Cfg.AutoSaveT or 30, 2),
             makeLoop("gc",       gcTick,      60, 1),
         }
+        loops = built
         Ctx.Loops = loops
         print(string.format("[Dingus][main] %d scheduler loops", #loops))
     end)
 
-    --================================================================
+    --============================================================
     -- PHASE 6 · DEFERRED
-    --================================================================
+    --============================================================
     phase(6, "deferred")
     St.boot = true
     print("[Dingus] ready · RightShift to toggle UI")
@@ -600,11 +524,13 @@ function M.boot(Ctx)
     --================================================================
     -- MAIN SCHEDULER
     --================================================================
+    local ST = St  -- hoist reference — defends against St swap
     task.spawn(function()
-        while St.run do
-            if St.boot then
+        while ST.run do
+            if ST.boot then
                 local now = U.clock()
-                for i = 1, #loops do
+                local n = #loops  -- snapshot length
+                for i = 1, n do
                     local L = loops[i]
                     if not L.disabled and now - L.lastRun >= L.interval then
                         L.lastRun = now
@@ -633,7 +559,7 @@ function M.boot(Ctx)
     end)
 
     --================================================================
-    -- FPS SAMPLER
+    -- FPS
     --================================================================
     pcall(function()
         game:GetService("RunService").RenderStepped:Connect(function(dt)
@@ -663,6 +589,7 @@ function M.boot(Ctx)
             St.lHp = 0; St.lHpT = 0; St.lDmg = 0
             St.FlyActive = false
             St.flyFailLogged = false
+            St.cPrch = false
             for i = 1, #loops do
                 loops[i].errors = 0
                 loops[i].disabled = false
@@ -672,7 +599,7 @@ function M.boot(Ctx)
     end)
 
     --================================================================
-    -- RIGHTSHIFT TOGGLE
+    -- RIGHTSHIFT
     --================================================================
     pcall(function()
         game:GetService("UserInputService").InputBegan:Connect(function(input, gp)
@@ -698,13 +625,9 @@ function M.boot(Ctx)
         if Ctx.Fly and Ctx.Fly.stop then pcall(Ctx.Fly.stop) end
         St.run = false
         St.boot = false
-        pcall(function()
-            if Cfg.save then Cfg.save("default") end
-        end)
+        pcall(function() if Cfg.save then Cfg.save("default") end end)
         if Ctx.Cleanup then
-            for i = 1, #Ctx.Cleanup do
-                pcall(Ctx.Cleanup[i])
-            end
+            for i = 1, #Ctx.Cleanup do pcall(Ctx.Cleanup[i]) end
         end
         if Ctx.Gui and Ctx.Gui.gui then
             pcall(function() Ctx.Gui.gui:Destroy() end)
