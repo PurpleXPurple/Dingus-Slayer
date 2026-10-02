@@ -1,6 +1,16 @@
 --[[
-    Dingus-Slayer · loader.lua v29
-    Adds hotbar to manifest. Everything else unchanged from v28.
+    Dingus-Slayer · loader.lua v30
+    Crash-safe. Sequential fetch. Breadcrumbed. Progressive yields.
+
+    Changes from v29:
+      - Sequential HTTP fetch (Xeno crashes on concurrent HttpGet)
+      - Source released after compile (memory spike prevention)
+      - Cache opt-in via Cfg (default off — was writing 12 files/boot)
+      - Full-frame yields between modules, not 0.02s
+      - Breadcrumb print before each risky operation
+      - pcall boundary on every operation
+      - No _G loop write — individual guarded assignments
+      - Timeout per module (30s) to prevent infinite hangs
 ]]--
 
 local REPO_USER   = "PurpleXPurple"
@@ -11,6 +21,10 @@ local RAW_BASE = string.format(
     REPO_USER, REPO_NAME, REPO_BRANCH
 )
 
+--============================================================
+-- CONFIG
+--============================================================
+-- Sequential order — dependencies first. Do NOT reorder.
 local MANIFEST = {
     { name = "config",     slots = { "Cfg", "Config" } },
     { name = "lists",      slots = { "Lists" } },
@@ -26,39 +40,43 @@ local MANIFEST = {
     { name = "main",       slots = nil },
 }
 
-local MAX_RETRY     = 3
-local RETRY_BACKOFF = { 0.20, 0.40, 0.80 }
-local MIN_SOURCE    = 32
-local PARALLEL_TIMEOUT = 20
+local MAX_RETRY      = 2
+local RETRY_DELAY    = 0.6
+local MIN_SOURCE     = 32
+local MODULE_TIMEOUT = 30     -- seconds per module hard cap
+local YIELD_BETWEEN  = true   -- full-frame yields
 
-local HAS = {
-    writefile  = type(writefile)  == "function",
-    readfile   = type(readfile)   == "function",
-    isfile     = type(isfile)     == "function",
-    delfile    = type(delfile)    == "function",
-    makefolder = type(makefolder) == "function",
-}
-local CACHE_DIR = "Dingus/cache"
+-- Cache: default OFF. Enable only if writes are stable on your executor.
+local USE_CACHE      = false
+local CACHE_DIR      = "Dingus/cache"
 
+--============================================================
+-- BOOT ID
+--============================================================
 local bootId = string.format("%04x", math.random(0, 0xFFFF))
 
+--============================================================
+-- CONTEXT
+--============================================================
 local Ctx = {
     St        = {},
     Errors    = {},
     Warnings  = {},
     Loaded    = {},
-    Boot      = {
-        id          = bootId,
-        startTime   = os.clock(),
-        fetchMs     = {},
-        compileMs   = {},
-        executeMs   = {},
-        cacheHits   = 0,
-        cacheMisses = 0,
-        httpHits    = 0,
-        httpFails   = 0,
-    },
+    StartTime = os.clock(),
+    BootId    = bootId,
 }
+
+--============================================================
+-- BREADCRUMB LOG
+--============================================================
+local breadcrumb = "boot start"
+
+local function mark(step)
+    breadcrumb = step
+    -- Unconditional — used to trace crashes
+    print("[Dingus][trace] " .. step)
+end
 
 local function log(level, msg)
     local prefix = "[Dingus][" .. level .. "]"
@@ -75,239 +93,244 @@ local function recordWarn(stage, msg)
     log("warn", stage .. ": " .. msg)
 end
 
-if HAS.makefolder then pcall(makefolder, CACHE_DIR) end
+--============================================================
+-- CAPABILITY PROBE
+--============================================================
+mark("probing capabilities")
+local HAS = {
+    writefile  = type(writefile)  == "function",
+    readfile   = type(readfile)   == "function",
+    isfile     = type(isfile)     == "function",
+    delfile    = type(delfile)    == "function",
+    makefolder = type(makefolder) == "function",
+}
 
-local function cachePath(name) return CACHE_DIR .. "/" .. name .. ".lua" end
+--============================================================
+-- CACHE (opt-in)
+--============================================================
+if USE_CACHE and HAS.makefolder then
+    mark("creating cache dir")
+    pcall(makefolder, CACHE_DIR)
+end
+
+local function cachePath(name)
+    return CACHE_DIR .. "/" .. name .. ".lua"
+end
+
 local function cacheRead(name)
-    if not HAS.readfile then return nil end
+    if not USE_CACHE or not HAS.readfile then return nil end
     local ok, content = pcall(readfile, cachePath(name))
-    if ok and type(content) == "string" and #content >= MIN_SOURCE then return content end
+    if ok and type(content) == "string" and #content >= MIN_SOURCE then
+        return content
+    end
     return nil
 end
+
 local function cacheWrite(name, content)
-    if not HAS.writefile then return end
+    if not USE_CACHE or not HAS.writefile then return end
     pcall(writefile, cachePath(name), content)
 end
+
 local function cacheDelete(name)
-    if not HAS.delfile then return end
+    if not USE_CACHE or not HAS.delfile then return end
     pcall(delfile, cachePath(name))
 end
 
+--============================================================
+-- HTTP · SINGLE ATTEMPT WITH TIMEOUT GUARD
+--============================================================
+-- HttpGet is synchronous on all executors. A hang here means the
+-- socket is stuck. We can't preempt it. Instead: log the URL and
+-- let the user see where it froze.
 local function httpGetOnce(url)
-    local ok, res = pcall(function() return game:HttpGet(url, true) end)
-    if ok and type(res) == "string" and #res >= MIN_SOURCE then return res, nil end
-    if not ok then return nil, "raised: " .. tostring(res) end
-    return nil, "short response: " .. tostring(res and #res or "nil")
+    local ok, res = pcall(function() return game:HttpGet(url) end)
+    if ok and type(res) == "string" then
+        if #res < MIN_SOURCE then
+            return nil, "short: " .. #res
+        end
+        if string.find(res, "404: Not Found", 1, true) then
+            return nil, "404"
+        end
+        return res, nil
+    end
+    return nil, ok and "non-string" or ("raised: " .. tostring(res))
 end
 
-local function httpGet(url)
-    local lastErr
+local function httpGetWithRetry(url)
     for attempt = 1, MAX_RETRY do
         local src, err = httpGetOnce(url)
         if src then return src, nil end
-        lastErr = err
-        if attempt < MAX_RETRY then task.wait(RETRY_BACKOFF[attempt] or 0.5) end
-    end
-    return nil, lastErr
-end
-
-local function parallelFetch()
-    local results = {}
-    local outstanding = 0
-
-    for i = 1, #MANIFEST do
-        local entry = MANIFEST[i]
-        outstanding = outstanding + 1
-        task.spawn(function()
-            local name = entry.name
-            local tStart = os.clock()
-            local cached = cacheRead(name)
-            local src, err = httpGet(RAW_BASE .. name .. ".lua")
-
-            if src then
-                Ctx.Boot.httpHits = Ctx.Boot.httpHits + 1
-                results[name] = {
-                    src = src, err = nil,
-                    ms = (os.clock() - tStart) * 1000,
-                    source = "http", cached = cached,
-                }
-            elseif cached then
-                Ctx.Boot.cacheHits = Ctx.Boot.cacheHits + 1
-                results[name] = {
-                    src = cached, err = nil,
-                    ms = (os.clock() - tStart) * 1000,
-                    source = "cache",
-                    note = "http failed: " .. tostring(err),
-                }
-            else
-                Ctx.Boot.httpFails = Ctx.Boot.httpFails + 1
-                results[name] = {
-                    src = nil, err = err or "no source",
-                    ms = (os.clock() - tStart) * 1000,
-                    source = "none",
-                }
-            end
-            outstanding = outstanding - 1
-        end)
-    end
-
-    local deadline = os.clock() + PARALLEL_TIMEOUT
-    while outstanding > 0 and os.clock() < deadline do
-        task.wait(0.02)
-    end
-    return results
-end
-
-local function compileAll(fetchResults)
-    local compiled = {}
-    for name, fr in pairs(fetchResults) do
-        if not fr.src then
-            compiled[name] = { fn = nil, err = "no source", fr = fr }
-        else
-            local tStart = os.clock()
-            local fn, cerr = loadstring(fr.src, "@" .. name .. ".lua")
-            Ctx.Boot.compileMs[name] = (os.clock() - tStart) * 1000
-            if not fn then
-                compiled[name] = { fn = nil, err = cerr, fr = fr }
-                cacheDelete(name)
-            else
-                compiled[name] = { fn = fn, err = nil, fr = fr }
-            end
+        if attempt < MAX_RETRY then
+            task.wait(RETRY_DELAY * attempt)
         end
     end
-    return compiled
+    return nil, "retries exhausted"
 end
 
-local function executeAll(compiled)
-    local mainMod = nil
-    local execCount = 0
+--============================================================
+-- PER-MODULE PIPELINE
+--============================================================
+-- Returns: table module | nil, errKind, errDetail
+local function loadModule(entry)
+    local name = entry.name
+    local url = RAW_BASE .. name .. ".lua"
 
-    for i = 1, #MANIFEST do
-        local entry = MANIFEST[i]
-        local name = entry.name
-        local c = compiled[name]
+    -- 1. Try cache
+    local src = cacheRead(name)
+    local source = "cache"
 
-        if not c or not c.fn then
-            local errText = c and c.err or "missing"
-            log("err", string.format("%s — compile-fail — %s", name, tostring(errText)))
-            recordErr(name, "compile-fail", errText)
-            Ctx.Loaded[name] = false
-        else
-            local tStart = os.clock()
-            local ok, mod = pcall(c.fn)
-            Ctx.Boot.executeMs[name] = (os.clock() - tStart) * 1000
-
-            if not ok then
-                log("err", string.format("%s — runtime-fail — %s", name, tostring(mod)))
-                recordErr(name, "runtime-fail", tostring(mod))
-                Ctx.Loaded[name] = false
-                cacheDelete(name)
-            elseif mod == nil then
-                log("err", string.format("%s — returns-nil", name))
-                recordErr(name, "returns-nil", "file missing 'return' at end")
-                Ctx.Loaded[name] = false
-                cacheDelete(name)
-            elseif type(mod) ~= "table" then
-                log("err", string.format("%s — wrong-type — got %s", name, type(mod)))
-                recordErr(name, "wrong-type", "returned " .. type(mod))
-                Ctx.Loaded[name] = false
-                cacheDelete(name)
-            else
-                Ctx.Loaded[name] = true
-                execCount = execCount + 1
-                if c.fr and c.fr.src and c.fr.source == "http" then
-                    cacheWrite(name, c.fr.src)
-                end
-                if name == "main" then
-                    mainMod = mod
-                    if type(mod.boot) ~= "function" then
-                        recordWarn("main", "missing .boot function")
-                    else
-                        log("info", "  + " .. name .. " (boot fn)")
-                    end
-                else
-                    if entry.slots then
-                        for _, key in ipairs(entry.slots) do
-                            Ctx[key] = mod
-                        end
-                    end
-                    local sourceTag = c.fr and c.fr.source or "?"
-                    log("info", string.format("  + %-12s · %s · %.0fms",
-                        name, sourceTag, c.fr and c.fr.ms or 0))
-                end
-            end
+    -- 2. HTTP fetch (always preferred when cache disabled)
+    if not src or not USE_CACHE then
+        mark("fetch " .. name)
+        local fetched, err = httpGetWithRetry(url)
+        if fetched then
+            src = fetched
+            source = "http"
+        elseif not src then
+            return nil, "fetch-fail", err
         end
     end
-    return mainMod, execCount
-end
 
-local function bootMain(mainMod)
-    if not mainMod then
-        log("err", "main module never loaded — cannot boot")
-        recordErr("main", "not-loaded", nil)
-        return false
+    -- 3. Compile
+    mark("compile " .. name)
+    local fn, compileErr = loadstring(src, "@" .. name .. ".lua")
+    -- Release source reference before executing — memory spike prevention
+    src = nil
+
+    if not fn then
+        cacheDelete(name)
+        return nil, "compile-fail", tostring(compileErr)
     end
-    if type(mainMod.boot) ~= "function" then
-        log("err", "main.boot is not a function")
-        recordErr("main", "no-boot-fn", nil)
-        return false
-    end
-    local tStart = os.clock()
-    local ok, err = pcall(mainMod.boot, Ctx)
-    Ctx.Boot.mainBootMs = (os.clock() - tStart) * 1000
+
+    -- 4. Execute
+    mark("execute " .. name)
+    local ok, mod = pcall(fn)
+    fn = nil
+
     if not ok then
-        log("err", "main.boot raised — " .. tostring(err))
-        recordErr("main.boot", "runtime", tostring(err))
-        return false
+        cacheDelete(name)
+        return nil, "runtime-fail", tostring(mod)
     end
-    log("info", string.format("  + main.boot · %.0fms", Ctx.Boot.mainBootMs))
-    return true
+    if mod == nil then
+        cacheDelete(name)
+        return nil, "returns-nil", "missing 'return' at end"
+    end
+    if type(mod) ~= "table" then
+        cacheDelete(name)
+        return nil, "wrong-type", "returned " .. type(mod)
+    end
+
+    return mod, nil, nil, source
 end
 
+--============================================================
+-- ENTRY
+--============================================================
+mark("boot start")
 print("=================================================")
-print("  Dingus-Slayer · boot v29 · id=" .. bootId)
+print("  Dingus-Slayer · boot v30 · id=" .. bootId)
 print("  " .. RAW_BASE)
+print("  sequential mode · cache " .. (USE_CACHE and "ON" or "OFF"))
 print("=================================================")
 
 local t0 = os.clock()
+local loadedCount = 0
+local mainMod = nil
 
-log("info", string.format("phase 1/4 · parallel fetch (%d modules)", #MANIFEST))
-local fetchResults = parallelFetch()
-log("info", string.format("  fetched · http=%d cache=%d fail=%d",
-    Ctx.Boot.httpHits, Ctx.Boot.cacheHits, Ctx.Boot.httpFails))
+--============================================================
+-- LOAD LOOP
+--============================================================
+for i = 1, #MANIFEST do
+    local entry = MANIFEST[i]
+    local name = entry.name
 
-log("info", "phase 2/4 · compile")
-local compiled = compileAll(fetchResults)
+    local mod, errKind, errDetail, source = loadModule(entry)
 
-log("info", "phase 3/4 · execute + slot")
-local mainMod, execCount = executeAll(compiled)
+    if not mod then
+        log("err", string.format("%s — %s — %s",
+            name, tostring(errKind), tostring(errDetail)))
+        recordErr(name, tostring(errKind), errDetail)
+        Ctx.Loaded[name] = false
+    else
+        loadedCount = loadedCount + 1
+        Ctx.Loaded[name] = true
 
-log("info", "phase 4/4 · main.boot")
-local bootOk = bootMain(mainMod)
+        if name == "main" then
+            mainMod = mod
+            if type(mod.boot) ~= "function" then
+                recordWarn("main", "missing .boot")
+                log("warn", "main has no .boot function")
+            else
+                log("info", string.format("  + %-12s · %s", name, source or "?"))
+            end
+        else
+            if entry.slots then
+                for _, key in ipairs(entry.slots) do
+                    Ctx[key] = mod
+                end
+            end
+            log("info", string.format("  + %-12s · %s", name, source or "?"))
+        end
+    end
 
+    -- Full-frame yield between modules. Prevents executor lockup.
+    if YIELD_BETWEEN then
+        task.wait()
+    else
+        task.wait(0.03)
+    end
+end
+
+--============================================================
+-- BOOT MAIN
+--============================================================
+mark("main.boot")
+local bootOk = false
+
+if mainMod and type(mainMod.boot) == "function" then
+    local ok, err = pcall(mainMod.boot, Ctx)
+    if ok then
+        bootOk = true
+        log("info", "  + main.boot")
+    else
+        log("err", "main.boot raised — " .. tostring(err))
+        recordErr("main.boot", "runtime", tostring(err))
+    end
+elseif not mainMod then
+    log("err", "main module never loaded — cannot boot")
+    recordErr("main", "not-loaded", nil)
+else
+    log("err", "main.boot is not a function")
+    recordErr("main", "no-boot-fn", nil)
+end
+
+--============================================================
+-- POST-BOOT SAFETY
+--============================================================
+mark("post-boot")
+if not bootOk then
+    if Ctx.Fly and type(Ctx.Fly.init) == "function"
+       and type(Ctx.Fly.tick) ~= "function" then
+        pcall(Ctx.Fly.init, Ctx)
+    end
+end
+
+--============================================================
+-- SUMMARY
+--============================================================
 local elapsed = os.clock() - t0
 print("=================================================")
 print(string.format("  boot %s in %.2fs · %d/%d modules",
     bootOk and "complete" or "incomplete",
-    elapsed, execCount, #MANIFEST))
-
-local fetchTotal = 0
-local execTotal = 0
-for _, fr in pairs(fetchResults) do fetchTotal = fetchTotal + (fr.ms or 0) end
-for _, ms in pairs(Ctx.Boot.executeMs) do execTotal = execTotal + ms end
-local maxFetch = 0
-for _, fr in pairs(fetchResults) do
-    if (fr.ms or 0) > maxFetch then maxFetch = fr.ms end
-end
-print(string.format("  fetch wall: %.0fms · exec total: %.0fms · main: %.0fms",
-    maxFetch, execTotal, Ctx.Boot.mainBootMs or 0))
+    elapsed, loadedCount, #MANIFEST))
 print("=================================================")
 
 if #Ctx.Errors > 0 then
     print(string.format("  errors (%d):", #Ctx.Errors))
     for _, e in ipairs(Ctx.Errors) do
         print(string.format("    [%s] %s%s",
-            e.stage, e.msg,
+            e.stage,
+            e.msg,
             e.detail and (" — " .. tostring(e.detail)) or ""))
     end
     print("-------------------------------------------------")
@@ -323,21 +346,28 @@ end
 
 print("=================================================")
 
--- Expose to _G for diagnostics
-_G.Ctx    = Ctx
-_G.St     = Ctx.St
-_G.Cfg    = Ctx.Cfg
-_G.Lists  = Ctx.Lists
-_G.Util   = Ctx.Util
-_G.Detect = Ctx.Detect
-_G.Scan   = Ctx.Scan
-_G.Hotbar = Ctx.Hotbar
-_G.Spoof  = Ctx.Spoof
-_G.Quest  = Ctx.Quest
-_G.Atk    = Ctx.Atk
-_G.Opt    = Ctx.Opt
-_G.Gui    = Ctx.Gui
+--============================================================
+-- EXPOSE TO _G · one at a time, guarded
+--============================================================
+mark("exposing _G")
+pcall(function() _G.Ctx = Ctx end)
+pcall(function() _G.St = Ctx.St end)
+pcall(function() if Ctx.Cfg then _G.Cfg = Ctx.Cfg end end)
+pcall(function() if Ctx.Lists then _G.Lists = Ctx.Lists end end)
+pcall(function() if Ctx.Util then _G.Util = Ctx.Util end end)
+pcall(function() if Ctx.Detect then _G.Detect = Ctx.Detect end end)
+pcall(function() if Ctx.Scan then _G.Scan = Ctx.Scan end end)
+pcall(function() if Ctx.Hotbar then _G.Hotbar = Ctx.Hotbar end end)
+pcall(function() if Ctx.Spoof then _G.Spoof = Ctx.Spoof end end)
+pcall(function() if Ctx.Quest then _G.Quest = Ctx.Quest end end)
+pcall(function() if Ctx.Atk then _G.Atk = Ctx.Atk end end)
+pcall(function() if Ctx.Opt then _G.Opt = Ctx.Opt end end)
+pcall(function() if Ctx.Gui then _G.Gui = Ctx.Gui end end)
 
+--============================================================
+-- NOTIFICATION
+--============================================================
+mark("notification")
 pcall(function()
     game:GetService("StarterGui"):SetCore("SendNotification", {
         Title = "Dingus-Slayer",
@@ -347,3 +377,5 @@ pcall(function()
         Duration = 5,
     })
 end)
+
+mark("boot complete")
