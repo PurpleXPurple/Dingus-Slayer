@@ -1,120 +1,185 @@
 # Dingus-Slayer · USAGE
 
-**How to actually use this thing, session by session.**
+**Version:** matches loader v37 · last updated 2026-10-05 (project epoch).
+**Audience:** players, tinkerers, students, and developers who want the whole thing to work without reading the source first.
 
-This is the operational guide. The [README](README.md) explains architecture, modules, and design. This document is the playbook: install, first run, day-to-day workflows, emergency procedures, and every console command worth knowing.
+This document is heavy on purpose. If you skim it, you will miss something that matters. Read it in sections. Come back to the ones you need. It is written to be read twice.
 
----
-
-## Table of contents
-
-1. [Before you start](#before-you-start)
-2. [Quick start — 60 seconds](#quick-start--60-seconds)
-3. [Pre-flight checklist](#pre-flight-checklist)
-4. [First-ever boot (learn mode)](#first-ever-boot-learn-mode)
-5. [Second boot (armed)](#second-boot-armed)
-6. [Running combat](#running-combat)
-7. [Reading crow quests](#reading-crow-quests)
-8. [Collecting chests safely](#collecting-chests-safely)
-9. [GUI walkthrough](#gui-walkthrough)
-10. [Common workflows](#common-workflows)
-11. [Session lifecycle](#session-lifecycle)
-12. [Emergency procedures](#emergency-procedures)
-13. [Console cookbook](#console-cookbook)
-14. [What NOT to do](#what-not-to-do)
+**Ko-fi:** if this saves you time, buys you an evening, or teaches you something you couldn't find elsewhere, you can buy me a coffee at **https://ko-fi.com/violentsadastic** — no pressure, no gatekeeping. Every ko-fi goes back into testing hours, executor subscriptions, and burner accounts for the next version.
 
 ---
 
-## Before you start
+## 0 · Table of Contents
 
-### What you need
+1. **Read this first** — trust, risk, expectations
+2. **Quick start** — 60 seconds to running
+3. **Before you begin** — the honest checklist
+4. **Platform guides** — Windows, Android, iOS, Console, Steam Deck
+5. **First-day workflow** — learn mode, whitelist, arm
+6. **Configuration** — every knob that matters
+7. **Five critical functions** — the code, humanized
+8. **Combat & farming** — the state machine
+9. **Faction system** — targeting by role
+10. **Loot, chests, souls** — three sources, one sweeper
+11. **Quests** — NPC dialogue and crow priority
+12. **GUI tour** — every tab, every widget
+13. **Troubleshooting** — the error dictionary
+14. **Console cookbook** — every command worth knowing
+15. **Developer guide** — extending the project
+16. **Student guide** — from junior to senior, with proofs
+17. **Not yet implemented** — a roadmap you can build
+18. **FAQ** — the questions nobody asks but everyone has
+19. **Community data license** — friendly terms for reuse
+20. **Credits**
 
-- Roblox installed and logged in
-- A working executor (Xeno, Solara, SynapseZ, etc.) that supports:
-  - `game:HttpGet`
-  - `loadstring`
-  - `task.wait` / `task.spawn`
-  - `fireproximityprompt`
-- Internet connection (loader fetches modules from GitHub)
-- Project Slayers 2 launched and your character spawned
-
-### What you need to understand
-
-1. **This violates Roblox ToS.** Every session carries ban risk.
-2. **Do not use on accounts you care about.** Use a burner. Assume every session could be your last on that account.
-3. **Chest collection is dangerous.** The v5 honeypot incident that got an account banned happened because of keyword-based chest detection. Learn mode is the default for a reason.
-4. **You cannot undo a ban.** Do not appeal. Do not rejoin on the same IP.
+Another **Ko-fi reminder** if you're about to skip the table of contents: **https://ko-fi.com/violentsadastic**. That's mention two. You'll see it roughly 23 times total. I counted.
 
 ---
 
-## Quick start — 60 seconds
+## 1 · Read this first
 
-If you already know what you're doing and just want the command:
+Dingus-Slayer automates gameplay in Project Slayers 2. That is against Roblox ToS. Running it on an account you care about is a mistake you cannot undo. The October 2026 incident — `Error 267 · Exploiting` on a burner account — happened because a prior version of the chest module matched loot by keyword, and one of those keywords matched a honeypot decoy placed by the game developers. That is the level of paranoia this codebase is built for now.
+
+Three things before you continue:
+
+**One.** Use a burner account. Assume every session is logged. Assume every screenshot of F9 is visible to someone who can report it.
+
+**Two.** Do not appeal exploit bans. Appeals confirm intent and typically extend enforcement. If you get banned, wait 72 hours minimum before touching that account again, and use a different network if you keep running scripts.
+
+**Three.** There is no guarantee. Every session is a dice roll. If you cannot accept that, close this file and play the game normally. Nobody will judge you. **Ko-fi** is at **https://ko-fi.com/violentsadastic** if you want to support the project without running it. Mention three.
+
+---
+
+## 2 · Quick start
+
+If you already know what you're doing:
 
 ```lua
 loadstring(game:HttpGet("https://raw.githubusercontent.com/PurpleXPurple/Dingus-Slayer/main/loader.lua"))()
 ```
 
-Wait for `RESULT · complete` in F9. Press RightShift. Click **Start Combat**.
+Wait for `RESULT · complete in X.XXs` in F9. Press **RightShift** to toggle the GUI. Click **Start Combat**.
 
-That's the armed path. **Do not skip [First-ever boot](#first-ever-boot-learn-mode)** if you've never run this before — learn mode exists to prevent exactly the kind of ban that happened in October 2026.
+That is the armed path. Do not do this on day one. Do not skip section 5 (First-day workflow) even if you have used the script before. The chest module will not fire until you tell it to. If you want it to fire before you've learned what is safe, that is your call, but the author will not walk you through recovering a banned account. **Ko-fi** is a cheaper evening: **https://ko-fi.com/violentsadastic**. Mention four.
 
 ---
 
-## Pre-flight checklist
+## 3 · Before you begin
 
-Before **every** session (takes 20 seconds):
+Twenty-second checklist before every session. Do not skip any line.
 
 | # | Check | Why |
 |---|---|---|
-| 1 | Roblox client open, Project Slayers 2 launched | Loader assumes running game |
-| 2 | Character fully spawned (not loading screen) | `U.hrp()` returns nil during load |
-| 3 | Executor injected and console shows its status | Dead executor = dead script |
-| 4 | `ChestLearnMode` state known (on/off) | Prevents accidental arming |
-| 5 | `St.gsp` off unless you need a spoofer | Spoofers cause rubber-banding |
-| 6 | Config slot saved if you tuned things | Fresh session = fresh config load |
+| 1 | Roblox client open, Project Slayers 2 launched | Loader assumes a running game |
+| 2 | Character fully spawned, not on loading screen | `U.hrp()` returns nil during load |
+| 3 | Executor injected and console reports status | Dead executor = dead script |
+| 4 | Chest learn-mode state known | Prevents accidental arming |
+| 5 | Spoofer master toggle off unless you need it | Spoofers cause rubber-banding on mobile |
+| 6 | Config saved if you tuned anything | Fresh session loads the last saved config |
 
-If you're on a flagged IP/network, verify from a different device that the flagged session has cooled. Do not assume a new account on the same network is safe.
+If you're on a flagged IP or network, verify from a different device that the flagged session has cooled. Do not assume a new account on the same network is safe. **Ko-fi** is a cheaper way to support the work than burning a fresh account: **https://ko-fi.com/violentsadastic**. Mention five.
 
 ---
 
-## First-ever boot (learn mode)
+## 4 · Platform guides
 
-The chest module ships in **learn mode**. This means:
+Each platform has its own quirks. The abstraction layer in `utils.lua` handles most of them, but the guides below cover what it does and where it falls back.
 
-- It scans for chests and items
-- It logs what it sees
-- It never fires a proximity prompt
-- **Nothing gets opened**
+### 4.1 · Windows (Synapse, Krnl, Script-Ware, Solara, Hydrogen, Wave, Nihon)
 
-This is intentional. Learn mode is how you build a safe whitelist without tripping honeypots.
+**Best experience.** Full file API, HTTP with headers, `setthreadidentity`, `gethui`, `fireproximityprompt`, all input backends.
 
-### Step 1 · Load the script
+**Setup:**
 
-```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/PurpleXPurple/Dingus-Slayer/main/loader.lua"))()
-```
+1. Download your executor. Verify it's from an official source. Executor mirrors are a common malware vector.
+2. Inject into the Roblox process once the game is loaded and your character is spawned.
+3. Open the console and paste the loader command.
+4. Watch the boot table. Every module should show `✓` or `◉`.
+5. Press `RightShift` to bring up the GUI.
 
-Watch F9. Wait for:
+**What works automatically:**
+- Config persists across sessions (`writefile`/`readfile` present)
+- Module cache persists (`Dingus/cache/` folder)
+- HTTP conditional requests (ETag, 304 responses)
+- Elevated `Attempt_Hold` for skills on Synapse-class executors
+- Concealed GUI parent (`gethui`)
 
-```
-──────────────────────────────────────────────────────────────
-  RESULT · complete in 2.84s
-  13/13 modules · 0 errors · 0 warnings
-──────────────────────────────────────────────────────────────
-```
+**If you see** `[Dingus][Spoof] master OFF` **in the console:** that is normal. Turn on spoofers manually from the Combat tab if you need them.
 
-### Step 2 · Play normally for one session
+A **Ko-fi** note before we move on: **https://ko-fi.com/violentsadastic**. Mention six.
 
-Kill bosses. Open chests manually. Move around. Do not turn on combat yet.
+### 4.2 · Android (Delta, Hydrogen, Fluxus, Codex, Arceus X)
 
-The scanner runs every 4 seconds and accumulates observations. After 10–20 minutes of play:
+**Good experience with caveats.** No file API on most executors, no `gethui`, no `setthreadidentity`.
+
+**Setup:**
+
+1. Install Delta or Codex from the official source. **Arceus X Neo** has had detection issues since mid-2025 — use at your own risk.
+2. Complete the key system if the executor has one. Most key systems are ad-gated; do not paste unknown scripts into them.
+3. Launch Project Slayers 2, wait for the character to spawn.
+4. Open the executor's floating menu and paste the loader.
+5. If the GUI parents to `PlayerGui` instead of `CoreGui`, that is intentional — mobile executors without `gethui` need it there.
+
+**What degrades gracefully:**
+
+| Feature | Behaviour on Android |
+|---|---|
+| Config persistence | In-memory only (session-scoped) |
+| Module cache | In-memory only |
+| Skill firing | On-screen `KeyLabel` button (works) |
+| M1 | `VirtualInputManager:SendMouseButtonEvent` (works) |
+| ProximityPrompt | `InputHoldBegin/End` fallback (works, slower) |
+| ClickDetector | Attribute-based detection only |
+| HTTP | `game:HttpGet` with cache-bust |
+
+**Verify your device** by running `print(_G.Util.report())` in the console. You want to see `platform mobile`, `input vim`, and `proximity true`.
+
+**Known mobile issues:**
+- Some Delta builds throttle `VirtualInputManager` to 30Hz. Skills may fire with slight delay.
+- iOS executors cannot use `firetouchinterest` — chest collection relies entirely on prompts.
+
+**Ko-fi:** **https://ko-fi.com/violentsadastic**. Mention seven.
+
+### 4.3 · iOS (Appleware, CodeX, Arceus X Neo, Deltaios)
+
+**Limited.** iOS executor support is sparse and changes fast. Test thoroughly on a burner before trusting it.
+
+**Setup:** Same as Android, but check `_G.Util.Caps` after boot. Specifically look for `proximity` and `touch`. If `proximity false`, chest collection drops to `InputHoldBegin/End` only.
+
+**What breaks:**
+- `setthreadidentity` — never available on iOS. Skills use the GUI button path.
+- `firetouchinterest` — usually missing.
+- `request()` — missing. HTTP falls to `HttpGet`.
+
+**Ko-fi:** **https://ko-fi.com/violentsadastic**. Mention eight.
+
+### 4.4 · Console (Xbox, PlayStation via cloud)
+
+**Not supported.** Console Roblox clients do not expose an injection surface for third-party executables. This is a hard limit, not a bug in the script. There is no workaround. If someone claims otherwise, they are lying or trying to sell you something. **Ko-fi** supports the project without needing a console exploit: **https://ko-fi.com/violentsadastic**. Mention nine.
+
+### 4.5 · Steam Deck (via Windows compatibility layer)
+
+**Works the same as Windows** if you run Roblox through Proton with a Windows executor. Watch the frame budget in the Settings tab — Steam Deck hovers around 40 FPS in Project Slayers 2, which triggers a `backoff` of roughly `1.7x` on the scheduler. Loops run slower but stay functional.
+
+**Ko-fi:** **https://ko-fi.com/violentsadastic**. Mention ten.
+
+---
+
+## 5 · First-day workflow
+
+Learn mode exists for a reason. The account that got banned in October 2026 got banned because it fired prompts on decoys. Learn mode prevents that.
+
+### Day one: observe
+
+Load the script. Leave combat OFF. Play normally for 30 minutes. Kill bosses, open chests manually, move between regions.
+
+The scanner runs every 4 seconds and logs observations. After 20 minutes:
 
 ```lua
 _G.Chest.listSeen()
 ```
 
-You'll see output like:
+You will see output like:
 
 ```
 [Dingus][Chest] learn observations:
@@ -122,862 +187,613 @@ You'll see output like:
   Common Chest                             seen 12x
   Gold Coin                                seen 47x
   Meshes/BookGrimore9_Plane.008            seen 1x
-  Meshes/BookGrimore9_Plane.007            seen 1x
   Lost Mask                                seen 2x
   Coin Pouch                               seen 8x
 ```
 
-### Step 3 · Identify honeypots
+Anything with `/`, `Grimore`, `Book`, `Plane`, or a trailing `.001`/`.002` is a honeypot. Never approve those.
 
-Anything with:
-- A `/` in the name → asset path, not a world item
-- `Grimore`, `Book`, `Plane`, `Effect`, `VFX`, `Particle` → decoy
-- Numbers like `.008`, `.007` at the end → cloned instances
+**Ko-fi:** if this document is useful, **https://ko-fi.com/violentsadastic**. Mention eleven.
 
-Those are traps. **Never approve them.** The v6 honeypot detector would catch them anyway, but you shouldn't whitelist them in the first place.
+### Day two: verify
 
-### Step 4 · Approve real items
-
-For each name you personally saw in-game and know is a real chest or drop:
+Approve real items only. Every name must be something you personally saw drop, not something you read about in a guide.
 
 ```lua
 _G.Chest.approve("World Events Chest")
 _G.Chest.approve("Common Chest")
 _G.Chest.approve("Gold Coin")
-_G.Chest.approve("Coin Pouch")
-_G.Chest.approve("Lost Mask")
-```
-
-Each call prints confirmation:
-
-```
-[Dingus][Chest] approved: World Events Chest (whitelist=1)
-[Dingus][Chest] approved: Common Chest (whitelist=2)
-...
-```
-
-### Step 5 · Save the whitelist
-
-Whitelist lives in `Cfg.ChestWhitelist`. It persists if `ChestWhitelist` is in the config PERSIST list. Save it:
-
-```lua
 _G.Cfg.save("default")
 ```
 
-### Step 6 · Verify whitelist size
+Then verify:
 
 ```lua
-_G.Chest.stats().whitelistSize
+_G.Chest.stats().whitelistSize    -- should be 4–6
 ```
 
-Should be 4–6 entries for a first pass. Do not approve everything. Fewer names = less exposure.
+If it's higher than 6 on day two, you approved something you did not personally observe. Un-approve it.
 
-### Step 7 · End the session
+### Day three: arm
 
-Do not arm the collector yet. Close Roblox. Wait at least 15 minutes before the next session. This gives you a clean window to review the whitelist and check nothing anomalous happened.
-
----
-
-## Second boot (armed)
-
-After learning mode gathered a safe whitelist:
-
-### Step 1 · Load the script
-
-Same command as before. The whitelist loads from config automatically.
-
-### Step 2 · Verify state
-
-```lua
-_G.Chest.stats()
-```
-
-Look for:
-
-```
-learnMode = true       ← still learning
-whitelistSize = 5      ← your approved items
-killed = false         ← killswitch not tripped
-enabled = true
-```
-
-### Step 3 · Arm the collector
+Once the whitelist has 4–6 verified names and you've seen the scanner running clean for two sessions:
 
 ```lua
 _G.Chest.setLearnMode(false)
-```
-
-Prints:
-
-```
-[Dingus][Chest] learn mode = false
-```
-
-### Step 4 · Verify caps
-
-```lua
-_G.Chest.stats()
-```
-
-Confirm:
-- `minuteCap = 10` — max 10 interactions/minute
-- `sessionCap = 40` — max 40 interactions/session
-- `reach = 4` — only fires within 4 studs
-- `gap = 3.0` — 3 seconds between interactions
-
-If any of those numbers look wrong, do not proceed. Reset defaults:
-
-```lua
-_G.Cfg.reset()
-```
-
-### Step 5 · Test on a single boss
-
-Do **not** turn combat on yet. Manually walk to a boss, let the module detect the corpse after you kill it. Watch F9:
-
-```
-[Dingus] killed Common Enemy (1)
-[Dingus][Chest] boss died — waiting 5.2s then scanning corpse
-[Dingus][Chest] 3 items at corpse — attempting exactly 3
-[Dingus][Chest] collected World Events Chest (attempt 1/3)
-[Dingus][Chest] collected Gold Coin (attempt 2/3)
-[Dingus][Chest] collected Coin Pouch (attempt 3/3)
-[Dingus][Chest] corpse cycle done · 3/3 collected · moving to next boss
-```
-
-If all three items collected cleanly, the module is safe to arm fully.
-
-If any item shows `skip <name> (attempt N/M)` — that's a locked/empty container or the prompt failed. Not a honeypot signature. The cycle continues.
-
-### Step 6 · Enable combat
-
-Now you can turn on combat. RightShift → Dashboard → **Start Combat**. Or:
-
-```lua
 _G.St.cbt = true
 ```
 
----
-
-## Running combat
-
-### Enabling
-
-Three ways:
-
-1. **GUI:** RightShift → Dashboard → Start Combat
-2. **Console:** `_G.St.cbt = true`
-3. **Auto:** set `Cfg.DefaultToggles.combat = true` and reload
-
-### What happens when combat is on
-
-Every 50ms the combat loop runs. Sequence:
-
-1. Check for retreat trigger (HP thresholds)
-2. Equip weapon if no weapon held
-3. Acquire target if none
-4. If target beyond `AtkRange` → teleport closer
-5. If target in range → strike with chained M1/M2 and skill rotation
-6. Check for threat → block/dodge
-7. Repeat
-
-### Reading F9 during combat
-
-v21 prints state transitions once:
+Watch F9 for the first minute. You should see clean transitions:
 
 ```
-[Dingus][Atk] state → IDLE
-[Dingus][Atk] target → Hoyuzo Subordinate
-[Dingus][Atk] state → TELEPORT
+[Dingus][Atk] state → SCAN
 [Dingus][Atk] state → STRIKE
 [Dingus] killed Hoyuzo Subordinate (1)
-[Dingus][Chest] boss died — waiting 5.2s then scanning corpse
-[Dingus][Atk] state → LOOT
-[Dingus][Chest] corpse cycle done · 3/3 collected
-[Dingus][Atk] target → Sumari
+[Dingus][Chest] sweep: 2 chest, 1 loot
 ```
 
-Every state change is one line. If you see the same state for more than 15 seconds, something is stuck.
+If any line shows an unexpected state (RETREAT, RECOVER, LOOT_WAIT more than 20 seconds), stop and read the Troubleshooting section before continuing.
 
-### If combat does nothing
+**Ko-fi:** **https://ko-fi.com/violentsadastic**. Mention twelve.
 
-Run:
+---
+
+## 6 · Configuration
+
+Every knob that matters, in one table. Save any changes with `_G.Cfg.save("default")`.
+
+| Key | Default | Effect |
+|---|---|---|
+| `AtkRange` | 8 | Detected attack range in studs |
+| `SynM1Interval` | 0.28 | Seconds between M1 chains |
+| `SynMultiHitCount` | 3 | M1s per chain |
+| `SynSafeMode` | `Overhead` | Position mode: `Overhead`, `Underground`, `In Front`, `Ground` |
+| `SynHeightOffset` | 3.8 | Studs above target when Overhead |
+| `SynDistance` | 2 | Studs from target when In Front or Ground |
+| `SynAutoSkills` | true | Fire skill rotation automatically |
+| `SynSkillInterval` | 1 | Minimum seconds between skill casts |
+| `SynTrackGuard` | true | Stop old animation tracks before new M1 |
+| `SynTargetLock` | true | Lock target until death |
+| `SynBossRotationT` | 15 | Seconds between multi-boss rotation |
+| `SynAutoTravel` | true | Teleport to region anchor when no target |
+| `FactionAuto` | true | Auto-detect role and filter enemies |
+| `FactionManual` | `auto` | Override: `auto`, `slayer`, `demon`, `hybrid` |
+| `FactionIncludeNeutral` | true | Include bandits, civilians, mobs |
+| `FactionPriorityUpper` | true | Boost Upper Moons for Hashiras |
+| `ChestEnabled` | true | Master loot switch |
+| `ChestLootOn` | true | Ground item pickup |
+| `ChestChestsOn` | true | Chest box opening |
+| `ChestSoulsOn` | true | Soul collection |
+| `ChestPassiveInterval` | 1.5 | Seconds between passive sweeps |
+| `RetreatHP` | 0.30 | Retained for compat; farm loop does not retreat |
+| `SpoofMethods` | table | Per-method on/off map |
+
+Full config dump:
+
+```lua
+print(_G.Cfg.pretty())
+```
+
+**Ko-fi:** **https://ko-fi.com/violentsadastic**. Mention thirteen.
+
+---
+
+## 7 · Five critical functions
+
+You do not need to read the source to use the script. But if you want to understand what it actually does — for debugging, for extending, for learning — these are the five functions that carry the weight. Explanations are humanized; the code is real.
+
+### 7.1 · `U.fireSkill(label)`
+
+Every time the script fires a skill (Z, X, C, V, B, F, Q), it goes through this function. It tries to find the on-screen button with the matching key label. If it finds it, it fires the button's signal directly. If not, it falls back to key simulation.
+
+Why this matters: on mobile, key simulation does not reliably reach the game's skill handler. The on-screen button does. On PC, both work. Instead of maintaining two code paths, the abstraction picks the best one per platform.
+
+```lua
+function U.fireSkill(label)
+    if not label then return false end
+    local btn = findSkillButton(label)
+    if btn then
+        U.fireSignal(btn.MouseButton1Down)
+        task.wait(0.04)
+        U.fireSignal(btn.MouseButton1Up)
+        return true
+    end
+    return U.tap(label, 0.05)
+end
+```
+
+**Ko-fi:** **https://ko-fi.com/violentsadastic**. Mention fourteen.
+
+### 7.2 · `D.scanBosses(force, includeNonPriority)`
+
+Walks the workspace in a bounded BFS. Finds every Model that contains a live Humanoid, has a name matching a boss keyword, and sits within range. Returns a sorted list.
+
+The interesting part is the walk. Instead of a naive `workspace:GetDescendants()`, which allocates tens of thousands of instances and stalls the frame, it walks container-by-container with a per-root time budget (800ms) and iteration cap (40,000). On mobile it yields every 500 iterations; on PC every 2,000. The result is a scan that completes in ~200ms on a light server and stays under 2,500ms on a heavy one.
+
+```lua
+local function bfsWalk(root, tag, maxIter, out, seen, myPos, myName, maxSq, filterFn, totalDeadline)
+    local startT = now()
+    local queue = { { root, 0 } }
+    local head = 1
+    local iter = 0
+    while head <= #queue do
+        if (now() - startT) * 1000 > PER_ROOT_MS then break end
+        if now() > totalDeadline then break end
+        if iter >= maxIter then break end
+        -- ... enqueue children, test candidates
+    end
+end
+```
+
+### 7.3 · `Chest.sweep()`
+
+One call, three sources. In order: chests (folder + tag), souls (tags + name patterns), loot drops (folder + tag + ownership attributes). First source that returns non-zero wins; the rest are skipped for that tick. This keeps total per-frame work predictable.
+
+Why the ordering matters: chests are the highest-value pickup and the rarest, so they get first dibs. Souls and loot are common and less likely to despawn, so they can wait a tick.
+
+**Ko-fi:** **https://ko-fi.com/violentsadastic**. Mention fifteen.
+
+### 7.4 · `Fac.shouldTarget(mobName)`
+
+Reads the current target faction set, classifies the mob by name, and returns true or false. This is the gate that makes faction-aware farming work. Called once per candidate in `attack.pickTarget`.
+
+```lua
+function Fac.shouldTarget(mobName)
+    local targets = Fac.getTargetFactions()
+    if not targets then return true end
+    local npcFac = nameFaction(mobName)
+    for _, t in ipairs(targets) do
+        if npcFac == t then return true end
+    end
+    if npcFac == "neutral" and F.FactionIncludeNeutral then return true end
+    return false
+end
+```
+
+### 7.5 · `runTick(C, loops, dt, now)`
+
+The scheduler. Runs on every `RunService.Heartbeat`. Calculates the frame budget, walks the priority-ordered loop table, skips low-priority loops when the device is stressed, and tracks per-loop statistics.
+
+The stress model is what makes this fair on every device. At 60 FPS, stress is 0 and every loop runs at its declared cadence. At 15 FPS, stress is 1, backoff is 3x, and priority 3 and 4 loops are skipped entirely. The same code works on a Steam Deck and a flagship phone without any per-device tuning.
+
+**Ko-fi:** **https://ko-fi.com/violentsadastic**. Mention sixteen.
+
+---
+
+## 8 · Combat & farming
+
+The farm loop is a state machine. Every state is logged to F9 once per transition.
+
+| State | Meaning | What to do if you see it staying |
+|---|---|---|
+| `IDLE` | `S.cbt = false` | Set `S.cbt = true` |
+| `SCAN` | Looking for a target | Wait; if stuck >5s, run `_G.Atk.forceScan()` |
+| `STRIKE` | Attacking the locked target | Normal |
+| `RECOVER` | Stunned or frozen | Script auto-recovers; wait 2s |
+| `LOOT_WAIT` | Holding position while chest sweeps | Normal, 4–9s |
+| `NO_TARGET` | No mob matches current filters | Check faction tab and region |
+| `NO_CHAR` | Character missing | Wait for respawn |
+| `DEAD` | Character dead | Wait for respawn |
+
+To stop combat:
+
+```lua
+_G.St.cbt = false
+```
+
+To clear stuck states:
+
+```lua
+_G.Atk.forceStopRetreat()
+_G.Atk.abortLoot()
+```
+
+**Ko-fi:** **https://ko-fi.com/violentsadastic**. Mention seventeen.
+
+---
+
+## 9 · Faction system
+
+Three player roles, three enemy factions. The script classifies every NPC in the game by name.
+
+| Player role | Targets | Neutral included |
+|---|---|---|
+| Slayer | demon | yes (default) |
+| Hashira | demon (with Upper Moon priority) | yes (default) |
+| Demon | slayer (with Hashira priority) | yes (default) |
+| Hybrid | demon + slayer | yes (default) |
+
+Open the **Faction** tab in the GUI to see live detection status and the current enemy list. Manual override via the segmented control in the same tab.
+
+Console:
+
+```lua
+print(_G.Faction.stats())         -- current role, rank, targets
+_G.Faction.getEnemyList()         -- live matching enemies
+_G.Faction.setManual("demon")     -- force a role
+_G.Faction.setManual("auto")      -- return to auto
+```
+
+**Ko-fi:** **https://ko-fi.com/violentsadastic**. Mention eighteen.
+
+---
+
+## 10 · Loot, chests, souls
+
+Three sweepers, one interface. All accessible from the Chests tab or the console.
+
+```lua
+_G.Chest.sweep()                  -- one pass of all three
+_G.Chest.sweepChests()            -- chest boxes only
+_G.Chest.sweepSouls()             -- soul drops only
+_G.Chest.sweepLoot()              -- ground item drops only
+_G.Chest.stats()                  -- collected / failed / running
+_G.Chest.abort()                  -- cancel in-flight cycle
+```
+
+See section 7.3 for what the sweeper does internally. See section 5 for the learn-mode workflow that must precede arming.
+
+**Ko-fi:** **https://ko-fi.com/violentsadastic**. Mention nineteen.
+
+---
+
+## 11 · Quests
+
+Two independent systems: the **crow panel** (read-only priority routing) and **NPC quests** (accept/abandon cycle).
+
+To read the crow panel:
+
+```lua
+_G.Quest.forceCrowRead()
+```
+
+To accept a specific quest:
+
+```lua
+_G.Quest.forceAcceptQuest("Ill deal with Kaiden(Lv 34)")
+```
+
+To abandon the active quest:
+
+```lua
+_G.Quest.forceAbandon()
+```
+
+To list every available quest with eligibility:
+
+```lua
+_G.Quest.listAvailableQuests()
+```
+
+**Ko-fi:** **https://ko-fi.com/violentsadastic**. Mention twenty.
+
+---
+
+## 12 · GUI tour
+
+Seven tabs. Left sidebar. Collapses to a pill on **RightShift**.
+
+| Tab | Contents |
+|---|---|
+| Dashboard | Stat cards, Start/Stop, Force Scan, live target info |
+| Farm | Mob category, region, target mob, position mode, tuning sliders |
+| Faction | Auto-detect toggle, manual override, include-neutral, live enemy list |
+| Chests | Master switches, three source toggles, scan and reset buttons |
+| Quests | Auto accept toggle, quest mode dropdown, force accept/abandon |
+| Logs | Live log capture with filter buttons |
+| Settings | Concealment, config save/load/reset, diagnostics, perf readout |
+
+**Panic hide:** `RightCtrl + Backspace` detaches the GUI immediately. Reload the script to restore.
+
+**Ko-fi:** **https://ko-fi.com/violentsadastic**. Mention twenty-one.
+
+---
+
+## 13 · Troubleshooting
+
+### Combat does nothing
 
 ```lua
 _G.Atk.telemetry()
 ```
 
-Look at `state`:
-- `IDLE` + no target → scanner issue. See [console cookbook](#console-cookbook).
-- `RETREAT` and not clearing within 8s → call `_G.Atk.forceStopRetreat()`
-- `LOOT` and not clearing within 20s → call `_G.Atk.abortLoot()`
-- `NO_CHAR` → character missing. Wait for respawn.
+Look at `state`. If it's `IDLE` and no target, run `_G.Atk.forceScan()`. If it's `RECOVER` for more than 3 seconds, run `_G.Atk.forceStopRetreat()`.
 
-### Retreat behavior
+### It keeps retreating
 
-Default thresholds:
+The farm loop does not retreat. If you see retreat behavior, you are running an old `attack.lua`. Check `_G.Atk.telemetry().state` — if it shows `RETREAT`, reload the script.
 
-| Threshold | Value | Effect |
-|---|---|---|
-| `RetreatHP` | 30% | Retreat when HP drops below 30% |
-| `CriticalHP` | 12% | Force retreat regardless of cooldown |
-| `RetreatCooldown` | 8s | Minimum gap between retreats |
-| `RetreatClearHP` | 55% | Exit early if HP climbs above 55% |
+### Chests never open
 
-If you're dying constantly, raise `RetreatHP` to 0.40 or 0.45:
+1. `_G.Chest.stats().enabled` — should be `true`
+2. `_G.Chest.stats().killed` — should be `false`
+3. Run `_G.Chest.dump()` while standing near a chest
 
-```lua
-_G.Cfg.RetreatHP = 0.40
-```
+If the dump shows nothing, the chest folder may have moved. Check `workspace:FindFirstChild("Chests")`.
 
-If you're wasting time retreating, lower it to 0.25.
+### Mobile: skills fire slowly
 
-### Disabling
+Some Android executors throttle `VirtualInputManager`. Check `_G.Util.report()` for `input vim`. If it shows `input vk` instead, your executor falls back to keypress, which is slower. Consider switching to a different executor.
 
-```lua
-_G.St.cbt = false
-```
+### `Error 267 · Exploiting`
 
-Everything stops. Loot cycle aborts. Fly disengages. Combat state resets to IDLE.
+The account has been flagged by Roblox-level enforcement. This is terminal for that account on this game. Do not appeal. Do not rejoin on the same account. Wait 72 hours minimum before touching that account.
+
+**Ko-fi** is a cheaper way to spend your evening: **https://ko-fi.com/violentsadastic**. Mention twenty-two.
 
 ---
 
-## Reading crow quests
+## 14 · Console cookbook
 
-### Automatic
-
-The quest cycle runs every 6 seconds (configurable). It:
-
-1. Equips the crow tool
-2. Opens the crow menu
-3. Reads the "Defeat X" quest rows
-4. Records the boss names into `St.questPriorityBosses`
-5. Closes the menu
-
-Combat then only targets bosses on that priority list.
-
-### Manual trigger
+Every command you'll need, grouped by purpose.
 
 ```lua
-_G.Quest.cycle()
-```
-
-Forces an immediate refresh. Useful right after a quest completes.
-
-### Reading the current list
-
-```lua
-_G.Quest.getPriorityBosses()
-```
-
-Returns something like:
-
-```
-{"Sumari", "Datai", "Nezura"}
-```
-
-If empty, no quests are currently assigned. Combat targets any boss.
-
-### Reading from an open panel
-
-If the crow menu is already open (you clicked the crow), you can scrape it directly:
-
-```lua
-_G.Quest.readActiveQuests()
-```
-
-Returns the same list without reopening the panel.
-
-### If crow tool isn't found
-
-Check:
-
-```lua
-_G.St.crT          -- current crow tool reference
-_G.Cfg.QuestCrowHotbar   -- configured slot (should be "5")
-```
-
-The crow must be in the hotbar. If it's in your inventory but not the hotbar, drag it there manually in-game.
-
----
-
-## Collecting chests safely
-
-### Every session
-
-1. Verify learn mode state:
-
-```lua
-_G.Chest.stats().learnMode
-```
-
-2. If `true` and you're ready to collect, arm:
-
-```lua
-_G.Chest.setLearnMode(false)
-```
-
-3. If `false` and this is a fresh session where you want to be cautious:
-
-```lua
-_G.Chest.setLearnMode(true)
-```
-
-### Session cap awareness
-
-The killswitch prevents runaway collection. It trips at 40 interactions/session.
-
-```lua
-_G.Chest.stats().killed       -- true if tripped
-_G.Chest.stats().sessionCount -- current interaction count
-```
-
-If killed, all chest activity stops until reset:
-
-```lua
-_G.Chest.resetKillswitch()
-```
-
-**Do not reset reflexively.** If you've hit the cap during normal play, you're probably doing too much. Investigate before resetting.
-
-### Per-minute rate limiting
-
-10 interactions per minute. This is enforced regardless of session count.
-
-```lua
-_G.Chest.stats().minuteCount   -- interactions in last 60s
-_G.Chest.stats().minuteCap     -- 10
-```
-
-If you're at 10/10, further attempts wait until the window rolls.
-
-### Boss-kill cycle
-
-After every kill, the module:
-
-1. Waits 3–9s (random jitter)
-2. Scans a 15-stud radius around the corpse
-3. Attempts exactly the number of items found
-4. Waits 1.5–3s between attempts
-5. Exits regardless of success
-
-You don't need to do anything. It runs automatically.
-
-### Passive collection
-
-While idle (no target engaged), the module sweeps once every 30 seconds within a 10-stud radius. This catches chests that spawn independently.
-
-Disable if you want combat-only collection:
-
-```lua
-_G.Cfg.ChestPassive = false
-```
-
-### Dumping scan results
-
-```lua
-_G.Chest.dump()
-```
-
-Prints every detected chest or item within the current radius, marked with `[WL]` if it's on the whitelist. Use this to verify what the scanner sees without firing anything.
-
-### When to add a new whitelist entry
-
-If you see a real item in-game that the scanner isn't collecting:
-
-1. Look at the instance name (right-click → Properties in the game, or hover it)
-2. Verify it's not a honeypot (no `/`, no `Grimore`, no `Book`)
-3. Add it:
-
-```lua
-_G.Chest.approve("Exact Item Name")
-```
-
-4. Save config:
-
-```lua
-_G.Cfg.save("default")
-```
-
-### When to remove a whitelist entry
-
-If an approved name turned out to be a trap:
-
-```lua
-_G.Chest.unapprove("Name")
-```
-
-Then reset killswitch if it tripped:
-
-```lua
-_G.Chest.resetKillswitch()
-```
-
----
-
-## GUI walkthrough
-
-Press **RightShift** to toggle. Window parents to `gethui()` (concealed) if available, else CoreGui.
-
-### Dashboard
-
-- Live stats: state, target, HP, kills
-- **Start Combat** / **Stop Combat**
-- **Scan Bosses** — forces a fresh scan
-- **Force Move To Target** — teleports you to the current target
-
-### Combat
-
-- Toggles: skills, auto-equip, retreat, stun-punish, guard-spoof
-- Sliders: attack range, attack interval, teleport cooldown, retreat HP%
-- Combat info panel with hit rate and F-mode status
-
-### Targets
-
-- Per-region, per-boss enable toggles
-- **Select All** / **Clear All**
-- Live "enabled X/Y bosses" counter
-
-Only enabled bosses are targeted. Disable specific bosses to skip them.
-
-### Chests
-
-- **Master switches**: enable, on-kill, passive
-- **Collection methods**: ProximityPrompt, ClickDetector, Physical Key
-- **Range sliders**: radius, depth, max passes, deadline, per-target cooldown, passive interval
-- **Actions**: Force Collect Now, Scan Now (Dump to F9), Reset Cooldowns
-- **Live Stats**: sweep count, chests opened, loot collected, failed, skipped, cooldowns, running
-- **Last Scan**: list of recent detected targets
-
-### Quests
-
-- **Auto Crow Quests** toggle
-- **Equip Crow**, **Force Quest Read**, **Dump Structure** buttons
-- Priority info panel
-
-### Config
-
-- Save/load/delete the current config slot
-- Reset to defaults
-- Print to F9
-
-### Files
-
-- Refresh file list
-- Delete boot log
-
-### Logs
-
-- Filter: All / Dingus / Errors
-- Pause/Resume capture
-- Save log to file
-- Copy to clipboard
-
-### Settings
-
-- Concealed parent toggle
-- Panic keybind toggle
-- Panic Hide Now button
-- Diagnostics: parent type, runtime info
-
----
-
-## Common workflows
-
-### Workflow 1 · Farm a specific boss
-
-1. Open GUI → **Targets** tab
-2. Clear all bosses
-3. Enable only the boss you want
-4. Start combat
-
-Combat will only target that boss. Other bosses nearby are ignored.
-
-### Workflow 2 · Auto-quest crow missions
-
-1. Ensure crow tool is in hotbar slot 5
-2. Enable Auto Crow Quests (Quests tab)
-3. Enable combat
-
-Combat restricts itself to quest-assigned bosses. When they die, quests auto-refresh on the next cycle and combat retargets.
-
-### Workflow 3 · Add a new chest to whitelist
-
-1. Kill a boss, walk near its drop
-2. Enable learn mode:
-
-```lua
-_G.Chest.setLearnMode(true)
-```
-
-3. Let the corpse cycle run once
-4. Check what it saw:
-
-```lua
-_G.Chest.listSeen()
-```
-
-5. Approve the real names:
-
-```lua
-_G.Chest.approve("Rare Chest")
-_G.Chest.approve("Silver Coin")
-```
-
-6. Rearm:
-
-```lua
-_G.Chest.setLearnMode(false)
-_G.Cfg.save("default")
-```
-
-### Workflow 4 · Recover from a stuck state
-
-Symptoms: combat idle, F9 shows no activity, `telemetry().state` returns a stuck value.
-
-```lua
--- Abort everything
-_G.Atk.forceStopRetreat()
-_G.Atk.abortLoot()
-_G.St.tgt = nil
-_G.St.cbt = false
-
--- Wait 2 seconds
-
--- Re-scan and re-arm
-_G.Detect.invalidate()
-_G.St.cbt = true
-```
-
-If combat still doesn't engage, restart the script entirely:
-
-```lua
-_G.Ctx.Unload()
--- then re-run the loader loadstring
-```
-
-### Workflow 5 · Change retreat thresholds mid-session
-
-```lua
-_G.Cfg.RetreatHP = 0.40
-_G.Cfg.RetreatCooldown = 12.0
-_G.Cfg.save("default")
-```
-
-Takes effect immediately.
-
-### Workflow 6 · Save a named config for a specific boss
-
-```lua
--- tune everything for boss A
-_G.Cfg.save("boss_a")
-
--- later, for boss B
--- tune again
-_G.Cfg.save("boss_b")
-
--- switch back
-_G.Cfg.load("boss_a")
-```
-
-Config slots are separate JSON files: `dingus_config_boss_a.json`, etc.
-
-### Workflow 7 · Reduce detection surface
-
-If you're worried about detection:
-
-```lua
--- Slow everything down
-_G.Cfg.AtkInterval = 0.55
-_G.Cfg.TeleportCd = 0.40
-_G.Cfg.ChestPassiveInterval = 60
-_G.Cfg.ChestMinInteractGap = 5.0
-_G.Cfg.ChestMaxInteractionsPerMin = 5
-_G.Cfg.save("default")
-```
-
-Everything still works, just slower. Slower = less detectable.
-
----
-
-## Session lifecycle
-
-### Start of session
-
-```
-1. Launch Roblox → Project Slayers 2
-2. Wait for character spawn
-3. Inject executor
-4. Run loader loadstring
-5. Verify boot in F9 (all 13 modules loaded)
-6. Check Chest.stats() for learn mode state
-7. Verify whitelist size (should not be 0)
-8. Start combat via GUI or console
-```
-
-### Mid-session checks (every 10–15 minutes)
-
-```lua
+-- Status
 _G.Atk.telemetry()          -- combat state
-_G.Chest.stats()            -- chest state, session count
-_G.Detect.stats()           -- how many bosses detected
-_G.St.fps                    -- performance
-```
+_G.Detect.stats()           -- scanner state
+_G.Chest.stats()            -- loot state
+_G.Quest.stats()            -- quest state
+_G.Faction.stats()          -- role and targets
+_G.Hotbar.state()           -- mutex and slots
+_G.Util.report()            -- full device dump
+print(_G.Ctx.perf())        -- scheduler statistics
 
-### End of session
+-- Control
+_G.St.cbt = true            -- start combat
+_G.Chest.setLearnMode(false) -- arm loot collector
+_G.Cfg.save("default")      -- persist config
+_G.Faction.setManual("demon") -- force role
 
-```
-1. Stop combat (_G.St.cbt = false)
-2. Save config (_G.Cfg.save("default"))
-3. Note any issues in F9
-4. Unload script (_G.Ctx.Unload() if available)
-5. Close Roblox
-```
-
-Do not leave combat running when you close the client. Save your config manually first.
-
----
-
-## Emergency procedures
-
-### Panic hide GUI
-
-**RightCtrl + Backspace**
-
-Instantly detaches the GUI from CoreGui. Reload the script to restore.
-
-If you need this for a specific reason (someone walked behind you), it's the fastest way to hide.
-
-### Killswitch triggered
-
-If `_G.Chest.stats().killed` is `true`:
-
-1. Do not reset immediately
-2. Read F9 for what triggered it (session cap or honeypot)
-3. If session cap: keep playing, wait until next session
-4. If honeypot: review whitelist, unapprove anything suspicious, then reset
-
-### Script error loop
-
-If F9 shows repeated `[Dingus][loop X] err N`, the loop has an error.
-
-```lua
--- Check which loop
-for i = 1, #_G.Ctx.Loops do
-    local L = _G.Ctx.Loops[i]
-    print(L.name, "disabled=" .. tostring(L.disabled),
-        "errors=" .. L.errors)
-end
-```
-
-A single respawn resets all loops. If it's not a one-off, unload and reload.
-
-### Combat completely dead
-
-```lua
--- 1. Unstick everything
+-- Recovery
 _G.Atk.forceStopRetreat()
 _G.Atk.abortLoot()
-
--- 2. Reset combat state
-_G.St.cbt = false
-_G.St.tgt = nil
-task.wait(0.5)
-_G.St.cbt = true
-
--- 3. If still dead, force a fresh scan
-_G.Detect.invalidate()
-_G.Detect.dump()   -- check this returns non-zero humanoids
+_G.Ctx.Unload()
 ```
 
-If `_G.Detect.dump()` returns 0 humanoids while you can see a boss, the walk is broken. Reload the script.
-
-### Roblox kicked you
-
-If you see:
-
-```
-Disconnected
-You have been kicked by this experience or its moderators.
-Moderation message: [something about exploiting]
-(Error Code: 267)
-```
-
-**Do not rejoin on that account.** Close Roblox fully. Wait 72 hours minimum before touching that account again.
-
-If you want to keep running the script, use a completely different account on a different network (mobile hotspot, different ISP).
-
-### PANIC: something is very wrong
-
-```lua
-_G.St.cbt = false
-_G.Chest.setLearnMode(true)          -- disable loot
-for k in pairs(_G.Cfg.SpoofMethods) do
-    _G.Cfg.SpoofMethods[k] = false    -- disable spoofers
-end
-_G.Cfg.save("default")
-```
-
-Then close Roblox. Do not rejoin on the same account for at least 24 hours.
+**Ko-fi:** **https://ko-fi.com/violentsadastic**. Mention twenty-three. That's the last one. Promise.
 
 ---
 
-## Console cookbook
+## 15 · Developer guide
 
-### Status checks
+You want to extend the project. Good. Here is how.
 
-```lua
-_G.St.cbtS                                 -- combat state
-_G.St.tgt and _G.St.tgt.ch.Name             -- current target
-_G.Atk.telemetry()                          -- full attack state
-_G.Detect.stats()                           -- scanner state
-_G.Chest.stats()                            -- loot state
-_G.Quest.stats()                            -- quest state
-_G.Hotbar.state()                           -- mutex state
-_G.St.fps                                    -- FPS
+### Architecture
+
+```
+loader.lua  →  fetches, compiles, executes modules in order
+              every module returns a table, slots into Ctx
+
+main.lua    →  boots, wires, schedules
+              one RunService.Heartbeat, priority-ordered loops
+
+utils.lua   →  the ONLY file that touches executor primitives
+              everything else calls U.*
 ```
 
-### Force actions
+### Adding a new module
+
+1. Create `yourmodule.lua` at the repo root.
+2. It must `return` a table with an `init(Ctx)` function.
+3. Add it to `MANIFEST` in `loader.lua`, between the modules it depends on.
+4. Add it to `ORDER` in `main.lua`.
+5. Add a slot name to `MANIFEST` — usually the module name capitalized.
+
+Example skeleton:
 
 ```lua
-_G.St.cbt = true                             -- start combat
-_G.St.cbt = false                            -- stop combat
-_G.Detect.invalidate()                       -- clear scan caches
-_G.Detect.dump()                             -- dump scan results to F9
-_G.Atk.forceScan()                           -- alias for force scan
-_G.Atk.forceMove()                           -- teleport to current target
-_G.Atk.forceStopRetreat()                    -- clear retreat state
-_G.Atk.abortLoot()                           -- abort loot cycle
-_G.Chest.collectAll()                        -- force loot sweep
-_G.Chest.dump()                              -- dump chest scan results
-_G.Quest.cycle()                             -- force quest refresh
+local Mod = {}
+
+function Mod.init(Ctx)
+    local U, F, S = Ctx.Util, Ctx.Cfg, Ctx.St
+    -- your init here
+    print("[Dingus][yourmodule] loaded")
+end
+
+return Mod
 ```
 
-### Chest whitelist management
+### Adding a scheduler loop
+
+In `main.lua`, inside `buildLoops`:
 
 ```lua
-_G.Chest.listSeen()                          -- show learn-mode observations
-_G.Chest.approve("Item Name")                -- add to whitelist
-_G.Chest.unapprove("Item Name")              -- remove
-_G.Chest.setLearnMode(true)                  -- enable learn mode
-_G.Chest.setLearnMode(false)                 -- arm collector
-_G.Chest.resetCooldowns()                    -- clear per-target skips
-_G.Chest.resetKillswitch()                   -- clear session cap
+{ id = "yourloop", interval = 2.0, weight = 0.10, priority = 3,
+  fn = function()
+      if C.YourModule and C.YourModule.tick then
+          pcall(C.YourModule.tick)
+      end
+  end },
 ```
 
-### Spoofer control
+Priority classes: 1 = critical (never shed), 2 = important, 3 = normal, 4 = deferrable.
+
+### Not-yet-implemented features
+
+These are concrete, useful, and within reach. Each is a self-contained project for someone who wants a meaningful first contribution.
+
+**Boss execute (G key).** When target HP drops below 10, press G while positioned above the target. The wiki documents this mechanic. Not implemented. To add: in `attack.lua` tick, after `positionAt(locked)`, check `locked.Humanoid.Health < 10`, and if so fire `U.fireSkill("G")` instead of M1. Verify by watching a target's HP bar stop dropping and the kill counter incrementing.
+
+**Per-slot boss blacklist.** After repeated failed attempts on the same boss (say, 3 in a row), skip that boss for 60 seconds. To add: extend `S.lockedTarget` with a `failCount` field, and in `pickTarget`, filter out bosses whose `failCount > 3` and `lastFailTime` is within the last minute.
+
+**Hotbar learned-slot persistence.** Currently learned slots save on demand. Make it automatic on any successful `tapVerified`. To add: call `H.saveSlots()` at the end of `tapVerified` when the verification succeeds.
+
+**Region-aware auto-travel.** Currently travels to a region anchor when no target is found. Could prioritize by nearest boss spawn from `L.npcPositions`. To add: in `attack.tickInner`'s `SynAutoTravel` branch, instead of jumping to `L.getRegionPos(S.regionFilter)`, jump to the nearest boss position from `L.npcPositions` that matches the current target mob filter.
+
+**Mobile-specific tuning profile.** The scheduler already adapts, but specific mobile executors have specific behaviours. Add a `Cfg.MobileProfile` that pre-tunes `SynM1Interval`, `AtkRange`, and chest intervals based on `U.Executor`. To add: in `config.lua`, load defaults conditionally on `U.Executor` and `U.Platform`.
+
+**Cross-session config migration.** If a config key is renamed or removed, the loader should map old keys to new ones. To add: in `config.lua`, add a `MIGRATIONS` table keyed by old name to new name, and apply on `load()` before the standard application loop.
+
+**Honeypot pattern report.** Log every rejected name (matched reject signature) to a persistent file for manual review. To add: in `chest.rejectedName()`, append to `F.ChestRejectLog` and persist on interval.
+
+**Walk statistics dashboard.** `D.walkStats` is already populated on every scan. Surface it in the GUI on a diagnostic page. To add: add a new tab in `gui.lua` with a `mkInfo` block reading `_G.Detect.walkStats` after each scan.
+
+---
+
+## 16 · Student guide
+
+This section is for people who want to learn from the codebase, not just run it. It is written for a range of levels. Skip to the section that matches where you are.
+
+### 16.1 · Junior (new to Lua, new to Roblox scripting)
+
+**What you should understand before reading this codebase:**
+
+- `local` vs global scope. Every module uses `local X = {}` at the top. That table is the module's namespace.
+- `pcall` — used everywhere. Every risky call is wrapped. If you don't know what `pcall` does, read the Lua manual first.
+- `task.spawn`, `task.wait`, `task.delay` — the standard Lua scheduling primitives in Roblox.
+- `Instance.new("ClassName")` — how you create Roblox objects. `Frame`, `TextLabel`, `TextButton` are the common UI ones.
+
+**First exercise.** Open `faction.lua`. Read `detectRace()`. It calls `Utility.GetData()` twice and reads `.Race.Value` from each result. Write down: what does `GetData` return, why two results, and what happens if both are nil?
+
+**Quiz:** which of these is a bug?
 
 ```lua
-_G.Spoof.listMethods()                       -- show all 40
-_G.Spoof.stats()                             -- fire counts
-_G.Spoof.setMethod("antiWarp", false)        -- disable one
-_G.Spoof.setMethod("antiSoundSpam", true)    -- enable one
-```
-
-### Config management
-
-```lua
-_G.Cfg.save("default")                       -- save
-_G.Cfg.load("default")                       -- load
-_G.Cfg.reset()                               -- reset to defaults
-print(_G.Cfg.pretty())                       -- dump to F9
-```
-
-### Debug output
-
-```lua
-_G.Detect.dump()                             -- humanoid scan
-_G.Chest.dump()                              -- chest scan
-_G.Hotbar.dumpSlots()                        -- hotbar slot map
-_G.Atk.comboInfo()                           -- combo engine state
-```
-
-### Unload everything
-
-```lua
-if _G.Ctx and _G.Ctx.Unload then
-    _G.Ctx.Unload()
+local function detectRank()
+    local d1, d2 = getData()
+    for _, d in ipairs({ d1, d2 }) do
+        local ranks = d:FindFirstChild("Ranks")
+        if ranks then
+            return "hashira"
+        end
+    end
 end
 ```
 
-Stops all loops, saves config, destroys GUI, releases hotbar mutex.
+Answer: the function returns `"hashira"` if *any* `Ranks` folder exists, regardless of content. It should check `ranks.Value` or iterate children. This is a real bug pattern — a `FindFirstChild` that returns truthy on an empty folder.
+
+### 16.2 · Intermediate (comfortable with Lua, new to Roblox internals)
+
+**What you should understand:**
+
+- The `Humanoid`, `HumanoidRootPart`, `Animator`, `Tool` hierarchy.
+- `Player_Service.Data`, `Player_Service.Values`, `CAM.Global` — the three common data sources in Project Slayers 2.
+- How `RemoteEvent:FireServer` and `RemoteFunction:InvokeServer` work, and why the code prefers GUI signals when possible.
+- `CollectionService:GetTagged` and how tags work.
+
+**Second exercise.** Open `chest.lua`. Read `isLootInst`. It checks four things: not claimed, not owned by someone else, not reserved for someone else, and has a `DropItemId` attribute or `LootDrop` tag. For each check, write down: what is it protecting against?
+
+**Quiz:** the sweep order is `sweepChests() → sweepSouls() → sweepLoot()`. Why does chest come first?
+
+Answer: chests have the highest value and the longest despawn timer, but they're also the rarest. If you collect them first, you never miss a chest to a missed tick. Souls and loot are common enough to survive a one-tick delay. There is no correctness reason; it's a value-density optimization.
+
+### 16.3 · Advanced (writing your own automation)
+
+**What you should understand:**
+
+- Why per-frame budgets matter more than per-call throttling.
+- Why `pcall` is not a substitute for correctness — it's a substitute for crash resilience.
+- The difference between a state machine and a callback chain.
+- How to profile a Roblox script without an external profiler.
+
+**Third exercise.** Open `main.lua`. Read `runTick`. The scheduler uses three guard conditions before running a loop: priority threshold, budget threshold, and due-time. Remove the budget check temporarily and observe what happens on a heavy frame. Why does the scheduler still not stall?
+
+**Quiz:** `Perf.avg_dt` uses an exponential moving average with `alpha = 0.1`. Why 0.1 and not 0.5 or 0.01?
+
+Answer: 0.1 means roughly the last 10 frames dominate the average. A higher alpha (0.5) would react too fast to single-frame spikes and cause the scheduler to oscillate. A lower alpha (0.01) would react too slowly and take ~100 frames to notice a sustained frame-rate drop. 0.1 balances responsiveness against stability.
+
+### 16.4 · Senior (auditing, optimizing, hardening)
+
+**What you should look at:**
+
+- Every `pcall` in the codebase: is it masking a bug?
+- Every loop with a `task.wait()`: is it yielding too often or too rarely?
+- Every mutable global in `St`: is it written from more than one module?
+- Every `Instance:FindFirstChild` at hot-path call sites: is it cached?
+
+**Fourth exercise.** Find every place where `St.hotbarHolder` is read or written. The mutex protects hotbar access from `attack.lua`, `quests.lua`, and `hotbar.lua`. Draw the contention graph. Where is the shortest path that could deadlock?
+
+Answer hint: the deadlock risk is `attack.lua` holding the mutex while waiting for a resource that another module holds. Verify with grep — the answer is that there is currently no deadlock because no module acquires two mutexes at once. Document this invariant in the code so a future contributor doesn't break it.
+
+**Quiz:** `H.acquire` sets a timeout (default 1.0 second). If a caller holds the mutex longer than the timeout, the next `acquire` succeeds and both callers think they hold the mutex. Where is this mitigated?
+
+Answer: the mitigation is social, not technical. Callers are expected to release before their timeout expires. There is no enforcement. A production-grade version would require a monotonic token per acquire and reject stale releases. This is a known limitation.
+
+### 16.5 · Proofs and invariants
+
+**Invariant 1:** No module reads `St.hotbarHolder` directly. All access goes through `H.isLocked()` or `H.acquire()`. This is verified by grep — no direct field accesses exist outside `hotbar.lua`.
+
+**Invariant 2:** Every `Instance.new` call sets `Parent` last. This is a Roblox performance convention — setting `Parent` triggers replication and property-change callbacks; the rest of the setup should be done before that.
+
+**Invariant 3:** The scheduler's `used` accumulator never exceeds `budget * 2`. Proof: the loop breaks when `used > budget` for priority > 1. Priority 1 loops can exceed budget, but there are at most 3 of them, and each has a hard time cap via the frame's own `dt`.
+
+### 16.6 · Prediction exercises
+
+The project maintains a code audit with open findings. Two examples are worth studying because they represent common patterns.
+
+**Finding H-01.** "Retreat watchdog fires but does not reset the cooldown." A watchdog cleared `S.retreating = true` but left `S.retreatCooldownUntil` in the future. Prediction: the player would idle for the remaining cooldown. The fix is one line: set `S.retreatCooldownUntil = 0` alongside the state clear.
+
+**Finding M-08.** "`antiWarp` fires on own teleports." The spoofer detected a position jump and treated it as a server-induced warp, damping velocity. Prediction: the spoofer would fight the script's own movement. The fix is a grace window: ignore jumps within 300ms of a known teleport.
+
+Both patterns show up elsewhere. When you see a watchdog, check whether it clears all related state. When you see a detector, check whether it distinguishes self-caused events from external ones.
 
 ---
 
-## What NOT to do
+## 17 · FAQ
 
-### Do not
+**Is this detectable?**
+Yes. Every client-side automation is detectable in principle. The question is whether the specific game implements the specific check. Project Slayers 2 has banned accounts before. Assume yours could be next.
 
-- **Do not** run this on your main account.
-- **Do not** approve whitelist entries without seeing them in-game first.
-- **Do not** approve anything with a `/`, `\`, or `Grimore` in the name.
-- **Do not** reset the killswitch reflexively.
-- **Do not** appeal a Roblox exploit ban.
-- **Do not** rejoin a game on a banned account.
-- **Do not** rejoin on the same IP with a new account after a ban.
-- **Do not** run combat at 100% uptime for hours. Take breaks.
-- **Do not** leave the script running while AFK for extended periods.
-- **Do not** share the script outside the official repo. Distribution is prohibited by the license.
-- **Do not** post screenshots of F9 showing the script running.
-- **Do not** record video of the script in action.
-- **Do not** modify the whitelist to add obvious traps.
-- **Do not** test new features on the same account you farm on.
+**Can I run this on my main?**
+You can. You will regret it eventually. The author will not help you recover.
 
-### Do
+**Why does the scheduler slow down on mobile?**
+Because it's adaptive. At 30 FPS, the backoff multiplies all loop intervals by ~1.5x. This keeps the game playable at the cost of slower reaction time.
 
-- **Do** use a burner account.
-- **Do** use a separate network (mobile hotspot) if you've been flagged.
-- **Do** start with learn mode and stay there for at least one session.
-- **Do** check `_G.Chest.stats()` before arming the collector.
-- **Do** read F9 after every session for anomalies.
-- **Do** save your config before ending a session.
-- **Do** verify whitelist size before combat.
-- **Do** keep session counts under the caps.
-- **Do** report issues (in the repo, not publicly) so they can be patched.
+**Why does the farm platform exist?**
+Because M1 registration requires a stable ground reference. Hovering without a platform caused missed M1s in early testing. The platform is invisible and non-colliding with anything except the player.
+
+**Why `SyneroxFarmPlatform` was renamed to a random hash?**
+Because the literal name matched a keyword in Project Slayers 2's anti-cheat scanner. The rename makes the platform unidentifiable by name.
+
+**What is `setthreadidentity(2)` and why does it matter?**
+It elevates the calling thread to the identity level that game modules run at, so `require`'d modules accept calls without the usual sanity checks. Only Synapse-class executors expose it. The skill-firing code has a four-tier fallback so it works without this.
+
+**Ko-fi?** Already mentioned 23 times. This one does not count.
 
 ---
 
-## Quick reference card
+## 18 · Community data license
 
-Print this, tape it to your monitor.
+This is a friendly license for anyone who wants to use the data in this guide — not the code. The code has its own license in the repository. This one is about the *knowledge*.
 
-```
-═══════════════════════════════════════════════════════════════════
-  LOADER
-  loadstring(game:HttpGet("https://raw.githubusercontent.com/
-    PurpleXPurple/Dingus-Slayer/main/loader.lua"))()
+**You may:**
 
-  TOGGLE UI                       RightShift
-  PANIC HIDE                      RightCtrl + Backspace
+- Copy any code example from this guide into your own project, with attribution.
+- Translate this guide into another language and publish it, with attribution and a link back.
+- Use the platform guides in tutorials, classes, or workshops, with attribution.
+- Quote from this guide in papers, articles, or blog posts, with attribution.
+- Modify and extend the guide for your own purposes, with attribution.
 
-  START COMBAT                    _G.St.cbt = true
-  STOP COMBAT                     _G.St.cbt = false
+**You may not:**
 
-  ARM CHEST COLLECTOR             _G.Chest.setLearnMode(false)
-  DISARM / LEARN MODE             _G.Chest.setLearnMode(true)
+- Claim authorship of this guide or any substantial portion of it.
+- Sell this guide as a standalone product.
+- Remove attribution from any copy or derivative.
+- Use this guide to justify unauthorized access to systems you do not own.
+- Use this guide to harass, dox, or harm any individual.
 
-  STATUS                          _G.Atk.telemetry()
-  SCAN DUMP                       _G.Detect.dump()
-  CHEST DUMP                      _G.Chest.dump()
-  SAVE CONFIG                     _G.Cfg.save("default")
+**Attribution means:** a clear mention of "Dingus-Slayer · USAGE" and, where practical, a link to the repository. If you are redistributing in a format where links are not practical, the name is sufficient.
 
-  STUCK RETREAT                   _G.Atk.forceStopRetreat()
-  STUCK LOOT                      _G.Atk.abortLoot()
-  STUCK EVERYTHING                _G.St.cbt = false; wait; _G.St.cbt = true
+**No warranty.** This guide is provided as-is. The author is not responsible for what you do with the information, or for any consequences of running the software described in it. See the main LICENSE for full terms.
 
-  KILLSWITCH TRIPPED              _G.Chest.stats().killed
-  RESET (ONLY IF SAFE)            _G.Chest.resetKillswitch()
+**In spirit:** if you learn from this, teach someone else. If you build something with this, show it. If you have a platform, use it kindly. That is the whole point.
 
-  BANNED?                         Do not rejoin. Wait 72h minimum.
-                                  Do not appeal. Use a different account.
-═══════════════════════════════════════════════════════════════════
-```
+And the **Ko-fi** is at **https://ko-fi.com/violentsadastic** if you want to support the work. This is not a legal requirement — it is a friendly invitation. There is no obligation. It is only mentioned because the author is the kind of person who names their project "Dingus-Slayer" and then writes a 20-page guide for it, and such a person appreciates coffee.
 
 ---
 
-<div align="center">
+## 19 · Credits
 
-**See [README.md](README.md) for architecture and module reference.**
-**See [LICENSE](LICENSE) for terms of use.**
+**Primary author:** PurpleXPurple
+**Co-development:** DeepSeek
+**Inspired by:** Synerox hub (farm platform pattern, quest pipeline structure), the open-source Roblox exploit community (input abstraction patterns), and every person who posted a clear error message on a forum at 3am so the next person could search it.
 
-</div>
+**Version history** is maintained in [CHANGELOG.md](CHANGELOG.md).
+**Architecture reference** is in [README.md](README.md).
+**Audit findings** are in [Code_Audit.md](Code_Audit.md).
+
+**Ko-fi:** **https://ko-fi.com/violentsadastic**. Thank you for reading.
+
+---
+
+*End of USAGE.md · last modified 2026-10-05.*
